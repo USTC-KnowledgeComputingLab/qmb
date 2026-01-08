@@ -2,7 +2,6 @@
 This file provides an interface to work with FCIDUMP files.
 """
 
-import typing
 import logging
 import dataclasses
 import re
@@ -34,7 +33,6 @@ class ModelConfig:
 def read_fcidump(
     file_name: pathlib.Path, *, headonly: bool = False
 ) -> tuple[tuple[int, int, int], dict[tuple[tuple[int, int], ...], complex]]:
-    # pylint: disable=too-many-locals
     with (
         gzip.open(file_name, "rt", encoding="utf-8")
         if file_name.name.endswith(".gz")
@@ -118,7 +116,6 @@ class Model(ModelProto[ModelConfig]):
     config_t = ModelConfig
 
     def __init__(self, args: ModelConfig) -> None:
-        # pylint: disable=too-many-locals
         model_path = args.model_path
         model_name = model_path.name
         ref_energy = args.ref_energy

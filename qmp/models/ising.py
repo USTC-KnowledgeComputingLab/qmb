@@ -18,8 +18,6 @@ class ModelConfig:
     The configuration for the Ising-like model.
     """
 
-    # pylint: disable=too-many-instance-attributes
-
     # The width of the ising lattice
     m: int
     # The height of the ising lattice
@@ -71,9 +69,6 @@ class Model(ModelProto[ModelConfig]):
 
     @classmethod
     def _prepare_hamiltonian(cls, args: ModelConfig) -> dict[tuple[tuple[int, int], ...], complex]:
-        # pylint: disable=too-many-branches
-        # pylint: disable=too-many-nested-blocks
-
         def _index(i: int, j: int) -> int:
             return i + j * args.m
 
@@ -105,7 +100,7 @@ class Model(ModelProto[ModelConfig]):
                 v: complex
                 v1: complex
                 v2: complex
-                if True:  # pylint: disable=using-constant-test
+                if True:
                     if args.x != 0:
                         for k, v in _x(i, j):
                             hamiltonian[k] += v * args.x
@@ -174,23 +169,19 @@ class Model(ModelProto[ModelConfig]):
 
         self.m: int = args.m
         self.n: int = args.n
-        logging.info("Constructing Ising model with dimensions: width = %d, height = %d", self.m, self.n)
-        logging.info("Element-wise coefficients: X = %.10f, Y = %.10f, Z = %.10f", args.x, args.y, args.z)
-        logging.info("Horizontal bond coefficients: X = %.10f, Y = %.10f, Z = %.10f", args.xh, args.yh, args.zh)
-        logging.info("Vertical bond coefficients: X = %.10f, Y = %.10f, Z = %.10f", args.xv, args.yv, args.zv)
-        logging.info("Diagonal bond coefficients: X = %.10f, Y = %.10f, Z = %.10f", args.xd, args.yd, args.zd)
-        logging.info("Anti-diagonal bond coefficients: X = %.10f, Y = %.10f, Z = %.10f", args.xa, args.ya, args.za)
+        logging.info(
+            "Constructing Ising model: width = %d, height = %d, ref_energy = %.4f", self.m, self.n, args.ref_energy
+        )
 
-        logging.info("Initializing Hamiltonian for the lattice")
+        logging.info("Initializing Ising Hamiltonian for the lattice")
         hamiltonian_dict: dict[tuple[tuple[int, int], ...], complex] = self._prepare_hamiltonian(args)
-        logging.info("Hamiltonian initialization complete")
+        logging.info("Hamiltonian dictionary initialized successfully.")
 
         self.ref_energy: float = args.ref_energy
-        logging.info("The ref energy is set to %.10f", self.ref_energy)
 
         logging.info("Converting the Hamiltonian to internal Hamiltonian representation")
         self.hamiltonian: Hamiltonian = Hamiltonian(hamiltonian_dict, kind="bose2")
-        logging.info("Internal Hamiltonian representation for model has been successfully created")
+        logging.info("Internal Hamiltonian representation successfully created.")
 
     def apply_within(self, configs_i: torch.Tensor, psi_i: torch.Tensor, configs_j: torch.Tensor) -> torch.Tensor:
         return self.hamiltonian.apply_within(configs_i, psi_i, configs_j)
