@@ -124,13 +124,11 @@ class Model(ModelProto[ModelConfig]):
         model_name = model_path.name
         ref_energy = args.ref_energy
 
-        model_file_name = model_path
-
-        checksum = hashlib.sha256(model_file_name.read_bytes()).hexdigest() + "v5"
+        checksum = hashlib.sha256(model_path.read_bytes()).hexdigest() + "v5"
         cache_file = platformdirs.user_cache_path("qmp", "kclab") / checksum
         if cache_file.exists():
-            logging.info("Loading FCIDUMP metadata from file: %s", model_file_name)
-            (n_orbit, n_electron, n_spin), _ = read_fcidump(model_file_name, headonly=True)
+            logging.info("Loading FCIDUMP metadata from file: %s", model_path)
+            (n_orbit, n_electron, n_spin), _ = read_fcidump(model_path, headonly=True)
             logging.info("FCIDUMP metadata successfully loaded")
 
             logging.info("Loading FCIDUMP Hamiltonian from cache")
@@ -141,8 +139,8 @@ class Model(ModelProto[ModelConfig]):
             self.hamiltonian = Hamiltonian(openfermion_hamiltonian_data, kind="fermi")
             logging.info("Internal Hamiltonian representation successfully recovered")
         else:
-            logging.info("Loading FCIDUMP Hamiltonian from file: %s", model_file_name)
-            (n_orbit, n_electron, n_spin), openfermion_hamiltonian_dict = read_fcidump(model_file_name)
+            logging.info("Loading FCIDUMP Hamiltonian from file: %s", model_path)
+            (n_orbit, n_electron, n_spin), openfermion_hamiltonian_dict = read_fcidump(model_path)
             logging.info("FCIDUMP Hamiltonian successfully loaded")
 
             logging.info("Converting OpenFermion Hamiltonian to internal Hamiltonian representation")
@@ -168,7 +166,7 @@ class Model(ModelProto[ModelConfig]):
         if ref_energy is not None:
             self.ref_energy = ref_energy
         else:
-            fcidump_ref_energy_file = model_file_name.parent / "FCIDUMP.yaml"
+            fcidump_ref_energy_file = model_path.parent / "FCIDUMP.yaml"
             if fcidump_ref_energy_file.exists():
                 with open(fcidump_ref_energy_file, "rt", encoding="utf-8") as file:
                     fcidump_ref_energy_data = yaml.safe_load(file)
