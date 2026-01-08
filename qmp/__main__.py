@@ -24,7 +24,7 @@ from .algorithms import pert as _  # type: ignore[no-redef]
 from .algorithms import pretrain as _  # type: ignore[no-redef]
 
 
-@hydra.main(version_base=None, config_path=str(pathlib.Path().resolve()), config_name="config")
+@hydra.main(version_base=None, config_path=".", config_name="config")
 def main(config: omegaconf.DictConfig) -> None:
     """
     The main function for the command line application.
