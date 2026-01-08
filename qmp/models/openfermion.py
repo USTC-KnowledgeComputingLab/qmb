@@ -38,12 +38,8 @@ class Model(ModelProto[ModelConfig]):
         logging.info("Input arguments successfully parsed")
         logging.info("Model path: %s", args.model_path)
 
-        model_path = args.model_path
-        assert model_path is not None
-
-        model_file_name = model_path
-        logging.info("Loading OpenFermion model from file: %s", model_file_name)
-        openfermion_model: openfermion.MolecularData = openfermion.MolecularData(filename=str(model_file_name))  # type: ignore[no-untyped-call]
+        logging.info("Loading OpenFermion model from file: %s", args.model_path)
+        openfermion_model: openfermion.MolecularData = openfermion.MolecularData(filename=str(args.model_path))  # type: ignore[no-untyped-call]
         logging.info("OpenFermion model successfully loaded")
 
         self.n_qubits: int = int(openfermion_model.n_qubits)  # type: ignore[arg-type]
