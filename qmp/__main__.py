@@ -1,34 +1,30 @@
-"""
-This is the main entry point for the command line application.
-"""
+"""Main entry point for the qmp command-line interface."""
 
 # ruff: noqa: F401
 
 import pathlib
+
 import hydra
 import omegaconf
-from .utility.subcommand_dict import subcommand_dict
+
+from .algorithms import (
+    chop_imag,
+    guide,
+    haar,
+    pert,
+    precompile,
+    pretrain,
+    vmc,
+)
+from .models import fcidump, free_fermion, hubbard, ising, openfermion
 from .utility.common import CommonConfig
 from .utility.model_dict import model_dict
-from .models import openfermion as _  # type: ignore[no-redef]
-from .models import fcidump as _  # type: ignore[no-redef]
-from .models import hubbard as _  # type: ignore[no-redef]
-from .models import free_fermion as _  # type: ignore[no-redef]
-from .models import ising as _  # type: ignore[no-redef]
-from .algorithms import guide as _  # type: ignore[no-redef]
-from .algorithms import vmc as _  # type: ignore[no-redef]
-from .algorithms import haar as _  # type: ignore[no-redef]
-from .algorithms import precompile as _  # type: ignore[no-redef]
-from .algorithms import chop_imag as _  # type: ignore[no-redef]
-from .algorithms import pert as _  # type: ignore[no-redef]
-from .algorithms import pretrain as _  # type: ignore[no-redef]
+from .utility.subcommand_dict import subcommand_dict
 
 
 @hydra.main(version_base=None, config_path=str(pathlib.Path().resolve()), config_name="config")
 def main(config: omegaconf.DictConfig) -> None:
-    """
-    The main function for the command line application.
-    """
+    """Execute the qmp application based on the provided configuration."""
     action = subcommand_dict[config.action.name]
     common = CommonConfig(
         log_path=pathlib.Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir),
@@ -54,4 +50,4 @@ def main(config: omegaconf.DictConfig) -> None:
 
 
 if __name__ == "__main__":
-    main()  # pylint: disable=no-value-for-parameter
+    main()

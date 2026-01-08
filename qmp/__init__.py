@@ -1,7 +1,8 @@
-"""
-The qmp package provides tools and algorithms to solve problems related to quantum many-body systems.
+"""The qmp package provides tools and algorithms for solving quantum many-body systems.
 
-For more details, check out the README.md file.
+For more details, please refer to the README.md file.
 """
 
-from .version import version, __version__
+from .version import __version__, version
+
+__all__ = ["__version__", "version"]
