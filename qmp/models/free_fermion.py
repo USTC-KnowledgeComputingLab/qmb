@@ -71,8 +71,6 @@ class Model(ModelProto[ModelConfig]):
         self,
         args: ModelConfig,
     ):
-        logging.info("Input arguments successfully parsed")
-
         assert args.electron_number is not None
         self.m: int = args.m
         self.n: int = args.n

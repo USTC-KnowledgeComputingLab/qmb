@@ -35,9 +35,6 @@ class Model(ModelProto[ModelConfig]):
     config_t = ModelConfig
 
     def __init__(self, args: ModelConfig) -> None:
-        logging.info("Input arguments successfully parsed")
-        logging.info("Model path: %s", args.model_path)
-
         logging.info("Loading OpenFermion model from file: %s", args.model_path)
         openfermion_model: openfermion.MolecularData = openfermion.MolecularData(filename=str(args.model_path))  # type: ignore[no-untyped-call]
         logging.info("OpenFermion model successfully loaded")

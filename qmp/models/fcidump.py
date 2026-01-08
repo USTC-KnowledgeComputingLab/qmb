@@ -122,9 +122,6 @@ class Model(ModelProto[ModelConfig]):
 
     def __init__(self, args: ModelConfig) -> None:
         # pylint: disable=too-many-locals
-        logging.info("Input arguments successfully parsed")
-        logging.info("Model name: %s, Model path: %s", args.model_name, args.model_path)
-
         model_name = args.model_name
         model_path = args.model_path
         ref_energy = args.ref_energy
