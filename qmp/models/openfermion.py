@@ -2,7 +2,6 @@
 This file provides an interface to work with openfermion models.
 """
 
-import typing
 import logging
 import dataclasses
 import pathlib
@@ -35,22 +34,27 @@ class Model(ModelProto[ModelConfig]):
 
     def __init__(self, args: ModelConfig) -> None:
         logging.info("Loading OpenFermion model from file: %s", args.model_path)
-        openfermion_model: openfermion.MolecularData = openfermion.MolecularData(filename=str(args.model_path.resolve()))  # type: ignore[no-untyped-call]
-        logging.info("OpenFermion model successfully loaded")
+        openfermion_model: openfermion.MolecularData = openfermion.MolecularData(
+            filename=str(args.model_path.resolve())
+        )  # type: ignore[no-untyped-call]
+        logging.info("OpenFermion model file loaded successfully.")
 
         self.n_qubits: int = int(openfermion_model.n_qubits)  # type: ignore[arg-type]
         self.n_electrons: int = int(openfermion_model.n_electrons)  # type: ignore[arg-type]
-        logging.info("Identified %d qubits and %d electrons", self.n_qubits, self.n_electrons)
-
         self.ref_energy: float = float(openfermion_model.fci_energy)  # type: ignore[arg-type]
-        logging.info("Reference energy for the model is %.10f", self.ref_energy)
+        logging.info(
+            "Identified %d qubits, %d electrons and fci_energy as %.10f",
+            self.n_qubits,
+            self.n_electrons,
+            self.ref_energy,
+        )
 
         logging.info("Converting OpenFermion Hamiltonian to internal Hamiltonian representation")
         self.hamiltonian: Hamiltonian = Hamiltonian(
             openfermion.transforms.get_fermion_operator(openfermion_model.get_molecular_hamiltonian()).terms,  # type: ignore[no-untyped-call]
             kind="fermi",
         )
-        logging.info("Internal Hamiltonian representation has been successfully created")
+        logging.info("Internal Hamiltonian representation successfully created.")
 
     def apply_within(self, configs_i: torch.Tensor, psi_i: torch.Tensor, configs_j: torch.Tensor) -> torch.Tensor:
         return self.hamiltonian.apply_within(configs_i, psi_i, configs_j)
