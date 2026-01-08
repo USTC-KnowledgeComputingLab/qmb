@@ -34,8 +34,8 @@ class ModelConfig:
     ref_energy: float | None = None
 
 
-def _read_fcidump(
-    file_name: pathlib.Path, *, cached: bool = False
+def read_fcidump(
+    file_name: pathlib.Path, *, headonly: bool = False
 ) -> tuple[tuple[int, int, int], dict[tuple[tuple[int, int], ...], complex]]:
     # pylint: disable=too-many-locals
     with (
@@ -59,7 +59,7 @@ def _read_fcidump(
         assert n_orbit is not None
         assert n_electron is not None
         assert n_spin is not None
-        if cached:
+        if headonly:
             return (n_orbit, n_electron, n_spin), {}
         energy_0: float = 0.0
         energy_1: torch.Tensor = torch.zeros([n_orbit, n_orbit], dtype=torch.float64)
@@ -137,7 +137,7 @@ class Model(ModelProto[ModelConfig]):
         cache_file = platformdirs.user_cache_path("qmp", "kclab") / checksum
         if cache_file.exists():
             logging.info("Loading FCIDUMP metadata '%s' from file: %s", model_name, model_file_name)
-            (n_orbit, n_electron, n_spin), _ = _read_fcidump(model_file_name, cached=True)
+            (n_orbit, n_electron, n_spin), _ = read_fcidump(model_file_name, headonly=True)
             logging.info("FCIDUMP metadata '%s' successfully loaded", model_name)
 
             logging.info("Loading FCIDUMP Hamiltonian '%s' from cache", model_name)
@@ -149,7 +149,7 @@ class Model(ModelProto[ModelConfig]):
             logging.info("Internal Hamiltonian representation for model '%s' successfully recovered", model_name)
         else:
             logging.info("Loading FCIDUMP Hamiltonian '%s' from file: %s", model_name, model_file_name)
-            (n_orbit, n_electron, n_spin), openfermion_hamiltonian_dict = _read_fcidump(model_file_name)
+            (n_orbit, n_electron, n_spin), openfermion_hamiltonian_dict = read_fcidump(model_file_name)
             logging.info("FCIDUMP Hamiltonian '%s' successfully loaded", model_name)
 
             logging.info("Converting OpenFermion Hamiltonian to internal Hamiltonian representation")
