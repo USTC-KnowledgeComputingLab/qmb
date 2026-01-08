@@ -8,7 +8,6 @@ import collections
 import torch
 from ..networks.mlp import WaveFunctionNormal as MlpWaveFunction
 from ..networks.attention import WaveFunctionNormal as AttentionWaveFunction
-from ..networks.peps import PepsFunction
 from ..hamiltonian import Hamiltonian
 from ..utility.model_dict import model_dict, ModelProto, NetworkProto, NetworkConfigProto
 
@@ -312,39 +311,3 @@ class AttentionConfig:
 
 
 Model.network_dict["attention"] = AttentionConfig
-
-
-@dataclasses.dataclass
-class PepsConfig:
-    """
-    The configuration of the PEPS network.
-    """
-
-    # The bond dimension of the network
-    D: int = 4  # pylint: disable=invalid-name
-    # The cut-off bond dimension of the network
-    Dc: int = 16  # pylint: disable=invalid-name
-
-    def create(self, model: Model) -> NetworkProto:
-        """
-        Create a PEPS network for the model.
-        """
-        logging.info(
-            "PEPS network configuration: bond dimension: %d, cut-off bond dimension: %d",
-            self.D,
-            self.Dc,
-        )
-
-        network = PepsFunction(
-            L1=model.m,
-            L2=model.n,
-            d=2,
-            D=self.D,
-            Dc=self.Dc,
-            use_complex=True,
-        )
-
-        return network
-
-
-Model.network_dict["peps"] = PepsConfig
