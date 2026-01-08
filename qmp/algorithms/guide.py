@@ -20,8 +20,6 @@ class GuideConfig:
     The guided VMC optimization for solving quantum many-body problems.
     """
 
-    # pylint: disable=too-many-instance-attributes
-
     common: CommonConfig
 
     # The sampling count
@@ -53,8 +51,7 @@ class GuideConfig:
         """
         The main function for the guided VMC optimization.
         """
-        # pylint: disable=too-many-locals
-        # pylint: disable=too-many-statements
+
         assert config is not None
 
         model, network, data = self.common.main(model_param=model_param, network_param=network_param)

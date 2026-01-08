@@ -18,8 +18,6 @@ class VmcConfig:
     The VMC optimization for solving quantum many-body problems.
     """
 
-    # pylint: disable=too-many-instance-attributes
-
     common: CommonConfig
 
     # The sampling count
@@ -43,8 +41,6 @@ class VmcConfig:
         """
         The main function for the VMC optimization.
         """
-        # pylint: disable=too-many-statements
-        # pylint: disable=too-many-locals
 
         model, network, data = self.common.main(model_param=model_param, network_param=network_param)
 

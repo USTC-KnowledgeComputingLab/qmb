@@ -41,7 +41,7 @@ def _migrate_optimizer(optimizer: torch.optim.Optimizer) -> None:
     _migrate_param(optimizer.state, device)
 
 
-def initialize_optimizer(  # pylint: disable=too-many-arguments
+def initialize_optimizer(
     params: typing.Iterable[torch.Tensor],
     *,
     use_lbfgs: bool,

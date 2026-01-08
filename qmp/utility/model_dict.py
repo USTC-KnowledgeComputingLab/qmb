@@ -85,8 +85,6 @@ class NetworkConfigProto(typing.Protocol[Model_contra]):
     The NetworkConfigProto protocol defines the interface that all network configs must implement.
     """
 
-    # pylint: disable=too-few-public-methods
-
     def create(self, model: Model_contra) -> NetworkProto:
         """
         Create the network from the given config for the given model.
