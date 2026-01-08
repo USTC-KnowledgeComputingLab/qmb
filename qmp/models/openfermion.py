@@ -13,8 +13,6 @@ from ..networks.attention import WaveFunctionElectronUpDown as AttentionWaveFunc
 from ..hamiltonian import Hamiltonian
 from ..utility.model_dict import model_dict, ModelProto, NetworkProto, NetworkConfigProto
 
-QMP_MODEL_PATH = "QMP_MODEL_PATH"
-
 
 @dataclasses.dataclass
 class ModelConfig:
@@ -24,10 +22,6 @@ class ModelConfig:
 
     # The path of models
     model_path: pathlib.Path
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.model_path, pathlib.Path):
-            self.model_path = pathlib.Path(self.model_path)
 
 
 class Model(ModelProto[ModelConfig]):
@@ -40,15 +34,8 @@ class Model(ModelProto[ModelConfig]):
     config_t = ModelConfig
 
     def __init__(self, args: ModelConfig) -> None:
-        logging.info("Input arguments successfully parsed")
-        logging.info("Model path: %s", args.model_path)
-
-        model_path = args.model_path
-        assert model_path is not None
-
-        model_file_name = model_path
-        logging.info("Loading OpenFermion model from file: %s", model_file_name)
-        openfermion_model: openfermion.MolecularData = openfermion.MolecularData(filename=str(model_file_name))  # type: ignore[no-untyped-call]
+        logging.info("Loading OpenFermion model from file: %s", args.model_path)
+        openfermion_model: openfermion.MolecularData = openfermion.MolecularData(filename=str(args.model_path.resolve()))  # type: ignore[no-untyped-call]
         logging.info("OpenFermion model successfully loaded")
 
         self.n_qubits: int = int(openfermion_model.n_qubits)  # type: ignore[arg-type]

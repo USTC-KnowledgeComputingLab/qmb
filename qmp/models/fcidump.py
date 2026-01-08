@@ -2,7 +2,6 @@
 This file provides an interface to work with FCIDUMP files.
 """
 
-import os
 import typing
 import logging
 import dataclasses
@@ -19,8 +18,6 @@ from ..networks.attention import WaveFunctionElectronUpDown as AttentionWaveFunc
 from ..hamiltonian import Hamiltonian
 from ..utility.model_dict import model_dict, ModelProto, NetworkProto, NetworkConfigProto
 
-QMP_MODEL_PATH = "QMP_MODEL_PATH"
-
 
 @dataclasses.dataclass
 class ModelConfig:
@@ -28,25 +25,14 @@ class ModelConfig:
     The configuration of the model.
     """
 
-    # The openfermion model name
-    model_name: str
-    # The path of models folder
-    model_path: pathlib.Path | None = None
+    # The path of the model file
+    model_path: pathlib.Path
     # The ref energy of the model, leave empty to read from FCIDUMP.yaml
     ref_energy: float | None = None
 
-    def __post_init__(self) -> None:
-        if self.model_path is not None:
-            self.model_path = pathlib.Path(self.model_path)
-        else:
-            if QMP_MODEL_PATH in os.environ:
-                self.model_path = pathlib.Path(os.environ[QMP_MODEL_PATH])
-            else:
-                self.model_path = pathlib.Path("models")
 
-
-def _read_fcidump(
-    file_name: pathlib.Path, *, cached: bool = False
+def read_fcidump(
+    file_name: pathlib.Path, *, headonly: bool = False
 ) -> tuple[tuple[int, int, int], dict[tuple[tuple[int, int], ...], complex]]:
     # pylint: disable=too-many-locals
     with (
@@ -70,7 +56,7 @@ def _read_fcidump(
         assert n_orbit is not None
         assert n_electron is not None
         assert n_spin is not None
-        if cached:
+        if headonly:
             return (n_orbit, n_electron, n_spin), {}
         energy_0: float = 0.0
         energy_1: torch.Tensor = torch.zeros([n_orbit, n_orbit], dtype=torch.float64)
@@ -133,68 +119,60 @@ class Model(ModelProto[ModelConfig]):
 
     def __init__(self, args: ModelConfig) -> None:
         # pylint: disable=too-many-locals
-        logging.info("Input arguments successfully parsed")
-        logging.info("Model name: %s, Model path: %s", args.model_name, args.model_path)
-
-        model_name = args.model_name
         model_path = args.model_path
+        model_name = model_path.name
         ref_energy = args.ref_energy
-        assert model_path is not None
 
-        model_file_name = model_path / f"{model_name}.FCIDUMP.gz"
-        model_file_name = model_file_name if model_file_name.exists() else model_path / model_name
-
-        checksum = hashlib.sha256(model_file_name.read_bytes()).hexdigest() + "v5"
+        checksum = hashlib.sha256(model_path.read_bytes()).hexdigest() + "v5"
         cache_file = platformdirs.user_cache_path("qmp", "kclab") / checksum
         if cache_file.exists():
-            logging.info("Loading FCIDUMP metadata '%s' from file: %s", model_name, model_file_name)
-            (n_orbit, n_electron, n_spin), _ = _read_fcidump(model_file_name, cached=True)
-            logging.info("FCIDUMP metadata '%s' successfully loaded", model_name)
+            logging.info("Loading FCIDUMP metadata from file: %s", model_path)
+            (n_orbit, n_electron, n_spin), _ = read_fcidump(model_path, headonly=True)
+            logging.info("FCIDUMP metadata successfully loaded")
 
-            logging.info("Loading FCIDUMP Hamiltonian '%s' from cache", model_name)
+            logging.info("Loading FCIDUMP Hamiltonian from cache")
             openfermion_hamiltonian_data = torch.load(cache_file, map_location="cpu", weights_only=True)
-            logging.info("FCIDUMP Hamiltonian '%s' successfully loaded", model_name)
+            logging.info("FCIDUMP Hamiltonian successfully loaded")
 
-            logging.info("Recovering internal Hamiltonian representation for model '%s'", model_name)
+            logging.info("Converting OpenFermion Hamiltonian to internal Hamiltonian representation")
             self.hamiltonian = Hamiltonian(openfermion_hamiltonian_data, kind="fermi")
-            logging.info("Internal Hamiltonian representation for model '%s' successfully recovered", model_name)
+            logging.info("Internal Hamiltonian representation has been successfully created")
         else:
-            logging.info("Loading FCIDUMP Hamiltonian '%s' from file: %s", model_name, model_file_name)
-            (n_orbit, n_electron, n_spin), openfermion_hamiltonian_dict = _read_fcidump(model_file_name)
-            logging.info("FCIDUMP Hamiltonian '%s' successfully loaded", model_name)
+            logging.info("Loading FCIDUMP Hamiltonian from file: %s", model_path)
+            (n_orbit, n_electron, n_spin), openfermion_hamiltonian_dict = read_fcidump(model_path)
+            logging.info("FCIDUMP Hamiltonian successfully loaded")
 
             logging.info("Converting OpenFermion Hamiltonian to internal Hamiltonian representation")
             self.hamiltonian = Hamiltonian(openfermion_hamiltonian_dict, kind="fermi")
-            logging.info("Internal Hamiltonian representation for model '%s' has been successfully created", model_name)
+            logging.info("Internal Hamiltonian representation has been successfully created")
 
-            logging.info("Caching OpenFermion Hamiltonian for model '%s'", model_name)
+            logging.info("Caching OpenFermion Hamiltonian")
             cache_file.parent.mkdir(parents=True, exist_ok=True)
             torch.save((self.hamiltonian.site, self.hamiltonian.kind, self.hamiltonian.coef), cache_file)
-            logging.info("OpenFermion Hamiltonian for model '%s' successfully cached", model_name)
+            logging.info("OpenFermion Hamiltonian successfully cached")
 
         self.n_qubit: int = n_orbit * 2
         self.n_electron: int = n_electron
         self.n_spin: int = n_spin
         logging.info(
-            "Identified %d qubits, %d electrons and %d spin for model '%s'",
+            "Identified %d qubits, %d electrons and %d spin",
             self.n_qubit,
             self.n_electron,
             self.n_spin,
-            model_name,
         )
 
         self.ref_energy: float
         if ref_energy is not None:
             self.ref_energy = ref_energy
         else:
-            fcidump_ref_energy_file = model_file_name.parent / "FCIDUMP.yaml"
+            fcidump_ref_energy_file = model_path.parent / "FCIDUMP.yaml"
             if fcidump_ref_energy_file.exists():
                 with open(fcidump_ref_energy_file, "rt", encoding="utf-8") as file:
                     fcidump_ref_energy_data = yaml.safe_load(file)
-                self.ref_energy = fcidump_ref_energy_data.get(pathlib.Path(model_name).name, 0)
+                self.ref_energy = fcidump_ref_energy_data.get(model_name, 0)
             else:
                 self.ref_energy = 0
-        logging.info("Reference energy for model '%s' is %.10f", model_name, self.ref_energy)
+        logging.info("Reference energy for model is %.10f", self.ref_energy)
 
     def apply_within(self, configs_i: torch.Tensor, psi_i: torch.Tensor, configs_j: torch.Tensor) -> torch.Tensor:
         return self.hamiltonian.apply_within(configs_i, psi_i, configs_j)

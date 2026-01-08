@@ -171,8 +171,6 @@ class Model(ModelProto[ModelConfig]):
         return hamiltonian
 
     def __init__(self, args: ModelConfig) -> None:
-        logging.info("Input arguments successfully parsed")
-
         self.m: int = args.m
         self.n: int = args.n
         logging.info("Constructing Ising model with dimensions: width = %d, height = %d", self.m, self.n)
