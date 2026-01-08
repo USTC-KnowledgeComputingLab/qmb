@@ -10,6 +10,9 @@ namespace qmp_hamiltonian_cuda {
 
 constexpr torch::DeviceType device = torch::kCUDA;
 
+// 构型数据采用位包装（8 sites/byte）。
+// 在二进制紧凑排列下，字节流的字典序比较等价于量子态的逻辑比较。
+// 该比较器直接用于 thrust::sort 和后续的二分查找。
 template<typename T, std::int64_t size>
 struct array_less {
     __device__ bool operator()(const std::array<T, size>& lhs, const std::array<T, size>& rhs) const {
@@ -25,6 +28,8 @@ struct array_less {
     }
 };
 
+// 计算构型的概率权重（振幅模长平方）。
+// 在 Top-K 筛选中，以此作为判断“重要构型”的依据。
 template<typename T, std::int64_t size>
 struct array_square_greater {
     __device__ T square(const std::array<T, size>& value) const {
@@ -39,6 +44,7 @@ struct array_square_greater {
     }
 };
 
+// 位操作：通过字节偏移 (index/8) 和位掩码 (index%8) 定位格点。
 __device__ bool get_bit(std::uint8_t* data, std::uint8_t index) {
     return ((*data) >> index) & 1;
 }
@@ -51,6 +57,10 @@ __device__ void set_bit(std::uint8_t* data, std::uint8_t index, bool value) {
     }
 }
 
+// 核心逻辑：将哈密顿量的一个项 (term) 作用于当前构型。
+// 1. In-place 修改：直接在 current_configs 内存上进行位翻转，避免拷贝。
+// 2. 物理校验：检查费米子产生/湮灭算符的合法性（Pauli 不相容原理）。
+// 3. 符号计算：通过统计目标格点前的粒子总数（Parity），处理费米子交换符号 (-1)^N。
 template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
 __device__ std::pair<bool, bool> hamiltonian_apply_kernel(
     std::array<std::uint8_t, n_qubytes>& current_configs,
@@ -82,6 +92,9 @@ __device__ std::pair<bool, bool> hamiltonian_apply_kernel(
     return std::make_pair(success, parity);
 }
 
+// 投影计算：计算 H|ψ⟩ 在给定基组 (result_configs) 上的投影。
+// 由于 result_configs 预先已排序，线程内直接使用二分查找定位索引。
+// 并发冲突：多个源态可能跃迁到同一个目标态，因此必须使用 atomicAdd 累加振幅。
 template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
 __device__ void apply_within_kernel(
     std::int64_t term_index,
@@ -132,6 +145,7 @@ __device__ void apply_within_kernel(
     atomicAdd(&result_psi[mid][1], sign * (coef[term_index][0] * psi[batch_index][1] + coef[term_index][1] * psi[batch_index][0]));
 }
 
+// 调度层：将 2D CUDA Grid 映射到 (哈密顿量项, 态向量Batch) 两个物理维度。
 template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
 __global__ void apply_within_kernel_interface(
     std::int64_t term_number,
@@ -166,6 +180,7 @@ __global__ void apply_within_kernel_interface(
     }
 }
 
+// 接口层：处理张量检查、内存分配，并对基组进行排序以供 Kernel 内二分查找使用。
 template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
 auto apply_within_interface(
     const torch::Tensor& configs,
@@ -271,6 +286,7 @@ auto apply_within_interface(
     return result_psi;
 }
 
+// 自旋锁实现：使用 atomicCAS 获取锁，配合 nanosleep 进行退避(backoff)。
 __device__ void _mutex_lock(int* mutex) {
     // I don't know why we need to wait for these periods of time, but the examples in the CUDA documentation are written this way.
     // https://docs.nvidia.com/cuda/cuda-c-programming-guide/#nanosleep-example
@@ -285,9 +301,10 @@ __device__ void _mutex_lock(int* mutex) {
 
 __device__ void mutex_lock(int* mutex) {
     _mutex_lock(mutex);
-    __threadfence();
+    __threadfence(); // 确保临界区内存访问不被重排到锁获取之前
 }
 
+// 耦合锁 (Hand-over-hand locking) 辅助函数：同时锁定两把锁，用于堆节点交换。
 __device__ void mutex_lock(int* mutex1, int* mutex2) {
     _mutex_lock(mutex1);
     _mutex_lock(mutex2);
@@ -299,7 +316,7 @@ __device__ void _mutex_unlock(int* mutex) {
 }
 
 __device__ void mutex_unlock(int* mutex) {
-    __threadfence();
+    __threadfence(); // 确保临界区内存写入在释放锁之前完成
     _mutex_unlock(mutex);
 }
 
@@ -309,6 +326,11 @@ __device__ void mutex_unlock(int* mutex1, int* mutex2) {
     _mutex_unlock(mutex2);
 }
 
+// 并发 Top-K 筛选堆 (add_into_heap)。
+//
+// 为了在 GPU 上从海量并发数据中筛选前 K 个最大值，采用细粒度锁 (Fine-grained Locking) 策略：
+// 不锁定整个堆，而是给每个节点分配独立的 Mutex。
+// 当新元素在堆中下沉 (sift-down) 时，采用“蟹行”锁定：锁定当前节点 -> 锁定子节点 -> 比较/交换 -> 释放当前节点。
 template<typename T, typename Less = thrust::less<T>>
 __device__ void add_into_heap(T* heap, int* mutex, std::int64_t heap_size, const T& value) {
     auto less = Less();
@@ -424,6 +446,7 @@ __device__ void add_into_heap(T* heap, int* mutex, std::int64_t heap_size, const
     }
 }
 
+// 比较器：仅比较前 8 字节（double 权重），用于堆的排序和淘汰。
 template<typename T, std::int64_t size>
 struct array_first_double_less {
     __device__ double first_double(const std::array<T, size + sizeof(double) / sizeof(T)>& value) const {
@@ -440,6 +463,10 @@ struct array_first_double_less {
     }
 };
 
+// 子空间扩展逻辑：
+// 1. 产生新构型。
+// 2. 二分查找排除掉已存在的构型 (exclude_configs)。
+// 3. 计算权重，尝试插入并发堆 (add_into_heap)。
 template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
 __device__ void find_relative_kernel(
     std::int64_t term_index,
@@ -507,6 +534,7 @@ __device__ void find_relative_kernel(
     );
 }
 
+// find_relative 全局 Kernel 入口。
 template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
 __global__ void find_relative_kernel_interface(
     std::int64_t term_number,
@@ -545,6 +573,8 @@ __global__ void find_relative_kernel_interface(
     }
 }
 
+// find_relative 接口函数。
+// 负责堆锁显存分配、执行计算流水线并对最终选出的构型进行排序去重。
 template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
 auto find_relative_interface(
     const torch::Tensor& configs,
@@ -671,6 +701,8 @@ auto find_relative_interface(
     return unique_nonzero_result_config;
 }
 
+// diagonal_term_kernel 计算哈密顿量的对角贡献。
+// 当哈密顿量项作用后的构型保持不变时，累加其复数系数。
 template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
 __device__ void diagonal_term_kernel(
     std::int64_t term_index,
@@ -695,6 +727,7 @@ __device__ void diagonal_term_kernel(
         return;
     }
     auto less = array_less<std::uint8_t, n_qubytes>();
+    // 如果作用后的构型不等于原始构型，说明它是非对角项
     if (less(current_configs, configs[batch_index]) || less(configs[batch_index], current_configs)) {
         return; // The term does not apply to the current configuration
     }
@@ -703,6 +736,7 @@ __device__ void diagonal_term_kernel(
     atomicAdd(&result_psi[batch_index][1], sign * coef[term_index][1]);
 }
 
+// diagonal_term 全局 Kernel 入口。
 template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
 __global__ void diagonal_term_kernel_interface(
     std::int64_t term_number,
@@ -731,6 +765,7 @@ __global__ void diagonal_term_kernel_interface(
     }
 }
 
+// diagonal_term 接口函数。
 template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
 auto diagonal_term_interface(const torch::Tensor& configs, const torch::Tensor& site, const torch::Tensor& kind, const torch::Tensor& coef)
     -> torch::Tensor {
