@@ -55,7 +55,6 @@ template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t partic
 __device__ std::pair<bool, bool> hamiltonian_apply_kernel(
     std::array<std::uint8_t, n_qubytes>& current_configs,
     std::int64_t term_index,
-    std::int64_t batch_index,
     const std::array<std::int16_t, max_op_number>* site, // term_number
     const std::array<std::uint8_t, max_op_number>* kind // term_number
 ) {
@@ -102,7 +101,6 @@ __device__ void apply_within_kernel(
     auto [success, parity] = hamiltonian_apply_kernel<max_op_number, n_qubytes, particle_cut>(
         /*current_configs=*/current_configs,
         /*term_index=*/term_index,
-        /*batch_index=*/batch_index,
         /*site=*/site,
         /*kind=*/kind
     );
@@ -463,7 +461,6 @@ __device__ void find_relative_kernel(
     auto [success, parity] = hamiltonian_apply_kernel<max_op_number, n_qubytes, particle_cut>(
         /*current_configs=*/current_configs,
         /*term_index=*/term_index,
-        /*batch_index=*/batch_index,
         /*site=*/site,
         /*kind=*/kind
     );
@@ -690,7 +687,6 @@ __device__ void diagonal_term_kernel(
     auto [success, parity] = hamiltonian_apply_kernel<max_op_number, n_qubytes, particle_cut>(
         /*current_configs=*/current_configs,
         /*term_index=*/term_index,
-        /*batch_index=*/batch_index,
         /*site=*/site,
         /*kind=*/kind
     );
