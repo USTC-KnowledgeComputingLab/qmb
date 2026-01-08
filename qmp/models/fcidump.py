@@ -33,9 +33,6 @@ class ModelConfig:
     # The ref energy of the model, leave empty to read from FCIDUMP.yaml
     ref_energy: float | None = None
 
-    def __post_init__(self) -> None:
-        self.model_path = pathlib.Path(self.model_path)
-
 
 def _read_fcidump(
     file_name: pathlib.Path, *, cached: bool = False

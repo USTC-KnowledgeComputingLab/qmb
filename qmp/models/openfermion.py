@@ -24,10 +24,6 @@ class ModelConfig:
     # The path of models
     model_path: pathlib.Path
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.model_path, pathlib.Path):
-            self.model_path = pathlib.Path(self.model_path)
-
 
 class Model(ModelProto[ModelConfig]):
     """
