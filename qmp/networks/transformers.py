@@ -77,7 +77,7 @@ class SelfAttention(torch.nn.Module):
             total_sites = k.shape[-2]
             mask = torch.ones(sites, total_sites, dtype=torch.bool, device=x.device).tril(diagonal=total_sites - sites)
         # call scaled dot product attention
-        attn = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask)  # pylint: disable=not-callable
+        attn = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask)
         # attn: batch, heads_num, site, heads_dim
         out = attn.transpose(1, 2).reshape([batch_size, sites, embedding_dim])
         # out: batch, site, embedding_dim
@@ -89,9 +89,7 @@ class DecoderUnit(torch.nn.Module):
     A decoder unit within the transformer architecture, integrating both self-attention and feed-forward layers.
     """
 
-    # pylint: disable=too-many-instance-attributes
-
-    def __init__(  # pylint: disable=too-many-arguments
+    def __init__(
         self,
         *,
         embedding_dim: int,
@@ -139,7 +137,7 @@ class DecoderUnit(torch.nn.Module):
 
         # The following segmental code implements the DeepSeekMoE architecture.
         y = x
-        for i, expert in enumerate(self.feed_forward_shared):
+        for i, expert in enumerate(self.feed_forward_shared):  # noqa: F841
             y = y + expert(x)
         # similarity: batch * site * routed
         similarity = torch.nn.functional.softmax(x @ self.centroid.t(), dim=-1)
@@ -164,7 +162,7 @@ class Transformers(torch.nn.Module):
     A transformer model consisting of multiple decoder units.
     """
 
-    def __init__(  # pylint: disable=too-many-arguments
+    def __init__(
         self,
         *,
         embedding_dim: int,
@@ -265,12 +263,10 @@ class Embedding(torch.nn.Module):
 class WaveFunctionElectronUpDown(torch.nn.Module):
     """
     The wave function for the transformers network.
-    This module maintains the conservation of particle number of spin-up and spin-down electrons.
+    This module maintains the conservation of particle number for spin-up and spin-down electrons.
     """
 
-    # pylint: disable=too-many-instance-attributes
-
-    def __init__(  # pylint: disable=too-many-arguments
+    def __init__(
         self,
         *,
         double_sites: int,  # Number of qubits, where each pair of qubits represents a site
@@ -293,7 +289,7 @@ class WaveFunctionElectronUpDown(torch.nn.Module):
         self.double_sites: int = double_sites
         self.sites: int = double_sites // 2
         assert physical_dim == 2
-        assert is_complex == True  # pylint: disable=singleton-comparison
+        assert is_complex == True  # noqa: E712
         self.spin_up: int = spin_up
         self.spin_down: int = spin_down
         self.embedding_dim: int = embedding_dim
@@ -346,19 +342,17 @@ class WaveFunctionElectronUpDown(torch.nn.Module):
     @torch.jit.export
     def _mask(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Determined whether we could append spin up or spin down after uncompleted configurations.
+        Determine whether we could append spin up or spin down after incomplete configurations.
         """
-        # pylint: disable=too-many-locals
-
         # x: batch_size * current_site * 2
-        # x represents the uncompleted configurations
+        # x represents the incomplete configurations
         current_site = x.shape[1]
         # number: batch_size * 2
-        # number denotes the total electron count for each uncompleted configuration
+        # number denotes the total electron count for each incomplete configuration
         number = x.sum(dim=1)
 
         # up/down_electron/hole: batch_size
-        # These variables store the count of electrons and holes for each uncompleted configuration
+        # These variables store the count of electrons and holes for each incomplete configuration
         up_electron = number[:, 0]
         down_electron = number[:, 1]
         up_hole = current_site - up_electron
@@ -390,7 +384,7 @@ class WaveFunctionElectronUpDown(torch.nn.Module):
     @torch.jit.export
     def _normalize_amplitude(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Normalize the log amplitude of uncompleted configurations.
+        Normalize the log amplitude of incomplete configurations.
         """
         # x : ... * 2 * 2
         # param :  ...
@@ -455,7 +449,7 @@ class WaveFunctionElectronUpDown(torch.nn.Module):
         ).exp()
 
     @torch.jit.export
-    def _blocked_forward_for_generate_unique(  # pylint: disable=too-many-arguments
+    def _blocked_forward_for_generate_unique(
         self,
         *,
         x: torch.Tensor,
@@ -464,7 +458,6 @@ class WaveFunctionElectronUpDown(torch.nn.Module):
         device: torch.device,
         i: int,
     ) -> tuple[torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]]]:
-        # pylint: disable=too-many-locals
         local_batch_size: int = x.size(0)
         local_batch_size_block = local_batch_size // block_num
         remainder = local_batch_size % block_num
@@ -507,12 +500,8 @@ class WaveFunctionElectronUpDown(torch.nn.Module):
     def generate_unique(self, batch_size: int, block_num: int = 1) -> tuple[torch.Tensor, torch.Tensor, None, None]:
         """
         Generate configurations uniquely.
-        see https://arxiv.org/pdf/2408.07625.
+        See https://arxiv.org/pdf/2408.07625.
         """
-        # pylint: disable=too-many-locals
-        # pylint: disable=invalid-name
-        # pylint: disable=too-many-statements
-
         device: torch.device = self.dummy_param.device
         dtype: torch.dtype = self.dummy_param.dtype
 
@@ -552,11 +541,11 @@ class WaveFunctionElectronUpDown(torch.nn.Module):
             normalized_delta_amplitude: torch.Tensor = self._normalize_amplitude(delta_amplitude)
 
             # The delta unperturbed prob for all batch and 4 adds
-            l: torch.Tensor = (2 * normalized_delta_amplitude).view([local_batch_size, 4])
+            l: torch.Tensor = (2 * normalized_delta_amplitude).view([local_batch_size, 4])  # noqa: E741
             # and add to get the current unperturbed prob
-            l = unperturbed_probability.view([local_batch_size, 1]) + l
+            l = unperturbed_probability.view([local_batch_size, 1]) + l  # noqa: E741
             # Get perturbed prob by adding GUMBEL(0)
-            L: torch.Tensor = l - (-torch.rand_like(l).log()).log()
+            L: torch.Tensor = l - (-torch.rand_like(l).log()).log()  # noqa: E741
             # Get max perturbed prob
             Z: torch.Tensor = L.max(dim=-1).values.view([local_batch_size, 1])
             # Evaluate the conditioned prob
@@ -601,7 +590,7 @@ class WaveFunctionElectronUpDown(torch.nn.Module):
             perturbed_probability = perturbed_probability[selected]
             cache_indices = cache_indices[selected]
 
-            # If prob = 0, filter it forcely
+            # If prob = 0, filter it forcibly
             selected = perturbed_probability.isfinite()
             x = x[selected]
             unperturbed_probability = unperturbed_probability[selected]
@@ -644,13 +633,11 @@ class WaveFunctionNormal(torch.nn.Module):
     This module does not maintain any conservation.
     """
 
-    # pylint: disable=too-many-instance-attributes
-
-    def __init__(  # pylint: disable=too-many-arguments
+    def __init__(
         self,
         *,
         sites: int,  # Number of qubits
-        physical_dim: int,  # Dimension of the physical space,
+        physical_dim: int,  # Dimension of the physical space
         is_complex: bool,  # Indicates whether the wave function is complex-valued, which is always true
         embedding_dim: int,  # Dimension of the embedding space used in the transformer layers
         heads_num: int,  # Number of attention heads in the transformer's self-attention mechanism
@@ -665,7 +652,7 @@ class WaveFunctionNormal(torch.nn.Module):
         super().__init__()
         self.sites: int = sites
         self.physical_dim: int = physical_dim
-        assert is_complex == True  # pylint: disable=singleton-comparison
+        assert is_complex == True  # noqa: E712
         self.embedding_dim: int = embedding_dim
         self.heads_num: int = heads_num
         self.feed_forward_dim: int = feed_forward_dim
@@ -716,7 +703,7 @@ class WaveFunctionNormal(torch.nn.Module):
     @torch.jit.export
     def _normalize_amplitude(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Normalize the log amplitude of uncompleted configurations.
+        Normalize the log amplitude of incomplete configurations.
         """
         # x : ... * physical_dim
         # param :  ...
@@ -776,7 +763,7 @@ class WaveFunctionNormal(torch.nn.Module):
         ).exp()
 
     @torch.jit.export
-    def _blocked_forward_for_generate_unique(  # pylint: disable=too-many-arguments
+    def _blocked_forward_for_generate_unique(
         self,
         *,
         x: torch.Tensor,
@@ -785,7 +772,6 @@ class WaveFunctionNormal(torch.nn.Module):
         device: torch.device,
         i: int,
     ) -> tuple[torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]]]:
-        # pylint: disable=too-many-locals
         local_batch_size: int = x.size(0)
         local_batch_size_block = local_batch_size // block_num
         remainder = local_batch_size % block_num
@@ -827,12 +813,8 @@ class WaveFunctionNormal(torch.nn.Module):
     def generate_unique(self, batch_size: int, block_num: int = 1) -> tuple[torch.Tensor, torch.Tensor, None, None]:
         """
         Generate configurations uniquely.
-        see https://arxiv.org/pdf/2408.07625.
+        See https://arxiv.org/pdf/2408.07625.
         """
-        # pylint: disable=too-many-locals
-        # pylint: disable=invalid-name
-        # pylint: disable=too-many-statements
-
         device: torch.device = self.dummy_param.device
         dtype: torch.dtype = self.dummy_param.dtype
 
@@ -868,11 +850,11 @@ class WaveFunctionNormal(torch.nn.Module):
             normalized_delta_amplitude: torch.Tensor = self._normalize_amplitude(delta_amplitude)
 
             # The delta unperturbed prob for all batch and all new possible states
-            l: torch.Tensor = (2 * normalized_delta_amplitude).view([local_batch_size, self.physical_dim])
+            l: torch.Tensor = (2 * normalized_delta_amplitude).view([local_batch_size, self.physical_dim])  # noqa: E741
             # and add to get the current unperturbed prob
-            l = unperturbed_probability.view([local_batch_size, 1]) + l
+            l = unperturbed_probability.view([local_batch_size, 1]) + l  # noqa: E741
             # Get perturbed prob by adding GUMBEL(0)
-            L: torch.Tensor = l - (-torch.rand_like(l).log()).log()
+            L: torch.Tensor = l - (-torch.rand_like(l).log()).log()  # noqa: E741
             # Get max perturbed prob
             Z: torch.Tensor = L.max(dim=-1).values.view([local_batch_size, 1])
             # Evaluate the conditioned prob
@@ -909,7 +891,7 @@ class WaveFunctionNormal(torch.nn.Module):
             perturbed_probability = perturbed_probability[selected]
             cache_indices = cache_indices[selected]
 
-            # If prob = 0, filter it forcely
+            # If prob = 0, filter it forcibly
             selected = perturbed_probability.isfinite()
             x = x[selected]
             unperturbed_probability = unperturbed_probability[selected]

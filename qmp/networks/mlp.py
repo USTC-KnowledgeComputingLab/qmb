@@ -29,7 +29,7 @@ def select_linear_layer(dim_in: int, dim_out: int) -> torch.nn.Module:
     """
     Selects between a fake linear layer and a standard one to avoid initialization warnings when dim_in is zero.
     """
-    if dim_in == 0:  # pylint: disable=no-else-return
+    if dim_in == 0:
         return FakeLinear(dim_in, dim_out)
     else:
         return torch.nn.Linear(dim_in, dim_out)
@@ -61,12 +61,10 @@ class MLP(torch.nn.Module):
 class WaveFunctionElectronUpDown(torch.nn.Module):
     """
     The wave function for the MLP network.
-    This module maintains the conservation of particle number of spin-up and spin-down electrons.
+    This module maintains the conservation of particle number for spin-up and spin-down electrons.
     """
 
-    # pylint: disable=too-many-instance-attributes
-
-    def __init__(  # pylint: disable=too-many-arguments
+    def __init__(
         self,
         *,
         double_sites: int,  # Number of qubits, where each pair of qubits represents a site in the MLP model
@@ -83,15 +81,15 @@ class WaveFunctionElectronUpDown(torch.nn.Module):
         self.double_sites: int = double_sites
         self.sites: int = double_sites // 2
         assert physical_dim == 2
-        assert is_complex == True  # pylint: disable=singleton-comparison
+        assert is_complex == True  # noqa: E712
         self.spin_up: int = spin_up
         self.spin_down: int = spin_down
         self.hidden_size: tuple[int, ...] = hidden_size
 
         # Amplitude and Phase Networks for Each Site
-        # The amplitude network accept qubits from previous sites and outputs a vector of dimension 4,
+        # The amplitude network accepts qubits from previous sites and outputs a vector of dimension 4,
         # representing the configuration of two qubits on the current site.
-        # And the phase network accept qubits from all sites and outputs the phase,
+        # And the phase network accepts qubits from all sites and outputs the phase.
         self.amplitude: torch.nn.ModuleList = torch.nn.ModuleList(
             [MLP(i * 2, 4, self.hidden_size) for i in range(self.sites)]
         )
@@ -123,19 +121,17 @@ class WaveFunctionElectronUpDown(torch.nn.Module):
     @torch.jit.export
     def _mask(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Determined whether we could append spin up or spin down after uncompleted configurations.
+        Determine whether we could append spin up or spin down after incomplete configurations.
         """
-        # pylint: disable=too-many-locals
-
         # x: batch_size * current_site * 2
-        # x represents the uncompleted configurations
+        # x represents the incomplete configurations
         current_site = x.shape[1]
         # number: batch_size * 2
-        # number denotes the total electron count for each uncompleted configuration
+        # number denotes the total electron count for each incomplete configuration
         number = x.sum(dim=1)
 
         # up/down_electron/hole: batch_size
-        # These variables store the count of electrons and holes for each uncompleted configuration
+        # These variables store the count of electrons and holes for each incomplete configuration
         up_electron = number[:, 0]
         down_electron = number[:, 1]
         up_hole = current_site - up_electron
@@ -167,7 +163,7 @@ class WaveFunctionElectronUpDown(torch.nn.Module):
     @torch.jit.export
     def _normalize_amplitude(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Normalize the log amplitude of uncompleted configurations.
+        Normalize the log amplitude of incomplete configurations.
         """
         # x: batch_size * 2 * 2
         # param: batch_size
@@ -221,12 +217,8 @@ class WaveFunctionElectronUpDown(torch.nn.Module):
     def generate_unique(self, batch_size: int, block_num: int = 1) -> tuple[torch.Tensor, torch.Tensor, None, None]:
         """
         Generate configurations uniquely.
-        see https://arxiv.org/pdf/2408.07625.
+        See https://arxiv.org/pdf/2408.07625.
         """
-        # pylint: disable=too-many-locals
-        # pylint: disable=invalid-name
-        # pylint: disable=too-many-statements
-
         device: torch.device = self.dummy_param.device
         dtype: torch.dtype = self.dummy_param.dtype
 
@@ -266,11 +258,11 @@ class WaveFunctionElectronUpDown(torch.nn.Module):
             normalized_delta_amplitude: torch.Tensor = self._normalize_amplitude(delta_amplitude)
 
             # The delta unperturbed prob for all batch and 4 adds
-            l: torch.Tensor = (2 * normalized_delta_amplitude).view([local_batch_size, 4])
+            l: torch.Tensor = (2 * normalized_delta_amplitude).view([local_batch_size, 4])  # noqa: E741
             # and add to get the current unperturbed prob
-            l = unperturbed_probability.view([local_batch_size, 1]) + l
+            l = unperturbed_probability.view([local_batch_size, 1]) + l  # noqa: E741
             # Get perturbed prob by adding GUMBEL(0)
-            L: torch.Tensor = l - (-torch.rand_like(l).log()).log()
+            L: torch.Tensor = l - (-torch.rand_like(l).log()).log()  # noqa: E741
             # Get max perturbed prob
             Z: torch.Tensor = L.max(dim=-1).values.view([local_batch_size, 1])
             # Evaluate the conditioned prob
@@ -305,7 +297,7 @@ class WaveFunctionElectronUpDown(torch.nn.Module):
             unperturbed_probability = unperturbed_probability[selected]
             perturbed_probability = perturbed_probability[selected]
 
-            # If prob = 0, filter it forcely
+            # If prob = 0, filter it forcibly
             selected = perturbed_probability.isfinite()
             x = x[selected]
             unperturbed_probability = unperturbed_probability[selected]
@@ -345,7 +337,7 @@ class WaveFunctionNormal(torch.nn.Module):
     This module does not maintain any conservation.
     """
 
-    def __init__(  # pylint: disable=too-many-arguments
+    def __init__(
         self,
         *,
         sites: int,  # Number of qubits
@@ -358,12 +350,12 @@ class WaveFunctionNormal(torch.nn.Module):
         super().__init__()
         self.sites: int = sites
         assert physical_dim == 2
-        assert is_complex == True  # pylint: disable=singleton-comparison
+        assert is_complex == True  # noqa: E712
         self.hidden_size: tuple[int, ...] = hidden_size
 
         # Amplitude and Phase Networks for Each Site
         # The amplitude network takes in qubits from previous sites and outputs a vector of dimension 2, representing the configuration of the qubit at the current site.
-        # And the phase network accept qubits from all sites and outputs the phase,
+        # And the phase network accepts qubits from all sites and outputs the phase.
         self.amplitude: torch.nn.ModuleList = torch.nn.ModuleList(
             [MLP(i, 2, self.hidden_size) for i in range(self.sites)]
         )
@@ -395,7 +387,7 @@ class WaveFunctionNormal(torch.nn.Module):
     @torch.jit.export
     def _normalize_amplitude(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Normalize the log amplitude of uncompleted configurations.
+        Normalize the log amplitude of incomplete configurations.
         """
         # x: batch_size * 2
         # param:  batch_size
@@ -445,12 +437,8 @@ class WaveFunctionNormal(torch.nn.Module):
     def generate_unique(self, batch_size: int, block_num: int = 1) -> tuple[torch.Tensor, torch.Tensor, None, None]:
         """
         Generate configurations uniquely.
-        see https://arxiv.org/pdf/2408.07625.
+        See https://arxiv.org/pdf/2408.07625.
         """
-        # pylint: disable=too-many-locals
-        # pylint: disable=invalid-name
-        # pylint: disable=too-many-statements
-
         device: torch.device = self.dummy_param.device
         dtype: torch.dtype = self.dummy_param.dtype
 
@@ -487,11 +475,11 @@ class WaveFunctionNormal(torch.nn.Module):
             normalized_delta_amplitude: torch.Tensor = self._normalize_amplitude(delta_amplitude)
 
             # The delta unperturbed prob for all batch and 2 adds
-            l: torch.Tensor = (2 * normalized_delta_amplitude).view([local_batch_size, 2])
+            l: torch.Tensor = (2 * normalized_delta_amplitude).view([local_batch_size, 2])  # noqa: E741
             # and add to get the current unperturbed prob
-            l = unperturbed_probability.view([local_batch_size, 1]) + l
+            l = unperturbed_probability.view([local_batch_size, 1]) + l  # noqa: E741
             # Get perturbed prob by adding GUMBEL(0)
-            L: torch.Tensor = l - (-torch.rand_like(l).log()).log()
+            L: torch.Tensor = l - (-torch.rand_like(l).log()).log()  # noqa: E741
             # Get max perturbed prob
             Z: torch.Tensor = L.max(dim=-1).values.view([local_batch_size, 1])
             # Evaluate the conditioned prob
@@ -520,7 +508,7 @@ class WaveFunctionNormal(torch.nn.Module):
             unperturbed_probability = unperturbed_probability[selected]
             perturbed_probability = perturbed_probability[selected]
 
-            # If prob = 0, filter it forcely
+            # If prob = 0, filter it forcibly
             selected = perturbed_probability.isfinite()
             x = x[selected]
             unperturbed_probability = unperturbed_probability[selected]
