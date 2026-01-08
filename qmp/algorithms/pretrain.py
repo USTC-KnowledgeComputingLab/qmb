@@ -11,6 +11,7 @@ from ..utility.common import CommonConfig
 from ..utility.optimizer import initialize_optimizer
 from ..utility.subcommand_dict import subcommand_dict
 
+
 @dataclasses.dataclass
 class PretrainConfig:
     """
@@ -50,6 +51,7 @@ class PretrainConfig:
         loss_func: typing.Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = getattr(losses, self.loss_name)
 
         while True:
+
             def closure():
                 optimizer.zero_grad()
                 prediction = network(config)
@@ -58,7 +60,7 @@ class PretrainConfig:
                 return loss
 
             loss = optimizer.step(closure)
-            prediction = network(config)
+            prediction = network(config)  # noqa: F841
             logging.info("Step %d: Loss = %.6f", data["pretrain"]["global"], loss.item())
 
             logging.info("Saving model checkpoint")
@@ -69,5 +71,6 @@ class PretrainConfig:
             logging.info("Checkpoint successfully saved")
 
             logging.info("Current optimization cycle completed")
+
 
 subcommand_dict["pretrain"] = PretrainConfig

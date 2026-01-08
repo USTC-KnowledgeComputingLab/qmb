@@ -28,8 +28,6 @@ class ChopImagConfig:
         The main function for the subspace chopping.
         """
 
-        # pylint: disable=too-many-locals
-
         model, _, data = self.common.main(model_param=model_param, network_param=network_param)
 
         logging.info(
