@@ -20,6 +20,18 @@ def _scaled_angle(scale: torch.Tensor, min_magnitude: float) -> torch.Tensor:
     return 1 / (1 + min_magnitude / scale)
 
 
+# 损失函数目录:
+# hybrid: 混合损失策略，专门处理小幅度波函数。
+# log: 基于对数差的损失函数。
+# sum_reweighted_log: 基于对数差并按幅度之和重加权的损失函数。
+# sum_filtered_log: 基于对数差并按幅度之和过滤的损失函数。
+# sum_filtered_scaled_log: 基于缩放对数差并按幅度之和过滤的损失函数。
+# sum_reweighted_angle_log: 仅对角度部分按幅度之和重加权的对数损失函数。
+# sum_filtered_angle_log: 仅对角度部分按幅度之和过滤的对数损失函数。
+# sum_filtered_angle_scaled_log: 仅对角度部分按幅度之和过滤的缩放对数损失函数。
+# direct: 直接计算波函数差异的损失函数。
+
+
 @torch.jit.script
 def hybrid(s: torch.Tensor, t: torch.Tensor, min_magnitude: float = 1e-12) -> torch.Tensor:
     """
