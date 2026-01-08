@@ -7,7 +7,7 @@ import dataclasses
 import collections
 import torch
 from ..networks.mlp import WaveFunctionNormal as MlpWaveFunction
-from ..networks.attention import WaveFunctionNormal as AttentionWaveFunction
+from ..networks.transformers import WaveFunctionNormal as TransformersWaveFunction
 from ..hamiltonian import Hamiltonian
 from ..utility.model_dict import model_dict, ModelProto, NetworkProto, NetworkConfigProto
 
@@ -170,6 +170,8 @@ class Model(ModelProto[ModelConfig]):
         return hamiltonian
 
     def __init__(self, args: ModelConfig) -> None:
+        logging.info("Input arguments successfully parsed")
+
         self.m: int = args.m
         self.n: int = args.n
         logging.info("Constructing Ising model with dimensions: width = %d, height = %d", self.m, self.n)
@@ -249,9 +251,9 @@ Model.network_dict["mlp"] = MlpConfig
 
 
 @dataclasses.dataclass
-class AttentionConfig:
+class TransformersConfig:
     """
-    The configuration of the attention network.
+    The configuration of the transformers network.
     """
 
     # Embedding dimension
@@ -271,10 +273,10 @@ class AttentionConfig:
 
     def create(self, model: Model) -> NetworkProto:
         """
-        Create an attention network for the model.
+        Create a transformers network for the model.
         """
         logging.info(
-            "Attention network configuration: "
+            "Transformers network configuration: "
             "embedding dimension: %d, "
             "number of heads: %d, "
             "feed-forward dimension: %d, "
@@ -291,7 +293,7 @@ class AttentionConfig:
             self.depth,
         )
 
-        network = AttentionWaveFunction(
+        network = TransformersWaveFunction(
             sites=model.m * model.n,
             physical_dim=2,
             is_complex=True,
@@ -308,4 +310,4 @@ class AttentionConfig:
         return network
 
 
-Model.network_dict["attention"] = AttentionConfig
+Model.network_dict["transformers"] = TransformersConfig

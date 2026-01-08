@@ -9,7 +9,7 @@ import pathlib
 import torch
 import openfermion
 from ..networks.mlp import WaveFunctionElectronUpDown as MlpWaveFunction
-from ..networks.attention import WaveFunctionElectronUpDown as AttentionWaveFunction
+from ..networks.transformers import WaveFunctionElectronUpDown as TransformersWaveFunction
 from ..hamiltonian import Hamiltonian
 from ..utility.model_dict import model_dict, ModelProto, NetworkProto, NetworkConfigProto
 
@@ -124,9 +124,9 @@ Model.network_dict["mlp"] = MlpConfig
 
 
 @dataclasses.dataclass
-class AttentionConfig:
+class TransformersConfig:
     """
-    The configuration of the attention network.
+    The configuration of the transformers network.
     """
 
     # Embedding dimension
@@ -146,10 +146,10 @@ class AttentionConfig:
 
     def create(self, model: Model) -> NetworkProto:
         """
-        Create an attention network for the model.
+        Create a transformers network for the model.
         """
         logging.info(
-            "Attention network configuration: "
+            "Transformers network configuration: "
             "embedding dimension: %d, "
             "number of heads: %d, "
             "feed-forward dimension: %d, "
@@ -166,7 +166,7 @@ class AttentionConfig:
             self.depth,
         )
 
-        network = AttentionWaveFunction(
+        network = TransformersWaveFunction(
             double_sites=model.n_qubits,
             physical_dim=2,
             is_complex=True,
@@ -185,4 +185,4 @@ class AttentionConfig:
         return network
 
 
-Model.network_dict["attention"] = AttentionConfig
+Model.network_dict["transformers"] = TransformersConfig
