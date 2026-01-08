@@ -135,9 +135,9 @@ class Model(ModelProto[ModelConfig]):
             openfermion_hamiltonian_data = torch.load(cache_file, map_location="cpu", weights_only=True)
             logging.info("FCIDUMP Hamiltonian successfully loaded")
 
-            logging.info("Recovering internal Hamiltonian representation for model")
+            logging.info("Converting OpenFermion Hamiltonian to internal Hamiltonian representation")
             self.hamiltonian = Hamiltonian(openfermion_hamiltonian_data, kind="fermi")
-            logging.info("Internal Hamiltonian representation successfully recovered")
+            logging.info("Internal Hamiltonian representation has been successfully created")
         else:
             logging.info("Loading FCIDUMP Hamiltonian from file: %s", model_path)
             (n_orbit, n_electron, n_spin), openfermion_hamiltonian_dict = read_fcidump(model_path)
