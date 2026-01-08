@@ -2,7 +2,6 @@
 This file provides an interface to work with FCIDUMP files.
 """
 
-import os
 import typing
 import logging
 import dataclasses
@@ -20,8 +19,6 @@ from ..networks.crossmlp import WaveFunction as CrossMlpWaveFunction
 from ..hamiltonian import Hamiltonian
 from ..utility.model_dict import model_dict, ModelProto, NetworkProto, NetworkConfigProto
 
-QMP_MODEL_PATH = "QMP_MODEL_PATH"
-
 
 @dataclasses.dataclass
 class ModelConfig:
@@ -32,18 +29,12 @@ class ModelConfig:
     # The openfermion model name
     model_name: str
     # The path of models folder
-    model_path: pathlib.Path | None = None
+    model_path: pathlib.Path
     # The ref energy of the model, leave empty to read from FCIDUMP.yaml
     ref_energy: float | None = None
 
     def __post_init__(self) -> None:
-        if self.model_path is not None:
-            self.model_path = pathlib.Path(self.model_path)
-        else:
-            if QMP_MODEL_PATH in os.environ:
-                self.model_path = pathlib.Path(os.environ[QMP_MODEL_PATH])
-            else:
-                self.model_path = pathlib.Path("models")
+        self.model_path = pathlib.Path(self.model_path)
 
 
 def _read_fcidump(

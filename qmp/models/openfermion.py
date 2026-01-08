@@ -14,8 +14,6 @@ from ..networks.crossmlp import WaveFunction as CrossMlpWaveFunction
 from ..hamiltonian import Hamiltonian
 from ..utility.model_dict import model_dict, ModelProto, NetworkProto, NetworkConfigProto
 
-QMP_MODEL_PATH = "QMP_MODEL_PATH"
-
 
 @dataclasses.dataclass
 class ModelConfig:
