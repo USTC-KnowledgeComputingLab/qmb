@@ -21,7 +21,6 @@ def _scaled_angle(scale: torch.Tensor, min_magnitude: float) -> torch.Tensor:
 
 
 # 损失函数目录:
-# hybrid: 混合损失策略，专门处理小幅度波函数。
 # log: 基于对数差的损失函数。
 # sum_reweighted_log: 基于对数差并按幅度之和重加权的损失函数。
 # sum_filtered_log: 基于对数差并按幅度之和过滤的损失函数。
@@ -30,44 +29,6 @@ def _scaled_angle(scale: torch.Tensor, min_magnitude: float) -> torch.Tensor:
 # sum_filtered_angle_log: 仅对角度部分按幅度之和过滤的对数损失函数。
 # sum_filtered_angle_scaled_log: 仅对角度部分按幅度之和过滤的缩放对数损失函数。
 # direct: 直接计算波函数差异的损失函数。
-
-
-@torch.jit.script
-def hybrid(s: torch.Tensor, t: torch.Tensor, min_magnitude: float = 1e-12) -> torch.Tensor:
-    """
-    Compute the loss using a hybrid strategy that specifically accounts for the small magnitudes of the wave function.
-    """
-    # In typical data scales, taking the difference of the log of s and t as the loss is appropriate.
-    # However, issues arise when s or t is particularly small.
-    # The log function amplifies the loss near small values and diminishes the loss near large values.
-    # This is generally reasonable, as we expect the same level of effort for changes like 0.1 to 0.01 and 1 to 0.1.
-    # But when the absolute value is extremely small, such as wanting 1e-20 to become 1e-30, we have little motivation to optimize this.
-    # Therefore, we need to reduce the gradient of the mapping function (currently log) near small values.
-    # We decide to make it linear near small values because we do not want to optimize it further.
-    # Even if the number of Hamiltonian terms reaches 1e8, the accumulated error of 1e-12 terms would only be 1e-4, less than chemical precision.
-    # On the other hand, changes in the angle near small values are also meaningless.
-    # However, for sufficiently large values, we want them to be optimized uniformly.
-    # For example, we want the effort for changes from -1 to +1 to be similar to that from -0.1 to +0.1.
-    # Therefore, the angle difference should be multiplied by a factor that is constant at 1 near large values but linearly converges to 0 near small values.
-
-    s_abs = torch.sqrt(s.real**2 + s.imag**2)
-    t_abs = torch.sqrt(t.real**2 + t.imag**2)
-
-    s_angle = torch.atan2(s.imag, s.real)
-    t_angle = torch.atan2(t.imag, t.real)
-
-    s_magnitude = _scaled_abs(s_abs, min_magnitude)
-    t_magnitude = _scaled_abs(t_abs, min_magnitude)
-
-    error_real = (s_magnitude - t_magnitude) / (2 * torch.pi)
-    error_imag = (s_angle - t_angle) / (2 * torch.pi)
-    error_imag = error_imag - error_imag.round()
-
-    scale = torch.where(s_abs > t_abs, s_abs, t_abs)
-    error_imag = error_imag * _scaled_angle(scale, min_magnitude)
-
-    loss = error_real**2 + error_imag**2
-    return loss.mean()
 
 
 @torch.jit.script
