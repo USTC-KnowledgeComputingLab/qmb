@@ -3,39 +3,36 @@
 
 namespace qmp_hamiltonian {
 
-// The `prepare` function is responsible for parsing a raw Python dictionary representing Hamiltonian terms
-// and transforming it into a structured tuple of tensors. This tuple is then stored on the Python side
-// and utilized in subsequent calls to the PyTorch operators for further processing.
+// `prepare` 函数负责解析代表哈密顿量项的原始 Python 字典，
+// 并将其转换为结构化的张量元组。该元组随后存储在 Python 端，
+// 并用于后续对 PyTorch 算子的调用中。
 //
-// The function takes a Python dictionary `hamiltonian` as input, where each key-value pair represents a term
-// in the Hamiltonian. The key is a tuple of tuples, where each inner tuple contains two elements:
-// - The first element is an integer representing the site index of the operator.
-// - The second element is an integer representing the type of operator (0 for annihilation, 1 for creation).
-// The value is either a float or a complex number representing the coefficient of the term.
+// 该函数接收一个 Python 字典 `hamiltonian` 作为输入，其中每个键值对代表哈密顿量中的一项。
+// 键是一个由元组组成的元组，其中每个内部元组包含两个元素：
+// - 第一个元素是一个整数，代表算符的格点索引（site index）。
+// - 第二个元素是一个整数，代表算符的类型（0 为湮灭算符，1 为产生算符）。
+// 值是浮点实数或浮点复数，代表该项的系数。
 //
-// The function processes the dictionary and constructs three tensors:
-// - `site`: An int16 tensor of shape [term_number, max_op_number], representing the site indices of the operators for
-//   each term.
-// - `kind`: An uint8 tensor of shape [term_number, max_op_number], representing the type of operator for each term.
-//   The value are encoded as follows:
-//   - 0: Annihilation operator
-//   - 1: Creation operator
-//   - 2: Empty (identity operator)
-// - `coef`: A float64 tensor of shape [term_number, 2], representing the coefficients of each term, with two elements
-//   for real and imaginary parts.
+// 该函数处理字典并构建三个张量：
+// - `site`: 一个形状为 [term_number, max_op_number] 的 int16 张量，代表每项中算符的格点索引。
+// - `kind`: 一个形状为 [term_number, max_op_number] 的 uint8 张量，代表每项中算符的类型。
+//   值编码如下：
+//   - 0: 湮灭算符
+//   - 1: 产生算符
+//   - 2: 空（单位算符）
+// - `coef`: 一个形状为 [term_number, 2] 的 float64 张量，代表每项的系数，包含实部和虚部两个元素。
 //
-// The `max_op_number` template argument specifies the maximum number of operators per term, typically set to 4 for
-// 2-body interactions.
+// `max_op_number` 模板参数指定了每项中算符的最大数量，对于二体相互作用通常设置为 4。
 template<std::int64_t max_op_number>
 auto prepare(py::dict hamiltonian) {
     std::int64_t term_number = hamiltonian.size();
 
     auto site = torch::empty({term_number, max_op_number}, torch::TensorOptions().dtype(torch::kInt16).device(torch::kCPU));
-    // No need to initialize
+    // 无需初始化
     auto kind = torch::full({term_number, max_op_number}, 2, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
-    // Initialize to 2 for identity as default
+    // 默认初始化为 2（单位算符）
     auto coef = torch::empty({term_number, 2}, torch::TensorOptions().dtype(torch::kFloat64).device(torch::kCPU));
-    // No need to initialize
+    // 无需初始化
 
     auto site_accessor = site.accessor<std::int16_t, 2>();
     auto kind_accessor = kind.accessor<std::uint8_t, 2>();
@@ -71,7 +68,7 @@ auto prepare(py::dict hamiltonian) {
 #endif
 
 #if N_QUBYTES == 0
-// Expose the `prepare` function to Python.
+// 将 `prepare` 函数暴露给 Python。
 PYBIND11_MODULE(qmp_hamiltonian, m) {
     m.def("prepare", prepare</*max_op_number=*/4>, py::arg("hamiltonian"));
 }
@@ -82,7 +79,8 @@ PYBIND11_MODULE(qmp_hamiltonian, m) {
 #define QMP_LIBRARY(x, y) QMP_LIBRARY_HELPER(x, y)
 TORCH_LIBRARY_FRAGMENT(QMP_LIBRARY(N_QUBYTES, PARTICLE_CUT), m) {
     m.def("apply_within(Tensor configs_i, Tensor psi_i, Tensor configs_j, Tensor site, Tensor kind, Tensor coef) -> Tensor");
-    m.def("find_relative(Tensor configs_i, Tensor psi_i, int count_selected, Tensor site, Tensor kind, Tensor coef, Tensor configs_exclude) -> Tensor"
+    m.def(
+        "find_relative(Tensor configs_i, Tensor psi_i, int count_selected, Tensor site, Tensor kind, Tensor coef, Tensor configs_exclude) -> Tensor"
     );
     m.def("diagonal_term(Tensor configs, Tensor site, Tensor kind, Tensor coef) -> Tensor");
 }
