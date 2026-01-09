@@ -1,10 +1,10 @@
 """Main entry point for the qmp command-line interface."""
 
 import pathlib
+import torch
+import dacite
 import hydra
 import omegaconf
-from hydra.utils import instantiate
-from hydra.core.hydra_config import HydraConfig
 
 from .algorithms import chop_imag, guide, haar, pert, pretrain, vmc  # noqa: F401
 from .models import fcidump, hubbard, ising, openfermion  # noqa: F401
@@ -17,17 +17,18 @@ def main(runtime_config: omegaconf.DictConfig) -> None:
     """Execute the qmp application based on the provided configuration."""
 
     # 1. Setup Runtime Context
-    context = instantiate(
-        runtime_config.common,
-        _target_=RuntimeContext,
-        log_path=pathlib.Path(HydraConfig.get().runtime.output_dir),
+    context = dacite.from_dict(
+        data_class=RuntimeContext,
+        data=omegaconf.OmegaConf.to_container(runtime_config.common, resolve=True),  # type: ignore[arg-type]
+        config=dacite.Config(cast=[pathlib.Path, torch.device, tuple]),
     )
     checkpoint_data = context.setup()
 
     # 2. Instantiate Algorithm
-    run = instantiate(
-        runtime_config.action.params,
-        _target_=subcommand_dict[runtime_config.action.name],
+    run = dacite.from_dict(
+        data_class=subcommand_dict[runtime_config.action.name],
+        data=omegaconf.OmegaConf.to_container(runtime_config.action.params, resolve=True),  # type: ignore[arg-type]
+        config=dacite.Config(cast=[pathlib.Path, torch.device, tuple]),
     )
 
     # 3. Execute Algorithm

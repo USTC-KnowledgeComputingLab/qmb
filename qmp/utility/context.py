@@ -7,9 +7,10 @@ import logging
 import typing
 import pathlib
 import dataclasses
-import omegaconf
 import torch
-from hydra.utils import instantiate
+import dacite
+import omegaconf
+from hydra.core.hydra_config import HydraConfig
 from .model_dict import model_dict, ModelProto, NetworkProto
 from .random_engine import dump_random_engine_state, load_random_engine_state
 from .optimizer import migrate_optimizer
@@ -21,10 +22,6 @@ class RuntimeContext:
     This class defines the common runtime environment (logging, device, random seed, checkpoints).
     """
 
-    # pylint: disable=too-many-instance-attributes
-
-    # The log path
-    log_path: pathlib.Path = pathlib.Path("logs")
     # The log path for parent job job name, it is only used for loading the checkpoint from the parent job, leave empty to use the current job name
     parent_path: pathlib.Path | None = None
     # The manual random seed, leave empty for set seed automatically
@@ -34,20 +31,14 @@ class RuntimeContext:
     # The device to run on
     device: torch.device = torch.device(type="cuda", index=0)
     # The dtype of the network, leave empty to skip modifying the dtype
-    dtype: torch.dtype | None = None
+    dtype: str | torch.dtype | None = None
     # The maximum absolute step for the process, leave empty to loop forever
     max_absolute_step: int | None = None
     # The maximum relative step for the process, leave empty to loop forever
     max_relative_step: int | None = None
 
     def __post_init__(self) -> None:
-        if self.log_path is not None:
-            self.log_path = pathlib.Path(self.log_path)
-        if self.parent_path is not None:
-            self.parent_path = pathlib.Path(self.parent_path)
-        if self.device is not None:
-            self.device = torch.device(self.device)
-        if self.dtype is not None:
+        if isinstance(self.dtype, str):
             match self.dtype:
                 case "bfloat16":
                     self.dtype = torch.bfloat16
@@ -66,7 +57,7 @@ class RuntimeContext:
         """
         Get the folder for storing logs.
         """
-        return self.log_path
+        return pathlib.Path(HydraConfig.get().runtime.output_dir)
 
     def setup(self) -> dict[str, typing.Any]:
         """
@@ -139,7 +130,11 @@ class RuntimeContext:
         model_t = model_dict[model_config.name]
         logging.info("Loading the model: %s", model_config.name)
         # Instantiate the parameters first
-        model_param = instantiate(model_config.params, _target_=model_t.config_t)
+        model_param = dacite.from_dict(
+            data_class=model_t.config_t,
+            data=omegaconf.OmegaConf.to_container(model_config.params, resolve=True),  # type: ignore[arg-type]
+            config=dacite.Config(cast=[pathlib.Path, torch.device, tuple]),
+        )
         # Then create the model
         model: ModelProto = model_t(model_param)
         logging.info("Physical model loaded successfully")
@@ -160,14 +155,15 @@ class RuntimeContext:
             state_dict: Optional state dict to load into the network.
         """
         network_name = network_config.name
-        model_cls = type(model)
-        if not hasattr(model_cls, "network_dict"):
-            raise ValueError(f"Model class {model_cls} does not have 'network_dict'.")
 
-        network_config_t = getattr(model_cls, "network_dict")[network_name]
+        network_config_t = model.network_dict[network_name]
 
         logging.info("Initializing the network: %s", network_name)
-        network_param = instantiate(network_config.params, _target_=network_config_t)
+        network_param = dacite.from_dict(
+            data_class=network_config_t,
+            data=omegaconf.OmegaConf.to_container(network_config.params, resolve=True),  # type: ignore[arg-type]
+            config=dacite.Config(cast=[pathlib.Path, torch.device, tuple]),
+        )
         network: NetworkProto = network_param.create(model)
 
         if state_dict is not None:
@@ -200,7 +196,10 @@ class RuntimeContext:
             state_dict: Optional state dict to load into the optimizer.
         """
         logging.info("Initializing the optimizer")
-        optimizer = instantiate(optimizer_config, params=params)
+
+        optimizer_t = getattr(torch.optim, optimizer_config.name)
+
+        optimizer = optimizer_t(params=params, **optimizer_config.params)  # type: ignore[arg-type]
 
         if state_dict is not None:
             logging.info("Loading state dict of the optimizer")

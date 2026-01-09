@@ -701,60 +701,58 @@ auto find_relative_interface(
     return unique_nonzero_result_config;
 }
 
+constexpr std::int64_t max_uint8_t = 256;
+using largest_atomic_int = unsigned int; // The largest int type that can be atomicAdd/atomicSub
+using smallest_atomic_int = unsigned short int; // The smallest int type that can be atomicCAS
+
 // 256 叉前缀树 (Trie)：用于在 GPU 上进行并行的构型去重和振幅累加。
 // 每一层对应构型的一个字节（uint8），叶子节点存储最终合并后的复数振幅。
 // 这种结构通过路径唯一性天然实现了哈希去重，并允许在插入时直接进行物理干涉（振幅叠加）。
-template<std::int64_t n_qubytes_local>
+template<std::int64_t n_qubytes>
 struct dictionary_tree {
-    using child_t = dictionary_tree<n_qubytes_local - 1>;
-    child_t* children[256];
-    int exist[256]; // 用于 atomicCAS 抢占节点创建权
-    long long nonzero_count; // 子树中有效构型的总数（用于并行收集时的偏移计算）
+    using child_t = dictionary_tree<n_qubytes - 1>;
+    child_t* children[max_uint8_t];
+    smallest_atomic_int exist[max_uint8_t];
+    largest_atomic_int nonzero_count;
 
-    __device__ bool add(const std::uint8_t* begin, double real, double imag) {
+    __device__ bool add(std::uint8_t* begin, double real, double imag) {
         std::uint8_t index = *begin;
         if (children[index] == nullptr) {
-            // 抢占式创建节点：第一个成功的线程负责 malloc
-            if (atomicCAS(&exist[index], 0, 1) == 0) {
-                auto new_child = (child_t*)malloc(sizeof(child_t));
-                if (new_child != nullptr) {
-                    memset(new_child, 0, sizeof(child_t));
-                    __threadfence();
-                    children[index] = new_child;
+            if (atomicCAS(&exist[index], smallest_atomic_int(0), smallest_atomic_int(1))) {
+                while (atomicCAS((largest_atomic_int*)&children[index], largest_atomic_int(0), largest_atomic_int(0)) == 0) {
                 }
             } else {
-                // 其他线程自旋等待指针初始化完成
-                while (reinterpret_cast<volatile child_t**>(children)[index] == nullptr) {
-                    __nanosleep(8);
-                }
+                auto new_child = (child_t*)malloc(sizeof(child_t));
+                assert(new_child != nullptr);
+                memset(new_child, 0, sizeof(child_t));
+                children[index] = new_child;
+                __threadfence();
             }
         }
-
         if (children[index]->add(begin + 1, real, imag)) {
             atomicAdd(&nonzero_count, 1);
             return true;
+        } else {
+            return false;
         }
-        return false;
     }
 
-    // 递归收集结果并进行内存自清理。
-    // 利用子树计数 nonzero_count 确定每个叶子在最终数组中的全局位置。
     template<std::int64_t n_total_qubytes>
     __device__ void collect(std::uint64_t index, std::array<std::uint8_t, n_total_qubytes>* configs, std::array<double, 2>* psi) {
         std::uint64_t size_counter = 0;
-        for (int i = 0; i < 256; ++i) {
+        for (std::int64_t i = 0; i < max_uint8_t; ++i) {
             if (exist[i]) {
-                std::uint64_t sub_count = children[i]->nonzero_count;
-                if (size_counter + sub_count > index) {
-                    configs[index][n_total_qubytes - n_qubytes_local] = i;
-                    children[i]->template collect<n_total_qubytes>(index - size_counter, configs, psi);
-                    // 引用计数递减，最后一个离开该子树的线程负责释放内存
-                    if (atomicAdd(&nonzero_count, -1) == 1) {
+                std::uint64_t new_size_counter = size_counter + children[i]->nonzero_count;
+                if (new_size_counter > index) {
+                    std::uint64_t new_index = index - size_counter;
+                    configs[index][n_total_qubytes - n_qubytes] = i;
+                    children[i]->collect<n_total_qubytes>(new_index, &configs[size_counter], &psi[size_counter]);
+                    if (atomicSub(&children[i]->nonzero_count, 1) == 1) {
                         free(children[i]);
-                    }
+                    };
                     return;
                 }
-                size_counter += sub_count;
+                size_counter = new_size_counter;
             }
         }
     }
@@ -763,26 +761,26 @@ struct dictionary_tree {
 // Trie 递归终点：叶子节点存储合并后的物理振幅。
 template<>
 struct dictionary_tree<1> {
-    double values[256][2];
-    int exist[256];
-    long long nonzero_count;
+    double values[max_uint8_t][2];
+    smallest_atomic_int exist[max_uint8_t];
+    largest_atomic_int nonzero_count;
 
-    __device__ bool add(const std::uint8_t* begin, double real, double imag) {
+    __device__ bool add(std::uint8_t* begin, double real, double imag) {
         std::uint8_t index = *begin;
         atomicAdd(&values[index][0], real);
         atomicAdd(&values[index][1], imag);
-        // 如果是该位置第一次被占据，计数加一并向上传递成功信号
-        if (atomicCAS(&exist[index], 0, 1) == 0) {
+        if (atomicCAS(&exist[index], smallest_atomic_int(0), smallest_atomic_int(1))) {
+            return false;
+        } else {
             atomicAdd(&nonzero_count, 1);
             return true;
         }
-        return false;
     }
 
     template<std::int64_t n_total_qubytes>
     __device__ void collect(std::uint64_t index, std::array<std::uint8_t, n_total_qubytes>* configs, std::array<double, 2>* psi) {
         std::uint64_t size_counter = 0;
-        for (int i = 0; i < 256; ++i) {
+        for (std::int64_t i = 0; i < max_uint8_t; ++i) {
             if (exist[i]) {
                 if (size_counter == index) {
                     configs[index][n_total_qubytes - 1] = i;
@@ -790,7 +788,7 @@ struct dictionary_tree<1> {
                     psi[index][1] = values[i][1];
                     return;
                 }
-                size_counter++;
+                ++size_counter;
             }
         }
     }
