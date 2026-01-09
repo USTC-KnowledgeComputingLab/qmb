@@ -1,17 +1,16 @@
-"""
-This file implements a two-step optimization process for solving quantum many-body problems based on imaginary time.
-"""
+"This file implements a two-step optimization process for solving quantum many-body problems based on imaginary time."
 
 import copy
 import logging
 import typing
 import dataclasses
 import functools
+import omegaconf
 import scipy
 import torch
 import torch.utils.tensorboard
 from ..utility import losses
-from ..utility.common import CommonConfig
+from ..utility.common import RuntimeContext
 from ..utility.subcommand_dict import subcommand_dict
 from ..utility.model_dict import ModelProto
 from ..utility.optimizer import initialize_optimizer, scale_learning_rate
@@ -267,8 +266,6 @@ class HaarConfig:
     The two-step optimization process for solving quantum many-body problems based on imaginary time.
     """
 
-    common: CommonConfig
-
     # The sampling count from neural network
     sampling_count_from_neural_network: int = 1024
     # The sampling count from last iteration
@@ -312,12 +309,19 @@ class HaarConfig:
         if self.krylov_extend_count == -1:
             self.krylov_extend_count = 2048 if self.krylov_single_extend else 64
 
-    def main(self, *, model_param: typing.Any = None, network_param: typing.Any = None) -> None:
+    def main(
+        self,
+        ctx: RuntimeContext,
+        config: omegaconf.DictConfig,
+        checkpoint_data: dict[str, typing.Any],
+    ) -> None:
         """
         The main function of two-step optimization process based on imaginary time.
         """
 
-        model, network, data = self.common.main(model_param=model_param, network_param=network_param)
+        model = ctx.create_model(config.model)
+        network = ctx.create_network(config.network, model, checkpoint_data.get("network"))
+        data = checkpoint_data
 
         logging.info(
             "Arguments Summary: "
@@ -372,9 +376,9 @@ class HaarConfig:
             data["haar"] = {"global": 0, "local": 0, "lanczos": 0, "pool": None}
         else:
             pool_configs, pool_psi = data["haar"]["pool"]
-            data["haar"]["pool"] = (pool_configs.to(device=self.common.device), pool_psi.to(device=self.common.device))
+            data["haar"]["pool"] = (pool_configs.to(device=ctx.device), pool_psi.to(device=ctx.device))
 
-        writer = torch.utils.tensorboard.SummaryWriter(log_dir=self.common.folder())  # type: ignore[no-untyped-call]
+        writer = torch.utils.tensorboard.SummaryWriter(log_dir=ctx.folder())  # type: ignore[no-untyped-call]
 
         while True:
             logging.info("Starting a new optimization cycle")
@@ -547,7 +551,7 @@ class HaarConfig:
             data["haar"]["global"] += 1
             data["network"] = network.state_dict()
             data["optimizer"] = optimizer.state_dict()
-            self.common.save(data, data["haar"]["global"])
+            ctx.save(data, data["haar"]["global"])
             logging.info("Checkpoint successfully saved")
 
             logging.info("Current optimization cycle completed")

@@ -5,9 +5,10 @@ This file implements a variational Monte Carlo method for solving quantum many-b
 import logging
 import typing
 import dataclasses
+import omegaconf
 import torch
 import torch.utils.tensorboard
-from ..utility.common import CommonConfig
+from ..utility.common import RuntimeContext
 from ..utility.subcommand_dict import subcommand_dict
 from ..utility.optimizer import initialize_optimizer
 
@@ -17,8 +18,6 @@ class VmcConfig:
     """
     The VMC optimization for solving quantum many-body problems.
     """
-
-    common: CommonConfig
 
     # The sampling count
     sampling_count: int = 4000
@@ -37,12 +36,20 @@ class VmcConfig:
         if self.learning_rate == -1:
             self.learning_rate = 1 if self.use_lbfgs else 1e-3
 
-    def main(self, *, model_param: typing.Any = None, network_param: typing.Any = None) -> None:
+    def main(
+        self,
+        ctx: RuntimeContext,
+        config: omegaconf.DictConfig,
+        checkpoint_data: dict[str, typing.Any],
+    ) -> None:
         """
         The main function for the VMC optimization.
         """
 
-        model, network, data = self.common.main(model_param=model_param, network_param=network_param)
+        # Create Model and Network
+        model = ctx.create_model(config.model)
+        network = ctx.create_network(config.network, model, checkpoint_data.get("network"))
+        data = checkpoint_data
 
         logging.info(
             "Arguments Summary: "
@@ -70,7 +77,7 @@ class VmcConfig:
         if "vmc" not in data:
             data["vmc"] = {"global": 0, "local": 0}
 
-        writer = torch.utils.tensorboard.SummaryWriter(log_dir=self.common.folder())  # type: ignore[no-untyped-call]
+        writer = torch.utils.tensorboard.SummaryWriter(log_dir=ctx.folder())  # type: ignore[no-untyped-call]
 
         while True:
             logging.info("Starting a new optimization cycle")
@@ -134,7 +141,7 @@ class VmcConfig:
             data["vmc"]["global"] += 1
             data["network"] = network.state_dict()
             data["optimizer"] = optimizer.state_dict()
-            self.common.save(data, data["vmc"]["global"])
+            ctx.save(data, data["vmc"]["global"])
             logging.info("Checkpoint successfully saved")
 
             logging.info("Current optimization cycle completed")

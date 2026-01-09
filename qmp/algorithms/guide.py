@@ -8,10 +8,9 @@ import dataclasses
 import omegaconf
 import torch
 import torch.utils.tensorboard
-from ..utility.common import CommonConfig
+from ..utility.common import RuntimeContext
 from ..utility.subcommand_dict import subcommand_dict
 from ..utility.optimizer import initialize_optimizer
-from ..utility.model_dict import model_dict
 
 
 @dataclasses.dataclass
@@ -19,8 +18,6 @@ class GuideConfig:
     """
     The guided VMC optimization for solving quantum many-body problems.
     """
-
-    common: CommonConfig
 
     # The sampling count
     sampling_count: int = 4000
@@ -43,27 +40,27 @@ class GuideConfig:
 
     def main(
         self,
-        *,
-        model_param: typing.Any = None,
-        network_param: typing.Any = None,
-        config: omegaconf.DictConfig | None = None,
+        ctx: RuntimeContext,
+        config: omegaconf.DictConfig,
+        checkpoint_data: dict[str, typing.Any],
     ) -> None:
         """
         The main function for the guided VMC optimization.
         """
 
-        assert config is not None
+        # Create Model
+        model = ctx.create_model(config.model)
+        
+        # Create Main Network
+        network = ctx.create_network(config.network, model, checkpoint_data.get("network"))
 
-        model, network, data = self.common.main(model_param=model_param, network_param=network_param)
+        # Create Sampling Network
+        # Assuming config.sampling matches the structure needed for create_network
+        # Note: If config.sampling has a different structure than config.network (e.g. nested params),
+        # verify this matches current codebase expectations.
+        sampling = ctx.create_network(config.sampling, model, checkpoint_data.get("sampling"))
 
-        model_t = model_dict[config.model.name]
-        sampling_config_t = model_t.network_dict[config.sampling.name]
-        sampling_param = sampling_config_t(**config.sampling.params)
-        sampling = sampling_param.create(model)
-        if "sampling" in data:
-            sampling.load_state_dict(data["sampling"])
-        sampling = sampling.to(device=self.common.device, dtype=self.common.dtype)
-        sampling = torch.jit.script(sampling)
+        data = checkpoint_data
 
         logging.info(
             "Arguments Summary: "
@@ -99,7 +96,7 @@ class GuideConfig:
         if "guide" not in data:
             data["guide"] = {"global": 0, "local": 0, "dist": 0}
 
-        writer = torch.utils.tensorboard.SummaryWriter(log_dir=self.common.folder())  # type: ignore[no-untyped-call]
+        writer = torch.utils.tensorboard.SummaryWriter(log_dir=ctx.folder())  # type: ignore[no-untyped-call]
 
         while True:
             logging.info("Starting a new optimization cycle")
@@ -225,9 +222,10 @@ class GuideConfig:
             logging.info("Saving model checkpoint")
             data["guide"]["global"] += 1
             data["network"] = network.state_dict()
+            data["sampling"] = sampling.state_dict()
             data["optimizer"] = optimizer_network.state_dict()
             data["optimizer_sampling"] = optimizer_sampling.state_dict()
-            self.common.save(data, data["guide"]["global"])
+            ctx.save(data, data["guide"]["global"])
             logging.info("Checkpoint successfully saved")
 
             logging.info("Current optimization cycle completed")

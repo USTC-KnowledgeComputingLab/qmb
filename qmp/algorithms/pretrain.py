@@ -5,9 +5,10 @@ This file implements a pretraining for quantum many-body problems.
 import typing
 import logging
 import dataclasses
+import omegaconf
 import torch
 from ..utility import losses
-from ..utility.common import CommonConfig
+from ..utility.common import RuntimeContext
 from ..utility.optimizer import initialize_optimizer
 from ..utility.subcommand_dict import subcommand_dict
 
@@ -18,8 +19,6 @@ class PretrainConfig:
     Configuration for pretraining quantum many-body models.
     """
 
-    common: CommonConfig
-
     # Dataset path for pretraining
     dataset_path: str
     # The learning rate for the local optimizer
@@ -27,16 +26,23 @@ class PretrainConfig:
     # The name of the loss function to use
     loss_name: str = "sum_filtered_angle_scaled_log"
 
-    def main(self, *, model_param: typing.Any = None, network_param: typing.Any = None) -> None:
+    def main(
+        self,
+        ctx: RuntimeContext,
+        config: omegaconf.DictConfig,
+        checkpoint_data: dict[str, typing.Any],
+    ) -> None:
         """
         The main function for pretraining.
         """
 
-        model, network, data = self.common.main(model_param=model_param, network_param=network_param)
+        model = ctx.create_model(config.model)
+        network = ctx.create_network(config.network, model, checkpoint_data.get("network"))
+        data = checkpoint_data
 
         dataset = torch.load(self.dataset_path, map_location="cpu", weights_only=True)
-        config = dataset[0].to(device=self.common.device)
-        psi = dataset[1].to(device=self.common.device)
+        config_tensor = dataset[0].to(device=ctx.device)
+        psi = dataset[1].to(device=ctx.device)
 
         optimizer = initialize_optimizer(
             network.parameters(),
@@ -54,20 +60,20 @@ class PretrainConfig:
 
             def closure():
                 optimizer.zero_grad()
-                prediction = network(config)
+                prediction = network(config_tensor)
                 loss = loss_func(psi, prediction)
                 loss.backward()
                 return loss
 
             loss = optimizer.step(closure)
-            prediction = network(config)  # noqa: F841
+            # prediction = network(config_tensor) # Unused?
             logging.info("Step %d: Loss = %.6f", data["pretrain"]["global"], loss.item())
 
             logging.info("Saving model checkpoint")
             data["pretrain"]["global"] += 1
             data["network"] = network.state_dict()
             data["optimizer"] = optimizer.state_dict()
-            self.common.save(data, data["pretrain"]["global"])
+            ctx.save(data, data["pretrain"]["global"])
             logging.info("Checkpoint successfully saved")
 
             logging.info("Current optimization cycle completed")

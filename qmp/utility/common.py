@@ -7,25 +7,18 @@ import logging
 import typing
 import pathlib
 import dataclasses
+import omegaconf
 import torch
+from hydra.utils import instantiate
 from .model_dict import model_dict, ModelProto, NetworkProto
 from .random_engine import dump_random_engine_state, load_random_engine_state
 
 
 @dataclasses.dataclass
-class CommonConfig:
+class RuntimeContext:
     """
-    This class defines the common settings needed to create a model and network.
+    This class defines the common runtime environment (logging, device, random seed, checkpoints).
     """
-
-    # The model name
-    model_name: str
-    # The network name
-    network_name: str
-    # Arguments for physical model
-    physics_args: tuple[str, ...] = ()
-    # Arguments for network
-    network_args: tuple[str, ...] = ()
 
     # The log path
     log_path: pathlib.Path = pathlib.Path("logs")
@@ -72,55 +65,15 @@ class CommonConfig:
         """
         return self.log_path
 
-    def save(self, data: typing.Any, step: int) -> None:
+    def setup(self) -> dict[str, typing.Any]:
         """
-        Save data to checkpoint.
+        Setup the runtime environment (directories, logging, seed, initial checkpoint load).
+        Returns the loaded checkpoint data (if any).
         """
-        data["random"] = {
-            "host": torch.get_rng_state(),
-            "device": dump_random_engine_state(self.device),
-            "device_type": self.device.type,
-        }
-        data_path = self.folder() / "data.pth"
-        local_data_path = self.folder() / f"data.{step}.pth"
-        torch.save(data, local_data_path)
-        data_path.unlink(missing_ok=True)
-        if step % self.checkpoint_interval == 0:
-            data_path.symlink_to(f"data.{step}.pth")
-        else:
-            local_data_path.rename(data_path)
-        if self.max_relative_step is not None:
-            self.max_absolute_step = step + self.max_relative_step - 1
-            self.max_relative_step = None
-        if step == self.max_absolute_step:
-            logging.info("Reached the maximum step, exiting.")
-            sys.exit(0)
-
-    def main(
-        self, *, model_param: typing.Any = None, network_param: typing.Any = None
-    ) -> tuple[ModelProto, NetworkProto, typing.Any]:
-        """
-        The main function to create the model and network.
-        """
-
-        model_t = model_dict[self.model_name]
-        model_config_t = model_t.config_t  # noqa: F841
-        network_config_t = model_t.network_dict[self.network_name]  # noqa: F841
-
         self.folder().mkdir(parents=True, exist_ok=True)
 
         logging.info("Starting script with arguments: %a", sys.argv)
-        logging.info("Model: %s, Network: %s", self.model_name, self.network_name)
         logging.info("Log directory: %s", self.folder())
-        if model_param is not None:
-            logging.info("Model parameters: %a", model_param)
-        else:
-            logging.info("Physics arguments: %a", self.physics_args)
-        if network_param is not None:
-            logging.info("Network parameters: %a", network_param)
-        else:
-            logging.info("Network arguments: %a", self.network_args)
-
         logging.info("Disabling PyTorch's default gradient computation")
         torch.set_grad_enabled(False)
 
@@ -149,42 +102,82 @@ class CommonConfig:
         else:
             logging.info("Random seed not specified, using current seed: %d", torch.seed())
 
-        if model_param is None:
-            raise ValueError(
-                "model_param must be provided when calling main(). "
-                "This should be an instance of the model's config class, "
-                "typically created from Hydra configuration."
-            )
+        logging.info("The checkpoints will be saved every %d steps", self.checkpoint_interval)
+        return data
+
+    def save(self, data: typing.Any, step: int) -> None:
+        """
+        Save data to checkpoint.
+        """
+        data["random"] = {
+            "host": torch.get_rng_state(),
+            "device": dump_random_engine_state(self.device),
+            "device_type": self.device.type,
+        }
+        data_path = self.folder() / "data.pth"
+        local_data_path = self.folder() / f"data.{step}.pth"
+        torch.save(data, local_data_path)
+        data_path.unlink(missing_ok=True)
+        if step % self.checkpoint_interval == 0:
+            data_path.symlink_to(f"data.{step}.pth")
         else:
-            logging.info("The model parameters are given as %a, skipping parsing model arguments", model_param)
-        logging.info("Loading the model")
+            local_data_path.rename(data_path)
+        if self.max_relative_step is not None:
+            self.max_absolute_step = step + self.max_relative_step - 1
+            self.max_relative_step = None
+        if step == self.max_absolute_step:
+            logging.info("Reached the maximum step, exiting.")
+            sys.exit(0)
+
+    def create_model(self, model_config: omegaconf.DictConfig) -> ModelProto:
+        """
+        Create a model instance from the configuration.
+        """
+        model_t = model_dict[model_config.name]
+        logging.info("Loading the model: %s", model_config.name)
+        # Instantiate the parameters first
+        model_param = instantiate(model_config.params, _target_=model_t.config_t)
+        # Then create the model
         model: ModelProto = model_t(model_param)
         logging.info("Physical model loaded successfully")
+        return model
 
-        if network_param is None:
-            raise ValueError(
-                "network_param must be provided when calling main(). "
-                "This should be an instance of the network's config class, "
-                "typically created from Hydra configuration."
-            )
-        else:
-            logging.info("The network parameters are given as %a, skipping parsing network arguments", network_param)
-        logging.info("Initializing the network")
+    def create_network(
+        self,
+        network_config: omegaconf.DictConfig,
+        model: ModelProto,
+        state_dict: dict[str, typing.Any] | None = None,
+    ) -> NetworkProto:
+        """
+        Create a network instance from the configuration.
+
+        Args:
+            network_config: The network configuration part (e.g., config.network).
+            model: The physics model instance.
+            state_dict: Optional state dict to load into the network.
+        """
+        network_name = network_config.name
+        model_cls = type(model)
+        if not hasattr(model_cls, "network_dict"):
+            raise ValueError(f"Model class {model_cls} does not have 'network_dict'.")
+
+        network_config_t = getattr(model_cls, "network_dict")[network_name]
+
+        logging.info("Initializing the network: %s", network_name)
+        network_param = instantiate(network_config.params, _target_=network_config_t)
         network: NetworkProto = network_param.create(model)
-        logging.info("Network initialized successfully")
 
-        if "network" in data:
+        if state_dict is not None:
             logging.info("Loading state dict of the network")
-            network.load_state_dict(data["network"])
+            network.load_state_dict(state_dict)
         else:
             logging.info("Skipping loading state dict of the network")
 
-        logging.info("Moving model to the device: %a", self.device)
+        logging.info("Moving network to device: %s", self.device)
         network = network.to(device=self.device, dtype=self.dtype)
 
         logging.info("Compiling the network")
         network = torch.jit.script(network)  # type: ignore[assignment]
 
-        logging.info("The checkpoints will be saved every %d steps", self.checkpoint_interval)
-
-        return model, network, data
+        logging.info("Network initialized successfully")
+        return network

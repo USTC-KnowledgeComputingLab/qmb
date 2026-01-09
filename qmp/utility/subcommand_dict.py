@@ -9,6 +9,8 @@ subcommand_dict["my_subcommand"] = MySubcommand
 """
 
 import typing
+import omegaconf
+from .common import RuntimeContext
 
 
 class SubcommandProto(typing.Protocol):
@@ -16,7 +18,12 @@ class SubcommandProto(typing.Protocol):
     This protocol defines a dataclass with a `main` method, which will be called when the subcommand is executed.
     """
 
-    def main(self) -> None:
+    def main(
+        self,
+        ctx: RuntimeContext,
+        config: omegaconf.DictConfig,
+        checkpoint_data: dict[str, typing.Any],
+    ) -> None:
         """
         The main method to be called when the subcommand is executed.
         """
