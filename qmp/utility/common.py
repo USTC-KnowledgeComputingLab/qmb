@@ -18,8 +18,6 @@ class CommonConfig:
     This class defines the common settings needed to create a model and network.
     """
 
-    # pylint: disable=too-many-instance-attributes
-
     # The model name
     model_name: str
     # The network name
@@ -105,12 +103,9 @@ class CommonConfig:
         The main function to create the model and network.
         """
 
-        # pylint: disable=too-many-statements
-        # pylint: disable=too-many-branches
-
         model_t = model_dict[self.model_name]
-        model_config_t = model_t.config_t
-        network_config_t = model_t.network_dict[self.network_name]
+        model_config_t = model_t.config_t  # noqa: F841
+        network_config_t = model_t.network_dict[self.network_name]  # noqa: F841
 
         self.folder().mkdir(parents=True, exist_ok=True)
 

@@ -76,7 +76,7 @@ class Hamiltonian:
                 ],
                 build_directory=build_directory,
             )
-        if is_prepare:  # pylint: disable=no-else-return
+        if is_prepare:
             return cls._hamiltonian_module[key]
         else:
             return getattr(torch.ops, name)

@@ -7,8 +7,7 @@ import dataclasses
 import collections
 import torch
 from ..networks.mlp import WaveFunctionNormal as MlpWaveFunction
-from ..networks.attention import WaveFunctionNormal as AttentionWaveFunction
-from ..networks.peps import PepsFunction
+from ..networks.transformers import WaveFunctionNormal as TransformersWaveFunction
 from ..hamiltonian import Hamiltonian
 from ..utility.model_dict import model_dict, ModelProto, NetworkProto, NetworkConfigProto
 
@@ -18,8 +17,6 @@ class ModelConfig:
     """
     The configuration for the Ising-like model.
     """
-
-    # pylint: disable=too-many-instance-attributes
 
     # The width of the ising lattice
     m: int
@@ -72,9 +69,6 @@ class Model(ModelProto[ModelConfig]):
 
     @classmethod
     def _prepare_hamiltonian(cls, args: ModelConfig) -> dict[tuple[tuple[int, int], ...], complex]:
-        # pylint: disable=too-many-branches
-        # pylint: disable=too-many-nested-blocks
-
         def _index(i: int, j: int) -> int:
             return i + j * args.m
 
@@ -106,7 +100,7 @@ class Model(ModelProto[ModelConfig]):
                 v: complex
                 v1: complex
                 v2: complex
-                if True:  # pylint: disable=using-constant-test
+                if True:
                     if args.x != 0:
                         for k, v in _x(i, j):
                             hamiltonian[k] += v * args.x
@@ -175,23 +169,19 @@ class Model(ModelProto[ModelConfig]):
 
         self.m: int = args.m
         self.n: int = args.n
-        logging.info("Constructing Ising model with dimensions: width = %d, height = %d", self.m, self.n)
-        logging.info("Element-wise coefficients: X = %.10f, Y = %.10f, Z = %.10f", args.x, args.y, args.z)
-        logging.info("Horizontal bond coefficients: X = %.10f, Y = %.10f, Z = %.10f", args.xh, args.yh, args.zh)
-        logging.info("Vertical bond coefficients: X = %.10f, Y = %.10f, Z = %.10f", args.xv, args.yv, args.zv)
-        logging.info("Diagonal bond coefficients: X = %.10f, Y = %.10f, Z = %.10f", args.xd, args.yd, args.zd)
-        logging.info("Anti-diagonal bond coefficients: X = %.10f, Y = %.10f, Z = %.10f", args.xa, args.ya, args.za)
+        logging.info(
+            "Constructing Ising model: width = %d, height = %d, ref_energy = %.4f", self.m, self.n, args.ref_energy
+        )
 
-        logging.info("Initializing Hamiltonian for the lattice")
+        logging.info("Initializing Ising Hamiltonian for the lattice")
         hamiltonian_dict: dict[tuple[tuple[int, int], ...], complex] = self._prepare_hamiltonian(args)
-        logging.info("Hamiltonian initialization complete")
+        logging.info("Hamiltonian dictionary initialized successfully.")
 
         self.ref_energy: float = args.ref_energy
-        logging.info("The ref energy is set to %.10f", self.ref_energy)
 
         logging.info("Converting the Hamiltonian to internal Hamiltonian representation")
         self.hamiltonian: Hamiltonian = Hamiltonian(hamiltonian_dict, kind="bose2")
-        logging.info("Internal Hamiltonian representation for model has been successfully created")
+        logging.info("Internal Hamiltonian representation successfully created.")
 
     def apply_within(self, configs_i: torch.Tensor, psi_i: torch.Tensor, configs_j: torch.Tensor) -> torch.Tensor:
         return self.hamiltonian.apply_within(configs_i, psi_i, configs_j)
@@ -252,9 +242,9 @@ Model.network_dict["mlp"] = MlpConfig
 
 
 @dataclasses.dataclass
-class AttentionConfig:
+class TransformersConfig:
     """
-    The configuration of the attention network.
+    The configuration of the transformers network.
     """
 
     # Embedding dimension
@@ -274,10 +264,10 @@ class AttentionConfig:
 
     def create(self, model: Model) -> NetworkProto:
         """
-        Create an attention network for the model.
+        Create a transformers network for the model.
         """
         logging.info(
-            "Attention network configuration: "
+            "Transformers network configuration: "
             "embedding dimension: %d, "
             "number of heads: %d, "
             "feed-forward dimension: %d, "
@@ -294,7 +284,7 @@ class AttentionConfig:
             self.depth,
         )
 
-        network = AttentionWaveFunction(
+        network = TransformersWaveFunction(
             sites=model.m * model.n,
             physical_dim=2,
             is_complex=True,
@@ -311,40 +301,4 @@ class AttentionConfig:
         return network
 
 
-Model.network_dict["attention"] = AttentionConfig
-
-
-@dataclasses.dataclass
-class PepsConfig:
-    """
-    The configuration of the PEPS network.
-    """
-
-    # The bond dimension of the network
-    D: int = 4  # pylint: disable=invalid-name
-    # The cut-off bond dimension of the network
-    Dc: int = 16  # pylint: disable=invalid-name
-
-    def create(self, model: Model) -> NetworkProto:
-        """
-        Create a PEPS network for the model.
-        """
-        logging.info(
-            "PEPS network configuration: bond dimension: %d, cut-off bond dimension: %d",
-            self.D,
-            self.Dc,
-        )
-
-        network = PepsFunction(
-            L1=model.m,
-            L2=model.n,
-            d=2,
-            D=self.D,
-            Dc=self.Dc,
-            use_complex=True,
-        )
-
-        return network
-
-
-Model.network_dict["peps"] = PepsConfig
+Model.network_dict["transformers"] = TransformersConfig

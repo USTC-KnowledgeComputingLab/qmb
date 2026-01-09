@@ -21,9 +21,6 @@ class PerturbationConfig:
         """
         The main function of two-step optimization process based on imaginary time.
         """
-        # pylint: disable=too-many-locals
-        # pylint: disable=too-many-statements
-        # pylint: disable=too-many-branches
 
         model, _, data = self.common.main(model_param=model_param, network_param=network_param)
 

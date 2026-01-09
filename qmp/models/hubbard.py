@@ -6,7 +6,7 @@ import logging
 import dataclasses
 import torch
 from ..networks.mlp import WaveFunctionElectronUpDown as MlpWaveFunction
-from ..networks.attention import WaveFunctionElectronUpDown as AttentionWaveFunction
+from ..networks.transformers import WaveFunctionElectronUpDown as TransformersWaveFunction
 from ..hamiltonian import Hamiltonian
 from ..utility.model_dict import model_dict, ModelProto, NetworkProto, NetworkConfigProto
 
@@ -83,27 +83,29 @@ class Model(ModelProto[ModelConfig]):
         return hamiltonian_dict
 
     def __init__(self, args: ModelConfig):
-        logging.info("Input arguments successfully parsed")
-
         assert args.electron_number is not None
         self.m: int = args.m
         self.n: int = args.n
         self.electron_number: int = args.electron_number
-        logging.info("Constructing Hubbard model with dimensions: width = %d, height = %d", self.m, self.n)
         logging.info(
-            "The parameters of the model are: t = %.10f, U = %.10f, N = %d", args.t, args.u, args.electron_number
+            "Constructing Hubbard model: width = %d, height = %d, t = %.4f, U = %.4f, N = %d, ref_energy = %.4f",
+            self.m,
+            self.n,
+            args.t,
+            args.u,
+            args.electron_number,
+            args.ref_energy,
         )
 
-        logging.info("Initializing Hamiltonian for the lattice")
+        logging.info("Initializing Hubbard Hamiltonian for the lattice")
         hamiltonian_dict: dict[tuple[tuple[int, int], ...], complex] = self._prepare_hamiltonian(args)
-        logging.info("Hamiltonian initialization complete")
+        logging.info("Hamiltonian dictionary initialized successfully.")
 
         self.ref_energy: float = args.ref_energy
-        logging.info("The ref energy is set to %.10f", self.ref_energy)
 
         logging.info("Converting the Hamiltonian to internal Hamiltonian representation")
         self.hamiltonian: Hamiltonian = Hamiltonian(hamiltonian_dict, kind="fermi")
-        logging.info("Internal Hamiltonian representation for model has been successfully created")
+        logging.info("Internal Hamiltonian representation successfully created.")
 
     def apply_within(self, configs_i: torch.Tensor, psi_i: torch.Tensor, configs_j: torch.Tensor) -> torch.Tensor:
         return self.hamiltonian.apply_within(configs_i, psi_i, configs_j)
@@ -183,9 +185,9 @@ Model.network_dict["mlp"] = MlpConfig
 
 
 @dataclasses.dataclass
-class AttentionConfig:
+class TransformersConfig:
     """
-    The configuration of the attention network.
+    The configuration of the transformers network.
     """
 
     # Embedding dimension
@@ -205,10 +207,10 @@ class AttentionConfig:
 
     def create(self, model: Model) -> NetworkProto:
         """
-        Create an attention network for the model.
+        Create a transformers network for the model.
         """
         logging.info(
-            "Attention network configuration: "
+            "Transformers network configuration: "
             "embedding dimension: %d, "
             "number of heads: %d, "
             "feed-forward dimension: %d, "
@@ -225,7 +227,7 @@ class AttentionConfig:
             self.depth,
         )
 
-        network = AttentionWaveFunction(
+        network = TransformersWaveFunction(
             double_sites=model.m * model.n * 2,
             physical_dim=2,
             is_complex=True,
@@ -244,4 +246,4 @@ class AttentionConfig:
         return network
 
 
-Model.network_dict["attention"] = AttentionConfig
+Model.network_dict["transformers"] = TransformersConfig

@@ -2,19 +2,15 @@
 This file provides an interface to work with openfermion models.
 """
 
-import typing
 import logging
 import dataclasses
 import pathlib
 import torch
 import openfermion
 from ..networks.mlp import WaveFunctionElectronUpDown as MlpWaveFunction
-from ..networks.attention import WaveFunctionElectronUpDown as AttentionWaveFunction
-from ..networks.crossmlp import WaveFunction as CrossMlpWaveFunction
+from ..networks.transformers import WaveFunctionElectronUpDown as TransformersWaveFunction
 from ..hamiltonian import Hamiltonian
 from ..utility.model_dict import model_dict, ModelProto, NetworkProto, NetworkConfigProto
-
-QMP_MODEL_PATH = "QMP_MODEL_PATH"
 
 
 @dataclasses.dataclass
@@ -25,10 +21,6 @@ class ModelConfig:
 
     # The path of models
     model_path: pathlib.Path
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.model_path, pathlib.Path):
-            self.model_path = pathlib.Path(self.model_path)
 
 
 class Model(ModelProto[ModelConfig]):
@@ -41,30 +33,28 @@ class Model(ModelProto[ModelConfig]):
     config_t = ModelConfig
 
     def __init__(self, args: ModelConfig) -> None:
-        logging.info("Input arguments successfully parsed")
-        logging.info("Model path: %s", args.model_path)
-
-        model_path = args.model_path
-        assert model_path is not None
-
-        model_file_name = model_path
-        logging.info("Loading OpenFermion model from file: %s", model_file_name)
-        openfermion_model: openfermion.MolecularData = openfermion.MolecularData(filename=str(model_file_name))  # type: ignore[no-untyped-call]
-        logging.info("OpenFermion model successfully loaded")
+        logging.info("Loading OpenFermion model from file: %s", args.model_path)
+        openfermion_model: openfermion.MolecularData = openfermion.MolecularData(
+            filename=str(args.model_path.resolve())
+        )  # type: ignore[no-untyped-call]
+        logging.info("OpenFermion model file loaded successfully.")
 
         self.n_qubits: int = int(openfermion_model.n_qubits)  # type: ignore[arg-type]
         self.n_electrons: int = int(openfermion_model.n_electrons)  # type: ignore[arg-type]
-        logging.info("Identified %d qubits and %d electrons", self.n_qubits, self.n_electrons)
-
         self.ref_energy: float = float(openfermion_model.fci_energy)  # type: ignore[arg-type]
-        logging.info("Reference energy for the model is %.10f", self.ref_energy)
+        logging.info(
+            "Identified %d qubits, %d electrons and fci_energy as %.10f",
+            self.n_qubits,
+            self.n_electrons,
+            self.ref_energy,
+        )
 
         logging.info("Converting OpenFermion Hamiltonian to internal Hamiltonian representation")
         self.hamiltonian: Hamiltonian = Hamiltonian(
             openfermion.transforms.get_fermion_operator(openfermion_model.get_molecular_hamiltonian()).terms,  # type: ignore[no-untyped-call]
             kind="fermi",
         )
-        logging.info("Internal Hamiltonian representation has been successfully created")
+        logging.info("Internal Hamiltonian representation successfully created.")
 
     def apply_within(self, configs_i: torch.Tensor, psi_i: torch.Tensor, configs_j: torch.Tensor) -> torch.Tensor:
         return self.hamiltonian.apply_within(configs_i, psi_i, configs_j)
@@ -138,9 +128,9 @@ Model.network_dict["mlp"] = MlpConfig
 
 
 @dataclasses.dataclass
-class AttentionConfig:
+class TransformersConfig:
     """
-    The configuration of the attention network.
+    The configuration of the transformers network.
     """
 
     # Embedding dimension
@@ -160,10 +150,10 @@ class AttentionConfig:
 
     def create(self, model: Model) -> NetworkProto:
         """
-        Create an attention network for the model.
+        Create a transformers network for the model.
         """
         logging.info(
-            "Attention network configuration: "
+            "Transformers network configuration: "
             "embedding dimension: %d, "
             "number of heads: %d, "
             "feed-forward dimension: %d, "
@@ -180,7 +170,7 @@ class AttentionConfig:
             self.depth,
         )
 
-        network = AttentionWaveFunction(
+        network = TransformersWaveFunction(
             double_sites=model.n_qubits,
             physical_dim=2,
             is_complex=True,
@@ -199,66 +189,4 @@ class AttentionConfig:
         return network
 
 
-Model.network_dict["attention"] = AttentionConfig
-
-
-@dataclasses.dataclass
-class CrossMlpConfig:
-    """
-    The configuration of the cross MLP network.
-    """
-
-    # The hidden widths of the embedding subnetwork
-    embedding_hidden: tuple[int, ...] = (64,)
-    # The dimension of the embedding
-    embedding_size: int = 16
-    # The hidden widths of the momentum subnetwork
-    momentum_hidden: tuple[int, ...] = (64,)
-    # The number of max momentum order
-    momentum_count: int = 1
-    # The hidden widths of the tail part
-    tail_hidden: tuple[int, ...] = (64,)
-    # The kind of the crossmlp forward function
-    kind: typing.Literal[0, 1, 2] = 0
-    # The ordering of the sites
-    ordering: int | list[int] = +1
-
-    def create(self, model: Model) -> NetworkProto:
-        """
-        Create a cross MLP network for the model.
-        """
-        logging.info(
-            "Cross MLP network configuration: "
-            "embedding hidden widths: %a, "
-            "embedding size: %d, "
-            "momentum hidden widths: %a, "
-            "momentum count: %d, "
-            "tail hidden widths: %a, "
-            "kind: %d, "
-            "ordering: %s",
-            self.embedding_hidden,
-            self.embedding_size,
-            self.momentum_hidden,
-            self.momentum_count,
-            self.tail_hidden,
-            self.kind,
-            self.ordering,
-        )
-
-        network = CrossMlpWaveFunction(
-            sites=model.n_qubits,
-            physical_dim=2,
-            is_complex=False,
-            embedding_hidden_size=self.embedding_hidden,
-            embedding_size=self.embedding_size,
-            momentum_hidden_size=self.momentum_hidden,
-            momentum_count=self.momentum_count,
-            tail_hidden_size=self.tail_hidden,
-            kind=self.kind,
-            ordering=self.ordering,
-        )
-
-        return network
-
-
-Model.network_dict["crossmlp"] = CrossMlpConfig
+Model.network_dict["transformers"] = TransformersConfig
