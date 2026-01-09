@@ -173,6 +173,7 @@ class RuntimeContext:
             logging.info("Skipping loading state dict of the network")
 
         logging.info("Moving network to device: %s", self.device)
+        assert not isinstance(self.dtype, str)
         network = network.to(device=self.device, dtype=self.dtype)
 
         logging.info("Compiling the network")
