@@ -10,7 +10,6 @@ import torch
 import torch.utils.tensorboard
 from ..utility.common import RuntimeContext
 from ..utility.subcommand_dict import subcommand_dict
-from ..utility.optimizer import initialize_optimizer
 
 
 @dataclasses.dataclass
@@ -23,18 +22,8 @@ class VmcConfig:
     sampling_count: int = 4000
     # The number of relative configurations to be used in energy calculation
     relative_count: int = 40000
-    # Whether to use the global optimizer
-    global_opt: bool = False
-    # Whether to use LBFGS instead of Adam
-    use_lbfgs: bool = False
-    # The learning rate for the local optimizer
-    learning_rate: float = -1
     # The number of steps for the local optimizer
     local_step: int = 1000
-
-    def __post_init__(self) -> None:
-        if self.learning_rate == -1:
-            self.learning_rate = 1 if self.use_lbfgs else 1e-3
 
     def main(
         self,
@@ -51,27 +40,14 @@ class VmcConfig:
         network = ctx.create_network(config.network, model, checkpoint_data.get("network"))
         data = checkpoint_data
 
+        # Create Optimizer
+        optimizer = ctx.create_optimizer(config.optimizer, network.parameters(), checkpoint_data.get("optimizer"))
+
         logging.info(
-            "Arguments Summary: "
-            "Sampling Count: %d, "
-            "Relative Count: %d, "
-            "Global Optimizer: %s, "
-            "Use LBFGS: %s, "
-            "Learning Rate: %.10f, "
-            "Local Steps: %d, ",
+            "Arguments Summary: Sampling Count: %d, Relative Count: %d, Local Steps: %d, ",
             self.sampling_count,
             self.relative_count,
-            "Yes" if self.global_opt else "No",
-            "Yes" if self.use_lbfgs else "No",
-            self.learning_rate,
             self.local_step,
-        )
-
-        optimizer = initialize_optimizer(
-            network.parameters(),
-            use_lbfgs=self.use_lbfgs,
-            learning_rate=self.learning_rate,
-            state_dict=data.get("optimizer"),
         )
 
         if "vmc" not in data:
@@ -96,14 +72,6 @@ class VmcConfig:
                     [configs_i, model.find_relative(configs_i, psi_i, self.relative_count - len(configs_i))]
                 )
             logging.info("Relative configurations calculated, count: %d", len(configs_dst))
-
-            optimizer = initialize_optimizer(
-                network.parameters(),
-                use_lbfgs=self.use_lbfgs,
-                learning_rate=self.learning_rate,
-                new_opt=not self.global_opt,
-                optimizer=optimizer,
-            )
 
             def closure() -> torch.Tensor:
                 # Optimizing energy

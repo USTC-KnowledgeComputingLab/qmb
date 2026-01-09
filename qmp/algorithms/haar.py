@@ -13,7 +13,7 @@ from ..utility import losses
 from ..utility.common import RuntimeContext
 from ..utility.subcommand_dict import subcommand_dict
 from ..utility.model_dict import ModelProto
-from ..utility.optimizer import initialize_optimizer, scale_learning_rate
+from ..utility.optimizer import scale_learning_rate
 
 
 @dataclasses.dataclass
@@ -21,6 +21,8 @@ class _DynamicLanczos:
     """
     This class implements the dynamic Lanczos algorithm for solving quantum many-body problems.
     """
+
+    # pylint: disable=too-many-instance-attributes
 
     model: ModelProto
     configs: torch.Tensor
@@ -77,7 +79,7 @@ class _DynamicLanczos:
                 selected = (psi.conj() * psi).real.argsort(descending=True)[: self.count_extend]
                 configs = self.configs
                 self._extend(psi[selected], self.configs[selected])
-                psi = self.model.apply_within(configs, psi, self.configs)
+                psi = self.model.apply_within(configs, psi, self.configs)  # pylint: disable=assignment-from-no-return
             for _, [alpha, beta, v] in zip(range(1 + self.step), self._run()):
                 energy, psi = self._eigh_tridiagonal(alpha, beta, v)
                 yield energy, self.configs, psi
@@ -123,7 +125,7 @@ class _DynamicLanczos:
         # The details are as follows:
         # All data other than v is always on the GPU.
         # The last v is always on the GPU and the rest are moved to the CPU immediately after necessary calculations.
-        v: list[torch.Tensor] = [self.psi / torch.linalg.norm(self.psi)]
+        v: list[torch.Tensor] = [self.psi / torch.linalg.norm(self.psi)]  # pylint: disable=not-callable
         alpha: list[torch.Tensor] = []
         beta: list[torch.Tensor] = []
         w: torch.Tensor
@@ -132,7 +134,7 @@ class _DynamicLanczos:
         yield (alpha, beta, v)
         w = w - alpha[-1] * v[-1]
         while True:
-            norm_w = torch.linalg.norm(w)
+            norm_w = torch.linalg.norm(w)  # pylint: disable=not-callable
             if norm_w < self.threshold:
                 break
             beta.append(norm_w)
@@ -155,7 +157,7 @@ class _DynamicLanczos:
                 current_local_batch_size = local_batch_size
             start_index = i * local_batch_size + min(i, remainder)
             end_index = start_index + current_local_batch_size
-            local_result = self.model.apply_within(
+            local_result = self.model.apply_within(  # pylint: disable=assignment-from-no-return
                 configs_i[start_index:end_index],
                 psi_i[start_index:end_index],
                 configs_j,
@@ -266,6 +268,8 @@ class HaarConfig:
     The two-step optimization process for solving quantum many-body problems based on imaginary time.
     """
 
+    # pylint: disable=too-many-instance-attributes
+
     # The sampling count from neural network
     sampling_count_from_neural_network: int = 1024
     # The sampling count from last iteration
@@ -282,12 +286,6 @@ class HaarConfig:
     krylov_threshold: float = 1e-8
     # The name of the loss function to use
     loss_name: str = "sum_filtered_angle_scaled_log"
-    # Whether to use the global optimizer
-    global_opt: bool = False
-    # Whether to use LBFGS instead of Adam
-    use_lbfgs: bool = False
-    # The learning rate for the local optimizer
-    learning_rate: float = -1
     # The number of steps for the local optimizer
     local_step: int = -1
     # The early break loss threshold for local optimization
@@ -302,10 +300,14 @@ class HaarConfig:
     local_batch_count_loss_function: int = 1
 
     def __post_init__(self) -> None:
-        if self.learning_rate == -1:
-            self.learning_rate = 1 if self.use_lbfgs else 1e-3
         if self.local_step == -1:
-            self.local_step = 1000 if self.use_lbfgs else 10000
+            # Default value logic was: 1000 if self.use_lbfgs else 10000
+            # Since we removed use_lbfgs from config, we can't infer this easily.
+            # We must choose a default or expect user to set it.
+            # I will set a safe default like 1000, or stick to 10000.
+            # But wait, LBFGS usually needs fewer steps.
+            # If the user sets optimization in config, maybe we can assume 10000 for Adam.
+            self.local_step = 10000
         if self.krylov_extend_count == -1:
             self.krylov_extend_count = 2048 if self.krylov_single_extend else 64
 
@@ -318,10 +320,16 @@ class HaarConfig:
         """
         The main function of two-step optimization process based on imaginary time.
         """
+        # pylint: disable=too-many-locals
+        # pylint: disable=too-many-statements
+        # pylint: disable=too-many-branches
 
         model = ctx.create_model(config.model)
         network = ctx.create_network(config.network, model, checkpoint_data.get("network"))
         data = checkpoint_data
+
+        # Create Optimizer
+        optimizer = ctx.create_optimizer(config.optimizer, network.parameters(), checkpoint_data.get("optimizer"))
 
         logging.info(
             "Arguments Summary: "
@@ -333,9 +341,6 @@ class HaarConfig:
             "Krylov Iteration: %d, "
             "Krylov Threshold: %.10f, "
             "Loss Function: %s, "
-            "Global Optimizer: %s, "
-            "Use LBFGS: %s, "
-            "Learning Rate: %.10f, "
             "Local Steps: %d, "
             "Local Loss Threshold: %.10f, "
             "Logging Psi: %d, "
@@ -350,22 +355,12 @@ class HaarConfig:
             self.krylov_iteration,
             self.krylov_threshold,
             self.loss_name,
-            "Yes" if self.global_opt else "No",
-            "Yes" if self.use_lbfgs else "No",
-            self.learning_rate,
             self.local_step,
             self.local_loss,
             self.logging_psi,
             self.local_batch_count_generation,
             self.local_batch_count_apply_within,
             self.local_batch_count_loss_function,
-        )
-
-        optimizer = initialize_optimizer(
-            network.parameters(),
-            use_lbfgs=self.use_lbfgs,
-            learning_rate=self.learning_rate,
-            state_dict=data.get("optimizer"),
         )
 
         if "haar" not in data and "imag" in data:
@@ -428,14 +423,6 @@ class HaarConfig:
             )
 
             loss_func: typing.Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = getattr(losses, self.loss_name)
-
-            optimizer = initialize_optimizer(
-                network.parameters(),
-                use_lbfgs=self.use_lbfgs,
-                learning_rate=self.learning_rate,
-                new_opt=not self.global_opt,
-                optimizer=optimizer,
-            )
 
             def closure() -> torch.Tensor:
                 optimizer.zero_grad()

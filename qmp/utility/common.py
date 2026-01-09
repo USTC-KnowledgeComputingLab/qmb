@@ -12,6 +12,7 @@ import torch
 from hydra.utils import instantiate
 from .model_dict import model_dict, ModelProto, NetworkProto
 from .random_engine import dump_random_engine_state, load_random_engine_state
+from .optimizer import migrate_optimizer
 
 
 @dataclasses.dataclass
@@ -19,6 +20,8 @@ class RuntimeContext:
     """
     This class defines the common runtime environment (logging, device, random seed, checkpoints).
     """
+
+    # pylint: disable=too-many-instance-attributes
 
     # The log path
     log_path: pathlib.Path = pathlib.Path("logs")
@@ -181,3 +184,29 @@ class RuntimeContext:
 
         logging.info("Network initialized successfully")
         return network
+
+    def create_optimizer(
+        self,
+        optimizer_config: omegaconf.DictConfig,
+        params: typing.Iterable[torch.Tensor],
+        state_dict: dict[str, typing.Any] | None = None,
+    ) -> torch.optim.Optimizer:
+        """
+        Create an optimizer instance from the configuration.
+
+        Args:
+            optimizer_config: The optimizer configuration.
+            params: The parameters to optimize.
+            state_dict: Optional state dict to load into the optimizer.
+        """
+        logging.info("Initializing the optimizer")
+        optimizer = instantiate(optimizer_config, params=params)
+
+        if state_dict is not None:
+            logging.info("Loading state dict of the optimizer")
+            optimizer.load_state_dict(state_dict)
+            migrate_optimizer(optimizer)
+        else:
+            logging.info("Skipping loading state dict of the optimizer")
+
+        return optimizer

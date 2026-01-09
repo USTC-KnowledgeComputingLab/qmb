@@ -9,7 +9,6 @@ import omegaconf
 import torch
 from ..utility import losses
 from ..utility.common import RuntimeContext
-from ..utility.optimizer import initialize_optimizer
 from ..utility.subcommand_dict import subcommand_dict
 
 
@@ -21,8 +20,6 @@ class PretrainConfig:
 
     # Dataset path for pretraining
     dataset_path: str
-    # The learning rate for the local optimizer
-    learning_rate: float = 1e-3
     # The name of the loss function to use
     loss_name: str = "sum_filtered_angle_scaled_log"
 
@@ -44,12 +41,8 @@ class PretrainConfig:
         config_tensor = dataset[0].to(device=ctx.device)
         psi = dataset[1].to(device=ctx.device)
 
-        optimizer = initialize_optimizer(
-            network.parameters(),
-            use_lbfgs=False,
-            learning_rate=self.learning_rate,
-            state_dict=data.get("optimizer"),
-        )
+        # Create Optimizer
+        optimizer = ctx.create_optimizer(config.optimizer, network.parameters(), checkpoint_data.get("optimizer"))
 
         if "pretrain" not in data:
             data["pretrain"] = {"global": 0}

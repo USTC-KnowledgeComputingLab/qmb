@@ -10,7 +10,6 @@ import torch
 import torch.utils.tensorboard
 from ..utility.common import RuntimeContext
 from ..utility.subcommand_dict import subcommand_dict
-from ..utility.optimizer import initialize_optimizer
 
 
 @dataclasses.dataclass
@@ -23,20 +22,10 @@ class GuideConfig:
     sampling_count: int = 4000
     # The number of relative configurations to be used in energy calculation
     relative_count: int = 40000
-    # Whether to use the global optimizer
-    global_opt: bool = False
-    # Whether to use LBFGS instead of Adam
-    use_lbfgs: bool = False
-    # The learning rate for the local optimizer
-    learning_rate: float = -1
     # The number of steps for the local optimizer
     local_step: int = 1000
     # The number of steps for the distribution optimizer
     dist_step: int = 100
-
-    def __post_init__(self) -> None:
-        if self.learning_rate == -1:
-            self.learning_rate = 1 if self.use_lbfgs else 1e-3
 
     def main(
         self,
@@ -50,47 +39,30 @@ class GuideConfig:
 
         # Create Model
         model = ctx.create_model(config.model)
-        
+
         # Create Main Network
         network = ctx.create_network(config.network, model, checkpoint_data.get("network"))
 
         # Create Sampling Network
-        # Assuming config.sampling matches the structure needed for create_network
-        # Note: If config.sampling has a different structure than config.network (e.g. nested params),
-        # verify this matches current codebase expectations.
         sampling = ctx.create_network(config.sampling, model, checkpoint_data.get("sampling"))
 
         data = checkpoint_data
 
-        logging.info(
-            "Arguments Summary: "
-            "Sampling Count: %d, "
-            "Relative Count: %d, "
-            "Global Optimizer: %s, "
-            "Use LBFGS: %s, "
-            "Learning Rate: %.10f, "
-            "Local Steps: %d, "
-            "Dist Steps: %d",
-            self.sampling_count,
-            self.relative_count,
-            "Yes" if self.global_opt else "No",
-            "Yes" if self.use_lbfgs else "No",
-            self.learning_rate,
-            self.local_step,
-            self.dist_step,
+        # Create Optimizers
+        # We use the same optimizer configuration for both network and sampling
+        optimizer_network = ctx.create_optimizer(
+            config.optimizer, network.parameters(), checkpoint_data.get("optimizer")
+        )
+        optimizer_sampling = ctx.create_optimizer(
+            config.optimizer, sampling.parameters(), checkpoint_data.get("optimizer_sampling")
         )
 
-        optimizer_network = initialize_optimizer(
-            network.parameters(),
-            use_lbfgs=self.use_lbfgs,
-            learning_rate=self.learning_rate,
-            state_dict=data.get("optimizer"),
-        )
-        optimizer_sampling = initialize_optimizer(
-            sampling.parameters(),
-            use_lbfgs=self.use_lbfgs,
-            learning_rate=self.learning_rate,
-            state_dict=data.get("optimizer_sampling"),
+        logging.info(
+            "Arguments Summary: Sampling Count: %d, Relative Count: %d, Local Steps: %d, Dist Steps: %d",
+            self.sampling_count,
+            self.relative_count,
+            self.local_step,
+            self.dist_step,
         )
 
         if "guide" not in data:
@@ -128,21 +100,6 @@ class GuideConfig:
                         ),
                     ]
                 )
-
-            optimizer_network = initialize_optimizer(
-                network.parameters(),
-                use_lbfgs=self.use_lbfgs,
-                learning_rate=self.learning_rate,
-                new_opt=not self.global_opt,
-                optimizer=optimizer_network,
-            )
-            optimizer_sampling = initialize_optimizer(
-                sampling.parameters(),
-                use_lbfgs=self.use_lbfgs,
-                learning_rate=self.learning_rate,
-                new_opt=not self.global_opt,
-                optimizer=optimizer_sampling,
-            )
 
             def energy_sampling() -> torch.Tensor:
                 configs_src = configs_src_sampling

@@ -7,7 +7,7 @@ import omegaconf
 from hydra.utils import instantiate
 
 from .algorithms import chop_imag, guide, haar, pert, pretrain, vmc  # noqa: F401
-from .models import fcidump, free_fermion, hubbard, ising, openfermion  # noqa: F401
+from .models import fcidump, hubbard, ising, openfermion  # noqa: F401
 from .utility.common import RuntimeContext
 from .utility.subcommand_dict import subcommand_dict
 
@@ -30,7 +30,7 @@ def main(config: omegaconf.DictConfig) -> None:
         _target_=subcommand_dict[config.action.name],
     )
 
-    # 3. Execute Algorithm (Action)
+    # 3. Execute Algorithm
     # The algorithm is responsible for creating its own models/networks using the context and config.
     run.main(ctx=ctx, config=config, checkpoint_data=checkpoint_data)
 
