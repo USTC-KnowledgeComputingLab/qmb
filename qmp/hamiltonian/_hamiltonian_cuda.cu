@@ -923,6 +923,54 @@ auto list_relative_interface(
 
     set_heap_limit();
 
+    TORCH_CHECK(configs.device().type() == torch::kCUDA, "configs must be on CUDA.")
+    TORCH_CHECK(configs.device().index() == device_id, "configs must be on the same device as others.");
+    TORCH_CHECK(configs.is_contiguous(), "configs must be contiguous.")
+    TORCH_CHECK(configs.dtype() == torch::kUInt8, "configs must be uint8.")
+    TORCH_CHECK(configs.dim() == 2, "configs must be 2D.")
+    TORCH_CHECK(configs.size(0) == batch_size, "configs batch size must match the provided batch_size.");
+    TORCH_CHECK(configs.size(1) == n_qubytes, "configs must have the same number of qubits as the provided n_qubytes.");
+
+    TORCH_CHECK(psi.device().type() == torch::kCUDA, "psi must be on CUDA.")
+    TORCH_CHECK(psi.device().index() == device_id, "psi must be on the same device as others.");
+    TORCH_CHECK(psi.is_contiguous(), "psi must be contiguous.")
+    TORCH_CHECK(psi.dtype() == torch::kFloat64, "psi must be float64.")
+    TORCH_CHECK(psi.dim() == 2, "psi must be 2D.")
+    TORCH_CHECK(psi.size(0) == batch_size, "psi batch size must match the provided batch_size.");
+    TORCH_CHECK(psi.size(1) == 2, "psi must contain 2 elements for each batch.");
+
+    TORCH_CHECK(site.device().type() == torch::kCUDA, "site must be on CUDA.")
+    TORCH_CHECK(site.device().index() == device_id, "site must be on the same device as others.");
+    TORCH_CHECK(site.is_contiguous(), "site must be contiguous.")
+    TORCH_CHECK(site.dtype() == torch::kInt16, "site must be int16.")
+    TORCH_CHECK(site.dim() == 2, "site must be 2D.")
+    TORCH_CHECK(site.size(0) == term_number, "site size must match the provided term_number.");
+    TORCH_CHECK(site.size(1) == max_op_number, "site must match the provided max_op_number.");
+
+    TORCH_CHECK(kind.device().type() == torch::kCUDA, "kind must be on CUDA.")
+    TORCH_CHECK(kind.device().index() == device_id, "kind must be on the same device as others.");
+    TORCH_CHECK(kind.is_contiguous(), "kind must be contiguous.")
+    TORCH_CHECK(kind.dtype() == torch::kUInt8, "kind must be uint8.")
+    TORCH_CHECK(kind.dim() == 2, "kind must be 2D.")
+    TORCH_CHECK(kind.size(0) == term_number, "kind size must match the provided term_number.");
+    TORCH_CHECK(kind.size(1) == max_op_number, "kind must match the provided max_op_number.");
+
+    TORCH_CHECK(coef.device().type() == torch::kCUDA, "coef must be on CUDA.")
+    TORCH_CHECK(coef.device().index() == device_id, "coef must be on the same device as others.");
+    TORCH_CHECK(coef.is_contiguous(), "coef must be contiguous.")
+    TORCH_CHECK(coef.dtype() == torch::kFloat64, "coef must be float64.")
+    TORCH_CHECK(coef.dim() == 2, "coef must be 2D.")
+    TORCH_CHECK(coef.size(0) == term_number, "coef size must match the provided term_number.");
+    TORCH_CHECK(coef.size(1) == 2, "coef must contain 2 elements for each term.");
+
+    TORCH_CHECK(exclude_configs.device().type() == torch::kCUDA, "configs must be on CUDA.")
+    TORCH_CHECK(exclude_configs.device().index() == device_id, "configs must be on the same device as others.");
+    TORCH_CHECK(exclude_configs.is_contiguous(), "configs must be contiguous.")
+    TORCH_CHECK(exclude_configs.dtype() == torch::kUInt8, "configs must be uint8.")
+    TORCH_CHECK(exclude_configs.dim() == 2, "configs must be 2D.")
+    TORCH_CHECK(exclude_configs.size(0) == exclude_size, "configs batch size must match the provided exclude_size.");
+    TORCH_CHECK(exclude_configs.size(1) == n_qubytes, "configs must have the same number of qubits as the provided n_qubytes.");
+
     auto stream = at::cuda::getCurrentCUDAStream(device_id);
     auto policy = thrust::device.on(stream);
 
