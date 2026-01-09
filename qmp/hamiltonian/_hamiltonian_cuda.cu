@@ -889,6 +889,23 @@ __global__ void collect_tree_kernel(
     }
 }
 
+bool first_call_to_set_heap_limit = true;
+
+void set_heap_limit() {
+    // 增加 CUDA 动态内存限制以容纳 Trie 节点。
+    if (first_call_to_set_heap_limit) {
+        size_t expect = 1 << 60;
+        size_t actual = 0;
+        do {
+            cudaDeviceSetLimit(cudaLimitMallocHeapSize, expect);
+            cudaDeviceGetLimit(&actual, cudaLimitMallocHeapSize);
+            expect >>= 1;
+        } while (actual != expect);
+
+        first_call_to_set_heap_limit = false;
+    }
+}
+
 template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
 auto list_relative_interface(
     const torch::Tensor& configs,
@@ -904,9 +921,7 @@ auto list_relative_interface(
     std::int64_t exclude_size = exclude_configs.size(0);
     at::cuda::CUDAGuard cuda_device_guard(device_id);
 
-    // 增加 CUDA 动态内存限制以容纳 Trie 节点。
-    // 默认 8MB 通常不够，这里设为 1GB。
-    AT_CUDA_CHECK(cudaDeviceSetLimit(cudaLimitMallocHeapSize, 1024 * 1024 * 1024));
+    set_heap_limit();
 
     auto stream = at::cuda::getCurrentCUDAStream(device_id);
     auto policy = thrust::device.on(stream);
