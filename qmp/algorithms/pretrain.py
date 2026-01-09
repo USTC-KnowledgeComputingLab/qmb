@@ -51,14 +51,14 @@ class PretrainConfig:
 
         while True:
 
-            def closure():
+            def closure() -> torch.Tensor:
                 optimizer.zero_grad()
                 prediction = network(config_tensor)
                 loss = loss_func(psi, prediction)
-                loss.backward()
+                loss.backward()  # type: ignore[no-untyped-call]
                 return loss
 
-            loss = optimizer.step(closure)
+            loss: torch.Tensor = optimizer.step(closure)  # type: ignore[assignment, arg-type]
             # prediction = network(config_tensor) # Unused?
             logging.info("Step %d: Loss = %.6f", data["pretrain"]["global"], loss.item())
 
