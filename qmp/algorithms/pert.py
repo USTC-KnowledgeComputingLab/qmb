@@ -5,7 +5,8 @@ This file implements a perturbation estimator from haar.
 import logging
 import typing
 import dataclasses
-from ..utility.common import CommonConfig
+import omegaconf
+from ..utility.context import RuntimeContext
 from ..utility.subcommand_dict import subcommand_dict
 
 
@@ -15,20 +16,24 @@ class PerturbationConfig:
     The perturbation estimator from haar.
     """
 
-    common: CommonConfig
-
-    def main(self, *, model_param: typing.Any = None, network_param: typing.Any = None) -> None:
+    def main(
+        self,
+        context: RuntimeContext,
+        runtime_config: omegaconf.DictConfig,
+        checkpoint_data: dict[str, typing.Any],
+    ) -> None:
         """
         The main function of two-step optimization process based on imaginary time.
         """
 
-        model, _, data = self.common.main(model_param=model_param, network_param=network_param)
+        model = context.create_model(runtime_config.model)
+        data = checkpoint_data
 
         if "haar" not in data and "imag" in data:
             data["haar"] = data.pop("imag")
         configs, psi = data["haar"]["pool"]
-        configs = configs.to(self.common.device)
-        psi = psi.to(self.common.device)
+        configs = configs.to(context.device)
+        psi = psi.to(context.device)
 
         energy0_num = psi.conj() @ model.apply_within(configs, psi, configs)
         energy0_den = psi.conj() @ psi

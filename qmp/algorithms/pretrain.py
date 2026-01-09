@@ -5,10 +5,10 @@ This file implements a pretraining for quantum many-body problems.
 import typing
 import logging
 import dataclasses
+import omegaconf
 import torch
 from ..utility import losses
-from ..utility.common import CommonConfig
-from ..utility.optimizer import initialize_optimizer
+from ..utility.context import RuntimeContext
 from ..utility.subcommand_dict import subcommand_dict
 
 
@@ -18,31 +18,32 @@ class PretrainConfig:
     Configuration for pretraining quantum many-body models.
     """
 
-    common: CommonConfig
-
     # Dataset path for pretraining
     dataset_path: str
-    # The learning rate for the local optimizer
-    learning_rate: float = 1e-3
     # The name of the loss function to use
     loss_name: str = "sum_filtered_angle_scaled_log"
 
-    def main(self, *, model_param: typing.Any = None, network_param: typing.Any = None) -> None:
+    def main(
+        self,
+        context: RuntimeContext,
+        runtime_config: omegaconf.DictConfig,
+        checkpoint_data: dict[str, typing.Any],
+    ) -> None:
         """
         The main function for pretraining.
         """
 
-        model, network, data = self.common.main(model_param=model_param, network_param=network_param)
+        model = context.create_model(runtime_config.model)
+        network = context.create_network(runtime_config.network, model, checkpoint_data.get("network"))
+        data = checkpoint_data
 
         dataset = torch.load(self.dataset_path, map_location="cpu", weights_only=True)
-        config = dataset[0].to(device=self.common.device)
-        psi = dataset[1].to(device=self.common.device)
+        config_tensor = dataset[0].to(device=context.device)
+        psi = dataset[1].to(device=context.device)
 
-        optimizer = initialize_optimizer(
-            network.parameters(),
-            use_lbfgs=False,
-            learning_rate=self.learning_rate,
-            state_dict=data.get("optimizer"),
+        # Create Optimizer
+        optimizer = context.create_optimizer(
+            runtime_config.optimizer, network.parameters(), checkpoint_data.get("optimizer")
         )
 
         if "pretrain" not in data:
@@ -52,22 +53,22 @@ class PretrainConfig:
 
         while True:
 
-            def closure():
+            def closure() -> torch.Tensor:
                 optimizer.zero_grad()
-                prediction = network(config)
+                prediction = network(config_tensor)
                 loss = loss_func(psi, prediction)
-                loss.backward()
+                loss.backward()  # type: ignore[no-untyped-call]
                 return loss
 
-            loss = optimizer.step(closure)
-            prediction = network(config)  # noqa: F841
+            loss: torch.Tensor = optimizer.step(closure)  # type: ignore[assignment, arg-type]
+            # prediction = network(config_tensor) # Unused?
             logging.info("Step %d: Loss = %.6f", data["pretrain"]["global"], loss.item())
 
             logging.info("Saving model checkpoint")
             data["pretrain"]["global"] += 1
             data["network"] = network.state_dict()
             data["optimizer"] = optimizer.state_dict()
-            self.common.save(data, data["pretrain"]["global"])
+            context.save(data, data["pretrain"]["global"])
             logging.info("Checkpoint successfully saved")
 
             logging.info("Current optimization cycle completed")

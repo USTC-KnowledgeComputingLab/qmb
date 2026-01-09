@@ -102,8 +102,9 @@ def read_fcidump(
     )  # type: ignore[no-untyped-call]
     fermion_operator: openfermion.FermionOperator = openfermion.get_fermion_operator(interaction_operator)  # type: ignore[no-untyped-call]
     return (n_orbit, n_electron, n_spin), {
-        k: complex(v) for k, v in openfermion.normal_ordered(fermion_operator).terms.items()
-    }  # type: ignore[no-untyped-call]
+        k: complex(v)
+        for k, v in openfermion.normal_ordered(fermion_operator).terms.items()  # type: ignore[no-untyped-call]
+    }
 
 
 class Model(ModelProto[ModelConfig]):

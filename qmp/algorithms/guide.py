@@ -8,10 +8,8 @@ import dataclasses
 import omegaconf
 import torch
 import torch.utils.tensorboard
-from ..utility.common import CommonConfig
+from ..utility.context import RuntimeContext
 from ..utility.subcommand_dict import subcommand_dict
-from ..utility.optimizer import initialize_optimizer
-from ..utility.model_dict import model_dict
 
 
 @dataclasses.dataclass
@@ -20,86 +18,57 @@ class GuideConfig:
     The guided VMC optimization for solving quantum many-body problems.
     """
 
-    common: CommonConfig
-
     # The sampling count
     sampling_count: int = 4000
     # The number of relative configurations to be used in energy calculation
     relative_count: int = 40000
-    # Whether to use the global optimizer
-    global_opt: bool = False
-    # Whether to use LBFGS instead of Adam
-    use_lbfgs: bool = False
-    # The learning rate for the local optimizer
-    learning_rate: float = -1
     # The number of steps for the local optimizer
     local_step: int = 1000
     # The number of steps for the distribution optimizer
     dist_step: int = 100
 
-    def __post_init__(self) -> None:
-        if self.learning_rate == -1:
-            self.learning_rate = 1 if self.use_lbfgs else 1e-3
-
     def main(
         self,
-        *,
-        model_param: typing.Any = None,
-        network_param: typing.Any = None,
-        config: omegaconf.DictConfig | None = None,
+        context: RuntimeContext,
+        runtime_config: omegaconf.DictConfig,
+        checkpoint_data: dict[str, typing.Any],
     ) -> None:
         """
         The main function for the guided VMC optimization.
         """
 
-        assert config is not None
+        # Create Model
+        model = context.create_model(runtime_config.model)
 
-        model, network, data = self.common.main(model_param=model_param, network_param=network_param)
+        # Create Main Network
+        network = context.create_network(runtime_config.network, model, checkpoint_data.get("network"))
 
-        model_t = model_dict[config.model.name]
-        sampling_config_t = model_t.network_dict[config.sampling.name]
-        sampling_param = sampling_config_t(**config.sampling.params)
-        sampling = sampling_param.create(model)
-        if "sampling" in data:
-            sampling.load_state_dict(data["sampling"])
-        sampling = sampling.to(device=self.common.device, dtype=self.common.dtype)
-        sampling = torch.jit.script(sampling)
+        # Create Sampling Network
+        sampling = context.create_network(runtime_config.sampling, model, checkpoint_data.get("sampling"))
+
+        data = checkpoint_data
+
+        # Create Optimizers
+        # We use the same optimizer configuration for both network and sampling
+        optimizer_network = context.create_optimizer(
+            runtime_config.optimizer, network.parameters(), checkpoint_data.get("optimizer")
+        )
+        optimizer_sampling = context.create_optimizer(
+            runtime_config.optimizer, sampling.parameters(), checkpoint_data.get("optimizer_sampling")
+        )
 
         logging.info(
-            "Arguments Summary: "
-            "Sampling Count: %d, "
-            "Relative Count: %d, "
-            "Global Optimizer: %s, "
-            "Use LBFGS: %s, "
-            "Learning Rate: %.10f, "
-            "Local Steps: %d, "
-            "Dist Steps: %d",
+            "Arguments Summary: Sampling Count: %d, Relative Count: %d, Local Steps: %d, Dist Steps: %d",
             self.sampling_count,
             self.relative_count,
-            "Yes" if self.global_opt else "No",
-            "Yes" if self.use_lbfgs else "No",
-            self.learning_rate,
             self.local_step,
             self.dist_step,
-        )
-
-        optimizer_network = initialize_optimizer(
-            network.parameters(),
-            use_lbfgs=self.use_lbfgs,
-            learning_rate=self.learning_rate,
-            state_dict=data.get("optimizer"),
-        )
-        optimizer_sampling = initialize_optimizer(
-            sampling.parameters(),
-            use_lbfgs=self.use_lbfgs,
-            learning_rate=self.learning_rate,
-            state_dict=data.get("optimizer_sampling"),
         )
 
         if "guide" not in data:
             data["guide"] = {"global": 0, "local": 0, "dist": 0}
 
-        writer = torch.utils.tensorboard.SummaryWriter(log_dir=self.common.folder())  # type: ignore[no-untyped-call]
+        writer = torch.utils.tensorboard.SummaryWriter(log_dir=context.folder())  # type: ignore[no-untyped-call]
 
         while True:
             logging.info("Starting a new optimization cycle")
@@ -131,21 +100,6 @@ class GuideConfig:
                         ),
                     ]
                 )
-
-            optimizer_network = initialize_optimizer(
-                network.parameters(),
-                use_lbfgs=self.use_lbfgs,
-                learning_rate=self.learning_rate,
-                new_opt=not self.global_opt,
-                optimizer=optimizer_network,
-            )
-            optimizer_sampling = initialize_optimizer(
-                sampling.parameters(),
-                use_lbfgs=self.use_lbfgs,
-                learning_rate=self.learning_rate,
-                new_opt=not self.global_opt,
-                optimizer=optimizer_sampling,
-            )
 
             def energy_sampling() -> torch.Tensor:
                 configs_src = configs_src_sampling
@@ -225,9 +179,10 @@ class GuideConfig:
             logging.info("Saving model checkpoint")
             data["guide"]["global"] += 1
             data["network"] = network.state_dict()
+            data["sampling"] = sampling.state_dict()
             data["optimizer"] = optimizer_network.state_dict()
             data["optimizer_sampling"] = optimizer_sampling.state_dict()
-            self.common.save(data, data["guide"]["global"])
+            context.save(data, data["guide"]["global"])
             logging.info("Checkpoint successfully saved")
 
             logging.info("Current optimization cycle completed")
