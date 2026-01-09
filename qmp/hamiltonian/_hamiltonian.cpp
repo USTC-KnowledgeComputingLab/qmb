@@ -81,6 +81,7 @@ TORCH_LIBRARY_FRAGMENT(QMP_LIBRARY(N_QUBYTES, PARTICLE_CUT), m) {
     m.def("apply_within(Tensor configs_i, Tensor psi_i, Tensor configs_j, Tensor site, Tensor kind, Tensor coef) -> Tensor");
     m.def("find_relative(Tensor configs_i, Tensor psi_i, int count_selected, Tensor site, Tensor kind, Tensor coef, Tensor configs_exclude) -> Tensor"
     );
+    m.def("list_relative(Tensor configs_i, Tensor psi_i, Tensor site, Tensor kind, Tensor coef, Tensor configs_exclude) -> (Tensor, Tensor)");
     m.def("diagonal_term(Tensor configs, Tensor site, Tensor kind, Tensor coef) -> Tensor");
 }
 #undef QMP_LIBRARY

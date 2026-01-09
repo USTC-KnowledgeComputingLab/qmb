@@ -197,6 +197,41 @@ class Hamiltonian:
         )
         return configs_j
 
+    def list_relative(
+        self,
+        configs_i: torch.Tensor,
+        psi_i: torch.Tensor,
+        configs_exclude: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        List all unique relative configurations and their accumulated amplitudes.
+
+        Parameters
+        ----------
+        configs_i : torch.Tensor
+            Input configurations (uint8).
+        psi_i : torch.Tensor
+            Input amplitudes (complex64).
+        configs_exclude : torch.Tensor, optional
+            Configurations to exclude from the result. Defaults to configs_i.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            (configs_j, psi_j) where configs_j are unique new configurations
+            and psi_j are their summed amplitudes from all connected paths.
+        """
+        if configs_exclude is None:
+            configs_exclude = configs_i
+        self._prepare_data(configs_i.device)
+        _list_relative = getattr(
+            self._load_module(configs_i.device.type, configs_i.size(1), self.particle_cut), "list_relative"
+        )
+        configs_j, psi_j_real = _list_relative(
+            configs_i, torch.view_as_real(psi_i), self.site, self.kind, self.coef, configs_exclude
+        )
+        return configs_j, torch.view_as_complex(psi_j_real)
+
     def diagonal_term(self, configs: torch.Tensor) -> torch.Tensor:
         """
         Get the diagonal term of the Hamiltonian for the given configurations.
