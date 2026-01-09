@@ -833,6 +833,275 @@ auto diagonal_term_interface(const torch::Tensor& configs, const torch::Tensor& 
     return result_psi;
 }
 
+// 256 叉前缀树 (Trie)：用于在 GPU 上进行并行的构型去重和振幅累加。
+// 每一层对应构型的一个字节（uint8），叶子节点存储最终合并后的复数振幅。
+// 这种结构通过路径唯一性天然实现了哈希去重，并允许在插入时直接进行物理干涉（振幅叠加）。
+template<std::int64_t n_qubytes_local>
+struct dictionary_tree {
+    using child_t = dictionary_tree<n_qubytes_local - 1>;
+    child_t* children[256];
+    int exist[256]; // 用于 atomicCAS 抢占节点创建权
+    long long nonzero_count; // 子树中有效构型的总数（用于并行收集时的偏移计算）
+
+    __device__ bool add(const std::uint8_t* begin, double real, double imag) {
+        std::uint8_t index = *begin;
+        if (children[index] == nullptr) {
+            // 抢占式创建节点：第一个成功的线程负责 malloc
+            if (atomicCAS(&exist[index], 0, 1) == 0) {
+                auto new_child = (child_t*)malloc(sizeof(child_t));
+                if (new_child != nullptr) {
+                    memset(new_child, 0, sizeof(child_t));
+                    __threadfence();
+                    children[index] = new_child;
+                }
+            } else {
+                // 其他线程自旋等待指针初始化完成
+                while (reinterpret_cast<volatile child_t**>(children)[index] == nullptr) {
+                    __nanosleep(8);
+                }
+            }
+        }
+
+        if (children[index]->add(begin + 1, real, imag)) {
+            atomicAdd(&nonzero_count, 1);
+            return true;
+        }
+        return false;
+    }
+
+    // 递归收集结果并进行内存自清理。
+    // 利用子树计数 nonzero_count 确定每个叶子在最终数组中的全局位置。
+    template<std::int64_t n_total_qubytes>
+    __device__ void collect(std::uint64_t index, std::array<std::uint8_t, n_total_qubytes>* configs, std::array<double, 2>* psi) {
+        std::uint64_t size_counter = 0;
+        for (int i = 0; i < 256; ++i) {
+            if (exist[i]) {
+                std::uint64_t sub_count = children[i]->nonzero_count;
+                if (size_counter + sub_count > index) {
+                    configs[index][n_total_qubytes - n_qubytes_local] = i;
+                    children[i]->template collect<n_total_qubytes>(index - size_counter, configs, psi);
+                    // 引用计数递减，最后一个离开该子树的线程负责释放内存
+                    if (atomicAdd(&nonzero_count, -1) == 1) {
+                        free(children[i]);
+                    }
+                    return;
+                }
+                size_counter += sub_count;
+            }
+        }
+    }
+};
+
+// Trie 递归终点：叶子节点存储合并后的物理振幅。
+template<>
+struct dictionary_tree<1> {
+    double values[256][2];
+    int exist[256];
+    long long nonzero_count;
+
+    __device__ bool add(const std::uint8_t* begin, double real, double imag) {
+        std::uint8_t index = *begin;
+        atomicAdd(&values[index][0], real);
+        atomicAdd(&values[index][1], imag);
+        // 如果是该位置第一次被占据，计数加一并向上传递成功信号
+        if (atomicCAS(&exist[index], 0, 1) == 0) {
+            atomicAdd(&nonzero_count, 1);
+            return true;
+        }
+        return false;
+    }
+
+    template<std::int64_t n_total_qubytes>
+    __device__ void collect(std::uint64_t index, std::array<std::uint8_t, n_total_qubytes>* configs, std::array<double, 2>* psi) {
+        std::uint64_t size_counter = 0;
+        for (int i = 0; i < 256; ++i) {
+            if (exist[i]) {
+                if (size_counter == index) {
+                    configs[index][n_total_qubytes - 1] = i;
+                    psi[index][0] = values[i][0];
+                    psi[index][1] = values[i][1];
+                    return;
+                }
+                size_counter++;
+            }
+        }
+    }
+};
+
+template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
+__device__ void list_relative_kernel(
+    std::int64_t term_index,
+    std::int64_t batch_index,
+    std::int64_t term_number,
+    std::int64_t batch_size,
+    std::int64_t exclude_size,
+    const std::array<std::int16_t, max_op_number>* site,
+    const std::array<std::uint8_t, max_op_number>* kind,
+    const std::array<double, 2>* coef,
+    const std::array<std::uint8_t, n_qubytes>* configs,
+    const std::array<double, 2>* psi,
+    const std::array<std::uint8_t, n_qubytes>* exclude_configs,
+    dictionary_tree<n_qubytes>* result_tree
+) {
+    std::array<std::uint8_t, n_qubytes> current_configs = configs[batch_index];
+    auto [success, parity] = hamiltonian_apply_kernel<max_op_number, n_qubytes, particle_cut>(
+        /*current_configs=*/current_configs,
+        /*term_index=*/term_index,
+        /*site=*/site,
+        /*kind=*/kind
+    );
+
+    if (!success) {
+        return;
+    }
+
+    // 二分查找：排除掉已经在 exclude_configs 中的基矢
+    std::int64_t low = 0, high = exclude_size - 1;
+    auto compare = array_less<std::uint8_t, n_qubytes>();
+    while (low <= high) {
+        std::int64_t mid = (low + high) / 2;
+        if (compare(current_configs, exclude_configs[mid])) {
+            high = mid - 1;
+        } else if (compare(exclude_configs[mid], current_configs)) {
+            low = mid + 1;
+        } else {
+            return; // 构型已存在
+        }
+    }
+
+    std::int8_t sign = parity ? -1 : +1;
+    result_tree->add(
+        current_configs.data(),
+        sign * (coef[term_index][0] * psi[batch_index][0] - coef[term_index][1] * psi[batch_index][1]),
+        sign * (coef[term_index][0] * psi[batch_index][1] + coef[term_index][1] * psi[batch_index][0])
+    );
+}
+
+template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
+__global__ void list_relative_kernel_interface(
+    std::int64_t term_number,
+    std::int64_t batch_size,
+    std::int64_t exclude_size,
+    const std::array<std::int16_t, max_op_number>* site,
+    const std::array<std::uint8_t, max_op_number>* kind,
+    const std::array<double, 2>* coef,
+    const std::array<std::uint8_t, n_qubytes>* configs,
+    const std::array<double, 2>* psi,
+    const std::array<std::uint8_t, n_qubytes>* exclude_configs,
+    dictionary_tree<n_qubytes>* result_tree
+) {
+    std::int64_t term_index = blockIdx.x * blockDim.x + threadIdx.x;
+    std::int64_t batch_index = blockIdx.y * blockDim.y + threadIdx.y;
+    if (term_index < term_number && batch_index < batch_size) {
+        list_relative_kernel<max_op_number, n_qubytes, particle_cut>(
+            term_index,
+            batch_index,
+            term_number,
+            batch_size,
+            exclude_size,
+            site,
+            kind,
+            coef,
+            configs,
+            psi,
+            exclude_configs,
+            result_tree
+        );
+    }
+}
+
+template<std::int64_t n_qubytes>
+__global__ void collect_tree_kernel(
+    std::uint64_t result_size,
+    dictionary_tree<n_qubytes>* result_tree,
+    std::array<std::uint8_t, n_qubytes>* configs,
+    std::array<double, 2>* psi
+) {
+    std::int64_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < result_size) {
+        result_tree->template collect<n_qubytes>(index, configs, psi);
+    }
+}
+
+template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
+auto list_relative_interface(
+    const torch::Tensor& configs,
+    const torch::Tensor& psi,
+    const torch::Tensor& site,
+    const torch::Tensor& kind,
+    const torch::Tensor& coef,
+    const torch::Tensor& exclude_configs
+) -> std::tuple<torch::Tensor, torch::Tensor> {
+    std::int64_t device_id = configs.device().index();
+    std::int64_t batch_size = configs.size(0);
+    std::int64_t term_number = site.size(0);
+    std::int64_t exclude_size = exclude_configs.size(0);
+    at::cuda::CUDAGuard cuda_device_guard(device_id);
+
+    // 增加 CUDA 动态内存限制以容纳 Trie 节点。
+    // 默认 8MB 通常不够，这里设为 1GB。
+    AT_CUDA_CHECK(cudaDeviceSetLimit(cudaLimitMallocHeapSize, 1024 * 1024 * 1024));
+
+    auto stream = at::cuda::getCurrentCUDAStream(device_id);
+    auto policy = thrust::device.on(stream);
+
+    // 确保 exclude_configs 已排序，以支持二分查找
+    auto sorted_exclude_configs = exclude_configs.clone(torch::MemoryFormat::Contiguous);
+    thrust::sort(
+        policy,
+        reinterpret_cast<std::array<std::uint8_t, n_qubytes>*>(sorted_exclude_configs.data_ptr()),
+        reinterpret_cast<std::array<std::uint8_t, n_qubytes>*>(sorted_exclude_configs.data_ptr()) + exclude_size,
+        array_less<std::uint8_t, n_qubytes>()
+    );
+
+    dictionary_tree<n_qubytes>* result_tree;
+    AT_CUDA_CHECK(cudaMalloc(&result_tree, sizeof(dictionary_tree<n_qubytes>)));
+    AT_CUDA_CHECK(cudaMemset(result_tree, 0, sizeof(dictionary_tree<n_qubytes>)));
+
+    cudaDeviceProp prop;
+    AT_CUDA_CHECK(cudaGetDeviceProperties(&prop, device_id));
+    auto threads_per_block = dim3{1, (unsigned int)prop.maxThreadsPerBlock >> 1};
+    auto num_blocks = dim3{
+        (unsigned int)(term_number + threads_per_block.x - 1) / threads_per_block.x,
+        (unsigned int)(batch_size + threads_per_block.y - 1) / threads_per_block.y
+    };
+
+    list_relative_kernel_interface<max_op_number, n_qubytes, particle_cut><<<num_blocks, threads_per_block, 0, stream>>>(
+        term_number,
+        batch_size,
+        exclude_size,
+        reinterpret_cast<const std::array<std::int16_t, max_op_number>*>(site.data_ptr()),
+        reinterpret_cast<const std::array<std::uint8_t, max_op_number>*>(kind.data_ptr()),
+        reinterpret_cast<const std::array<double, 2>*>(coef.data_ptr()),
+        reinterpret_cast<const std::array<std::uint8_t, n_qubytes>*>(configs.data_ptr()),
+        reinterpret_cast<const std::array<double, 2>*>(psi.data_ptr()),
+        reinterpret_cast<const std::array<std::uint8_t, n_qubytes>*>(sorted_exclude_configs.data_ptr()),
+        result_tree
+    );
+
+    long long result_size;
+    AT_CUDA_CHECK(cudaMemcpyAsync(&result_size, &result_tree->nonzero_count, sizeof(long long), cudaMemcpyDeviceToHost, stream));
+    AT_CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    auto result_configs = torch::zeros({result_size, n_qubytes}, torch::TensorOptions().dtype(torch::kUInt8).device(device, device_id));
+    auto result_psi = torch::zeros({result_size, 2}, torch::TensorOptions().dtype(torch::kFloat64).device(device, device_id));
+
+    if (result_size > 0) {
+        int threads_collect = prop.maxThreadsPerBlock >> 1;
+        int blocks_collect = (result_size + threads_collect - 1) / threads_collect;
+        collect_tree_kernel<n_qubytes><<<blocks_collect, threads_collect, 0, stream>>>(
+            result_size,
+            result_tree,
+            reinterpret_cast<std::array<std::uint8_t, n_qubytes>*>(result_configs.data_ptr()),
+            reinterpret_cast<std::array<double, 2>*>(result_psi.data_ptr())
+        );
+        AT_CUDA_CHECK(cudaStreamSynchronize(stream));
+    }
+
+    AT_CUDA_CHECK(cudaFree(result_tree));
+    return std::make_tuple(result_configs, result_psi);
+}
+
 #ifndef N_QUBYTES
 #define N_QUBYTES 0
 #endif
@@ -846,6 +1115,7 @@ auto diagonal_term_interface(const torch::Tensor& configs, const torch::Tensor& 
 TORCH_LIBRARY_IMPL(QMP_LIBRARY(N_QUBYTES, PARTICLE_CUT), CUDA, m) {
     m.impl("apply_within", apply_within_interface</*max_op_number=*/4, /*n_qubytes=*/N_QUBYTES, /*particle_cut=*/PARTICLE_CUT>);
     m.impl("find_relative", find_relative_interface</*max_op_number=*/4, /*n_qubytes=*/N_QUBYTES, /*particle_cut=*/PARTICLE_CUT>);
+    m.impl("list_relative", list_relative_interface</*max_op_number=*/4, /*n_qubytes=*/N_QUBYTES, /*particle_cut=*/PARTICLE_CUT>);
     m.impl("diagonal_term", diagonal_term_interface</*max_op_number=*/4, /*n_qubytes=*/N_QUBYTES, /*particle_cut=*/PARTICLE_CUT>);
 }
 #undef QMP_LIBRARY
