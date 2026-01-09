@@ -35,6 +35,7 @@ class _DynamicLanczos:
     batch_count_apply_within: int
     single_extend: bool
     first_extend: bool
+    eigen_count: int = 1
 
     def _extend(self, psi: torch.Tensor, basic_configs: torch.Tensor | None = None) -> None:
         if basic_configs is None:
@@ -51,29 +52,28 @@ class _DynamicLanczos:
         self.psi = torch.nn.functional.pad(self.psi, (0, count_selected - count_core))
         logging.info("Basis extended from %d to %d", count_core, count_selected)
 
-    def run(self) -> typing.Iterable[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    def run(self) -> typing.Iterable[list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]]:
         """
         Run the Lanczos algorithm.
 
         Yields
         ------
-        energy : torch.Tensor
-            The ground energy.
-        configs : torch.Tensor
-            The configurations.
-        psi : torch.Tensor
-            The wavefunction amplitude on the configurations.
+        list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
+            The list of (energy, configs, psi) tuples.
         """
         alpha: list[torch.Tensor]
         beta: list[torch.Tensor]
         v: list[torch.Tensor]
-        energy: torch.Tensor
-        psi: torch.Tensor
+
+        def package(
+            results: list[tuple[torch.Tensor, torch.Tensor]],
+        ) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+            return [(e, self.configs, p) for e, p in results]
+
         if self.count_extend == 0:
             # Do not extend the configuration, process the standard lanczos.
             for _, [alpha, beta, v] in zip(range(1 + self.step), self._run()):
-                energy, psi = self._eigh_tridiagonal(alpha, beta, v)
-                yield energy, self.configs, psi
+                yield package(self._eigh_tridiagonal(alpha, beta, v))
         elif self.first_extend:
             # Extend the configuration before all iterations.
             psi = self.psi
@@ -83,13 +83,11 @@ class _DynamicLanczos:
                 self._extend(psi[selected], self.configs[selected])
                 psi = self.model.apply_within(configs, psi, self.configs)  # pylint: disable=assignment-from-no-return
             for _, [alpha, beta, v] in zip(range(1 + self.step), self._run()):
-                energy, psi = self._eigh_tridiagonal(alpha, beta, v)
-                yield energy, self.configs, psi
+                yield package(self._eigh_tridiagonal(alpha, beta, v))
         elif self.single_extend:
             # Extend the configuration only once after the whole iteration.
             for _, [alpha, beta, v] in zip(range(1 + self.step), self._run()):
-                energy, psi = self._eigh_tridiagonal(alpha, beta, v)
-                yield energy, self.configs, psi
+                yield package(self._eigh_tridiagonal(alpha, beta, v))
             # Extend based on all vector in v.
             v_sum = (
                 functools.reduce(torch.add, ((vi.conj() * vi).real.cpu() for vi in v))
@@ -98,15 +96,13 @@ class _DynamicLanczos:
             )
             self._extend(v_sum)
             for _, [alpha, beta, v] in zip(range(1 + self.step), self._run()):
-                energy, psi = self._eigh_tridiagonal(alpha, beta, v)
-                yield energy, self.configs, psi
+                yield package(self._eigh_tridiagonal(alpha, beta, v))
         else:
             # Extend the configuration, during processing the dynamic lanczos.
             for step in range(1 + self.step):
                 for _, [alpha, beta, v] in zip(range(1 + step), self._run()):
                     pass
-                energy, psi = self._eigh_tridiagonal(alpha, beta, v)
-                yield energy, self.configs, psi
+                yield package(self._eigh_tridiagonal(alpha, beta, v))
                 if step != self.step:
                     self._extend(v[-1])
 
@@ -176,9 +172,9 @@ class _DynamicLanczos:
         alpha: list[torch.Tensor],
         beta: list[torch.Tensor],
         v: list[torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         if len(beta) == 0:
-            return alpha[0], v[0]
+            return [(alpha[0], v[0])]
         # Currently, PyTorch does not support eigh_tridiagonal natively, so we resort to using SciPy for this operation.
         # We can only use 'stebz' or 'stemr' drivers in the current version of SciPy.
         # However, 'stemr' consumes a lot of memory, so we opt for 'stebz' here.
@@ -188,13 +184,16 @@ class _DynamicLanczos:
             torch.stack(beta, dim=0).cpu(),
             lapack_driver="stebz",
             select="i",
-            select_range=(0, 0),
+            select_range=(0, min(self.eigen_count, len(alpha)) - 1),
         )
-        energy = torch.as_tensor(vals[0])
-        result = functools.reduce(
-            torch.add, (weight[0] * vector.to(device=self.configs.device) for weight, vector in zip(vecs, v))
-        )
-        return energy, result
+        results = []
+        for i in range(len(vals)):
+            energy = torch.as_tensor(vals[i])
+            psi = functools.reduce(
+                torch.add, (weight[i] * vector.to(device=self.configs.device) for weight, vector in zip(vecs, v))
+            )
+            results.append((energy, psi))
+        return results
 
 
 def _sampling_from_last_iteration(
@@ -286,6 +285,8 @@ class HaarConfig:
     krylov_iteration: int = 32
     # The threshold for the Krylov iteration
     krylov_threshold: float = 1e-8
+    # The number of excited states to calculate
+    krylov_eigen_count: int = 1
     # The name of the loss function to use
     loss_name: str = "sum_filtered_angle_scaled_log"
     # The number of steps for the local optimizer
@@ -341,6 +342,7 @@ class HaarConfig:
             "Krylov Single Extend: %s, "
             "Krylov Iteration: %d, "
             "Krylov Threshold: %.10f, "
+            "Krylov Eigen Count: %d, "
             "Loss Function: %s, "
             "Local Steps: %d, "
             "Local Loss Threshold: %.10f, "
@@ -355,6 +357,7 @@ class HaarConfig:
             "Yes" if self.krylov_single_extend else "No",
             self.krylov_iteration,
             self.krylov_threshold,
+            self.krylov_eigen_count,
             self.loss_name,
             self.local_step,
             self.local_loss,
@@ -398,7 +401,8 @@ class HaarConfig:
 
             logging.info("Computing the target for local optimization")
             target_energy: torch.Tensor
-            for target_energy, configs, original_psi in _DynamicLanczos(
+            lanczos_results: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
+            for lanczos_results in _DynamicLanczos(
                 model=model,
                 configs=configs,
                 psi=original_psi,
@@ -408,13 +412,18 @@ class HaarConfig:
                 batch_count_apply_within=self.local_batch_count_apply_within,
                 single_extend=self.krylov_single_extend,
                 first_extend=self.krylov_extend_first,
+                eigen_count=self.krylov_eigen_count,
             ).run():
+                target_energy, configs, original_psi = lanczos_results[0]
                 logging.info(
                     "The current energy is %.10f where the sampling count is %d", target_energy.item(), len(configs)
                 )
                 writer.add_scalar("haar/lanczos/energy", target_energy, data["haar"]["lanczos"])  # type: ignore[no-untyped-call]
                 writer.add_scalar("haar/lanczos/error", target_energy - model.ref_energy, data["haar"]["lanczos"])  # type: ignore[no-untyped-call]
                 data["haar"]["lanczos"] += 1
+
+            data["haar"]["excited"] = lanczos_results
+
             max_index = original_psi.abs().argmax()
             target_psi = original_psi / original_psi[max_index]
             logging.info(
