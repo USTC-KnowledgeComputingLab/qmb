@@ -10,7 +10,7 @@ subcommand_dict["my_subcommand"] = MySubcommand
 
 import typing
 import omegaconf
-from .common import RuntimeContext
+from .context import RuntimeContext
 
 
 class SubcommandProto(typing.Protocol):
@@ -20,8 +20,8 @@ class SubcommandProto(typing.Protocol):
 
     def main(
         self,
-        ctx: RuntimeContext,
-        config: omegaconf.DictConfig,
+        context: RuntimeContext,
+        runtime_config: omegaconf.DictConfig,
         checkpoint_data: dict[str, typing.Any],
     ) -> None:
         """

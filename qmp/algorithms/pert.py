@@ -6,7 +6,7 @@ import logging
 import typing
 import dataclasses
 import omegaconf
-from ..utility.common import RuntimeContext
+from ..utility.context import RuntimeContext
 from ..utility.subcommand_dict import subcommand_dict
 
 
@@ -18,22 +18,22 @@ class PerturbationConfig:
 
     def main(
         self,
-        ctx: RuntimeContext,
-        config: omegaconf.DictConfig,
+        context: RuntimeContext,
+        runtime_config: omegaconf.DictConfig,
         checkpoint_data: dict[str, typing.Any],
     ) -> None:
         """
         The main function of two-step optimization process based on imaginary time.
         """
 
-        model = ctx.create_model(config.model)
+        model = context.create_model(runtime_config.model)
         data = checkpoint_data
 
         if "haar" not in data and "imag" in data:
             data["haar"] = data.pop("imag")
         configs, psi = data["haar"]["pool"]
-        configs = configs.to(ctx.device)
-        psi = psi.to(ctx.device)
+        configs = configs.to(context.device)
+        psi = psi.to(context.device)
 
         energy0_num = psi.conj() @ model.apply_within(configs, psi, configs)
         energy0_den = psi.conj() @ psi

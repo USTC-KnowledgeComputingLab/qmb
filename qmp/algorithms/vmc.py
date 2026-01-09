@@ -8,7 +8,7 @@ import dataclasses
 import omegaconf
 import torch
 import torch.utils.tensorboard
-from ..utility.common import RuntimeContext
+from ..utility.context import RuntimeContext
 from ..utility.subcommand_dict import subcommand_dict
 
 
@@ -27,8 +27,8 @@ class VmcConfig:
 
     def main(
         self,
-        ctx: RuntimeContext,
-        config: omegaconf.DictConfig,
+        context: RuntimeContext,
+        runtime_config: omegaconf.DictConfig,
         checkpoint_data: dict[str, typing.Any],
     ) -> None:
         """
@@ -36,12 +36,14 @@ class VmcConfig:
         """
 
         # Create Model and Network
-        model = ctx.create_model(config.model)
-        network = ctx.create_network(config.network, model, checkpoint_data.get("network"))
+        model = context.create_model(runtime_config.model)
+        network = context.create_network(runtime_config.network, model, checkpoint_data.get("network"))
         data = checkpoint_data
 
         # Create Optimizer
-        optimizer = ctx.create_optimizer(config.optimizer, network.parameters(), checkpoint_data.get("optimizer"))
+        optimizer = context.create_optimizer(
+            runtime_config.optimizer, network.parameters(), checkpoint_data.get("optimizer")
+        )
 
         logging.info(
             "Arguments Summary: Sampling Count: %d, Relative Count: %d, Local Steps: %d, ",
@@ -53,7 +55,7 @@ class VmcConfig:
         if "vmc" not in data:
             data["vmc"] = {"global": 0, "local": 0}
 
-        writer = torch.utils.tensorboard.SummaryWriter(log_dir=ctx.folder())  # type: ignore[no-untyped-call]
+        writer = torch.utils.tensorboard.SummaryWriter(log_dir=context.folder())  # type: ignore[no-untyped-call]
 
         while True:
             logging.info("Starting a new optimization cycle")
@@ -109,7 +111,7 @@ class VmcConfig:
             data["vmc"]["global"] += 1
             data["network"] = network.state_dict()
             data["optimizer"] = optimizer.state_dict()
-            ctx.save(data, data["vmc"]["global"])
+            context.save(data, data["vmc"]["global"])
             logging.info("Checkpoint successfully saved")
 
             logging.info("Current optimization cycle completed")

@@ -7,7 +7,7 @@ import typing
 import dataclasses
 import omegaconf
 import torch.utils.tensorboard
-from ..utility.common import RuntimeContext
+from ..utility.context import RuntimeContext
 from ..utility.subcommand_dict import subcommand_dict
 
 
@@ -24,15 +24,15 @@ class ChopImagConfig:
 
     def main(
         self,
-        ctx: RuntimeContext,
-        config: omegaconf.DictConfig,
+        context: RuntimeContext,
+        runtime_config: omegaconf.DictConfig,
         checkpoint_data: dict[str, typing.Any],
     ) -> None:
         """
         The main function for the subspace chopping.
         """
 
-        model = ctx.create_model(config.model)
+        model = context.create_model(runtime_config.model)
         data = checkpoint_data
 
         logging.info(
@@ -42,10 +42,10 @@ class ChopImagConfig:
         )
 
         configs, psi = data["imag"]["pool"]
-        configs = configs.to(device=ctx.device)
-        psi = psi.to(device=ctx.device)
+        configs = configs.to(device=context.device)
+        psi = psi.to(device=context.device)
 
-        writer = torch.utils.tensorboard.SummaryWriter(log_dir=ctx.folder())  # type: ignore[no-untyped-call]
+        writer = torch.utils.tensorboard.SummaryWriter(log_dir=context.folder())  # type: ignore[no-untyped-call]
 
         original_configs = configs
         original_psi = psi
@@ -95,7 +95,7 @@ class ChopImagConfig:
             "original_psi": original_psi,
             "mapping": mapping,
         }
-        ctx.save(data, 0)
+        context.save(data, 0)
 
 
 subcommand_dict["chop_imag"] = ChopImagConfig
