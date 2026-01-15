@@ -3,13 +3,12 @@ Main entry point for the qmp command-line interface.
 """
 
 import pathlib
+import importlib
 import torch
 import dacite
 import hydra
 import omegaconf
 
-from .algorithms import chop_imag, guide, haar, pert, pretrain, vmc  # noqa: F401
-from .models import fcidump, hubbard, ising, openfermion  # noqa: F401
 from .utility.context import RuntimeContext
 from .utility.subcommand_dict import subcommand_dict
 
@@ -17,6 +16,10 @@ from .utility.subcommand_dict import subcommand_dict
 @hydra.main(version_base=None, config_path=str(pathlib.Path().resolve()), config_name="config")
 def main(runtime_config: omegaconf.DictConfig) -> None:
     """Execute the qmp application based on the provided configuration."""
+
+    # 0. Dynamic Imports
+    importlib.import_module(f".algorithms.{runtime_config.action.name}", package=__package__)
+    importlib.import_module(f".models.{runtime_config.model.name}", package=__package__)
 
     # 1. Setup Runtime Context
     context = dacite.from_dict(
