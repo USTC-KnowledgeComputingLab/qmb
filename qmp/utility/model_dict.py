@@ -161,6 +161,31 @@ class ModelProto(typing.Protocol[ModelConfig]):
             The relative configurations.
         """
 
+    def list_relative(
+        self,
+        configs_i: torch.Tensor,
+        psi_i: torch.Tensor,
+        configs_exclude: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        List all unique relative configurations and their accumulated amplitudes.
+
+        Parameters
+        ----------
+        configs_i : torch.Tensor
+            Input configurations (uint8).
+        psi_i : torch.Tensor
+            Input amplitudes (complex64).
+        configs_exclude : torch.Tensor, optional
+            Configurations to exclude from the result. Defaults to configs_i.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            (configs_j, psi_j) where configs_j are unique new configurations
+            and psi_j are their summed amplitudes from all connected paths.
+        """
+
     def diagonal_term(self, configs: torch.Tensor) -> torch.Tensor:
         """
         Calculate the diagonal term for the given configurations.
