@@ -25,23 +25,19 @@ class Hamiltonian:
             return
         if "TORCH_CUDA_ARCH_LIST" in os.environ:
             return
-        supported_sm = [int(arch[3:]) for arch in torch.cuda.get_arch_list() if arch.startswith("sm_")]
-        max_supported_sm = max((sm // 10, sm % 10) for sm in supported_sm)
-        arch_list = set()
-        for i in range(torch.cuda.device_count()):
-            capability = min(max_supported_sm, torch.cuda.get_device_capability(i))
-            arch = f"{capability[0]}.{capability[1]}"
-            arch_list.add(arch)
-        os.environ["TORCH_CUDA_ARCH_LIST"] = ";".join(sorted(arch_list))
+        os.environ["TORCH_CUDA_ARCH_LIST"] = "native"
 
     @classmethod
     def _load_module(cls, device_type: str = "declaration", n_qubytes: int = 0, particle_cut: int = 0) -> object:
+        """
+        Load the Hamiltonian PyTorch extension module for the given device type, number of qubytes, and particle cut or just load the declaration module.
+        """
         cls._set_torch_cuda_arch_list()
         if device_type != "declaration":
             cls._load_module("declaration", n_qubytes, particle_cut)  # Ensure the declaration module is loaded first
         key = (device_type, n_qubytes, particle_cut)
-        is_prepare = key == ("declaration", 0, 0)
-        name = "qmp_hamiltonian" if is_prepare else f"qmp_hamiltonian_{n_qubytes}_{particle_cut}"
+        is_declaration = key == ("declaration", 0, 0)
+        name = "qmp_hamiltonian" if is_declaration else f"qmp_hamiltonian_{n_qubytes}_{particle_cut}"
         if key not in cls._hamiltonian_module:
             build_directory = platformdirs.user_cache_path("qmp", "kclab") / name / device_type
             build_directory.mkdir(parents=True, exist_ok=True)
@@ -58,7 +54,7 @@ class Hamiltonian:
             cls._hamiltonian_module[key] = torch.utils.cpp_extension.load(
                 name=name,
                 sources=sources,
-                is_python_module=is_prepare,
+                is_python_module=is_declaration,
                 extra_cflags=[
                     "-O3",
                     "-ffast-math",
@@ -76,7 +72,7 @@ class Hamiltonian:
                 ],
                 build_directory=build_directory,
             )
-        if is_prepare:
+        if is_declaration:
             return cls._hamiltonian_module[key]
         else:
             return getattr(torch.ops, name)
