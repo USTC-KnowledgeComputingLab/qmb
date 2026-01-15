@@ -222,7 +222,6 @@ auto apply_within_interface(
     TORCH_CHECK(coef.size(1) == 2, "coef must contain 2 elements for each term.");
 
     auto result_sort_index = torch::arange(result_batch_size, torch::TensorOptions().dtype(torch::kInt64).device(device, device_id));
-
     std::sort(
         reinterpret_cast<std::int64_t*>(result_sort_index.data_ptr()),
         reinterpret_cast<std::int64_t*>(result_sort_index.data_ptr()) + result_batch_size,
@@ -385,7 +384,6 @@ void find_relative_kernel(
     std::int8_t sign = parity ? -1 : +1;
     double real = sign * (coef[term_index][0] * psi[batch_index][0] - coef[term_index][1] * psi[batch_index][1]);
     double imag = sign * (coef[term_index][0] * psi[batch_index][1] + coef[term_index][1] * psi[batch_index][0]);
-    // Currently, the weight is calculated as the probability of the state, but it can be changed to other values in the future.
     double weight = real * real + imag * imag;
     std::array<std::uint8_t, n_qubytes + sizeof(double) / sizeof(std::uint8_t)> value;
     for (std::int64_t i = 0; i < sizeof(double) / sizeof(uint8_t); ++i) {
@@ -542,46 +540,51 @@ auto find_relative_interface(
     return unique_nonzero_result_config;
 }
 
-template<std::int64_t n_qubytes_local>
+constexpr std::int64_t max_uint8_t = 256;
+using largest_atomic_int = unsigned int; // The largest int type that can be atomicAdd/atomicSub
+using smallest_atomic_int = unsigned short int; // The smallest int type that can be atomicCAS
+
+template<std::int64_t n_qubytes>
 struct dictionary_tree {
-    using child_t = dictionary_tree<n_qubytes_local - 1>;
-    child_t* children[256];
-    int exist[256];
-    long long nonzero_count;
+    using child_t = dictionary_tree<n_qubytes - 1>;
+    child_t* children[max_uint8_t];
+    smallest_atomic_int exist[max_uint8_t];
+    largest_atomic_int nonzero_count;
 
     bool add(const std::uint8_t* begin, double real, double imag) {
         std::uint8_t index = *begin;
         if (children[index] == nullptr) {
             auto new_child = (child_t*)malloc(sizeof(child_t));
-            if (new_child != nullptr) {
-                memset(new_child, 0, sizeof(child_t));
-                children[index] = new_child;
-                exist[index] = 1;
-            }
+            assert(new_child != nullptr);
+            memset(new_child, 0, sizeof(child_t));
+            children[index] = new_child;
+            exist[index] = 1;
         }
 
         if (children[index]->add(begin + 1, real, imag)) {
             nonzero_count++;
             return true;
+        } else {
+            return false;
         }
-        return false;
     }
 
     template<std::int64_t n_total_qubytes>
     void collect(std::uint64_t index, std::array<std::uint8_t, n_total_qubytes>* configs, std::array<double, 2>* psi) {
         std::uint64_t size_counter = 0;
-        for (int i = 0; i < 256; ++i) {
+        for (std::int64_t i = 0; i < max_uint8_t; ++i) {
             if (exist[i]) {
-                std::uint64_t sub_count = children[i]->nonzero_count;
-                if (size_counter + sub_count > index) {
-                    configs[index][n_total_qubytes - n_qubytes_local] = i;
-                    children[i]->template collect<n_total_qubytes>(index - size_counter, configs, psi);
-                    if (--nonzero_count == 0) {
+                std::uint64_t new_size_counter = size_counter + children[i]->nonzero_count;
+                if (new_size_counter > index) {
+                    std::uint64_t new_index = index - size_counter;
+                    configs[index][n_total_qubytes - n_qubytes] = i;
+                    children[i]->collect<n_total_qubytes>(new_index, &configs[size_counter], &psi[size_counter]);
+                    if (--children[i]->nonzero_count == 0) {
                         free(children[i]);
-                    }
+                    };
                     return;
                 }
-                size_counter += sub_count;
+                size_counter = new_size_counter;
             }
         }
     }
@@ -589,9 +592,9 @@ struct dictionary_tree {
 
 template<>
 struct dictionary_tree<1> {
-    double values[256][2];
-    int exist[256];
-    long long nonzero_count;
+    double values[max_uint8_t][2];
+    smallest_atomic_int exist[max_uint8_t];
+    largest_atomic_int nonzero_count;
 
     bool add(const std::uint8_t* begin, double real, double imag) {
         std::uint8_t index = *begin;
@@ -599,16 +602,17 @@ struct dictionary_tree<1> {
         values[index][1] += imag;
         if (exist[index] == 0) {
             exist[index] = 1;
-            nonzero_count++;
+            ++nonzero_count;
             return true;
+        } else {
+            return false;
         }
-        return false;
     }
 
     template<std::int64_t n_total_qubytes>
     void collect(std::uint64_t index, std::array<std::uint8_t, n_total_qubytes>* configs, std::array<double, 2>* psi) {
         std::uint64_t size_counter = 0;
-        for (int i = 0; i < 256; ++i) {
+        for (std::int64_t i = 0; i < max_uint8_t; ++i) {
             if (exist[i]) {
                 if (size_counter == index) {
                     configs[index][n_total_qubytes - 1] = i;
@@ -616,7 +620,7 @@ struct dictionary_tree<1> {
                     psi[index][1] = values[i][1];
                     return;
                 }
-                size_counter++;
+                ++size_counter;
             }
         }
     }
@@ -774,9 +778,8 @@ auto list_relative_interface(
     );
 
     auto result_tree = (dictionary_tree<n_qubytes>*)malloc(sizeof(dictionary_tree<n_qubytes>));
-    if (result_tree != nullptr) {
-        memset(result_tree, 0, sizeof(dictionary_tree<n_qubytes>));
-    }
+    assert(result_tree != nullptr);
+    memset(result_tree, 0, sizeof(dictionary_tree<n_qubytes>));
 
     list_relative_kernel_interface<max_op_number, n_qubytes, particle_cut>(
         term_number,
@@ -792,6 +795,7 @@ auto list_relative_interface(
     );
 
     long long result_size = result_tree->nonzero_count;
+
     auto result_configs = torch::zeros({result_size, n_qubytes}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
     auto result_psi = torch::zeros({result_size, 2}, torch::TensorOptions().dtype(torch::kFloat64).device(torch::kCPU));
 
