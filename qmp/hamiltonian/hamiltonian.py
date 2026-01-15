@@ -81,6 +81,9 @@ class Hamiltonian:
     def _prepare(
         cls, hamiltonian: dict[tuple[tuple[int, int], ...], complex]
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Parse the Hamiltonian dictionary into site, kind, and coefficient tensors.
+        """
         return getattr(cls._load_module(), "prepare")(hamiltonian)
 
     def __init__(
@@ -89,6 +92,9 @@ class Hamiltonian:
         *,
         kind: str,
     ) -> None:
+        """
+        Initialize the Hamiltonian object, either from a dictionary or from pre-parsed tensors.
+        """
         self.site: torch.Tensor
         self.kind: torch.Tensor
         self.coef: torch.Tensor
@@ -107,12 +113,18 @@ class Hamiltonian:
                 raise ValueError(f"Unknown kind: {kind}")
 
     def _sort_site_kind_coef(self) -> None:
+        """
+        Reorder the site, kind, and coefficient tensors in descending order of the norm of the coefficients.
+        """
         order = self.coef.norm(dim=1).argsort(descending=True)
         self.site = self.site[order]
         self.kind = self.kind[order]
         self.coef = self.coef[order]
 
     def _prepare_data(self, device: torch.device) -> None:
+        """
+        Prepare the site, kind, and coefficient tensors for computation on the given device.
+        """
         self.site = self.site.to(device=device).contiguous()
         self.kind = self.kind.to(device=device).contiguous()
         self.coef = self.coef.to(device=device).contiguous()
@@ -145,7 +157,8 @@ class Hamiltonian:
             [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor
         ]
         _apply_within = getattr(
-            self._load_module(configs_i.device.type, configs_i.size(1), self.particle_cut), "apply_within"
+            self._load_module(configs_i.device.type, configs_i.size(1), self.particle_cut),
+            "apply_within",
         )
         psi_j = torch.view_as_complex(
             _apply_within(configs_i, torch.view_as_real(psi_i), configs_j, self.site, self.kind, self.coef)
@@ -186,7 +199,8 @@ class Hamiltonian:
             [torch.Tensor, torch.Tensor, int, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor
         ]
         _find_relative = getattr(
-            self._load_module(configs_i.device.type, configs_i.size(1), self.particle_cut), "find_relative"
+            self._load_module(configs_i.device.type, configs_i.size(1), self.particle_cut),
+            "find_relative",
         )
         configs_j = _find_relative(
             configs_i, torch.view_as_real(psi_i), count_selected, self.site, self.kind, self.coef, configs_exclude
@@ -221,7 +235,8 @@ class Hamiltonian:
             configs_exclude = configs_i
         self._prepare_data(configs_i.device)
         _list_relative = getattr(
-            self._load_module(configs_i.device.type, configs_i.size(1), self.particle_cut), "list_relative"
+            self._load_module(configs_i.device.type, configs_i.size(1), self.particle_cut),
+            "list_relative",
         )
         configs_j, psi_j_real = _list_relative(
             configs_i, torch.view_as_real(psi_i), self.site, self.kind, self.coef, configs_exclude
@@ -245,7 +260,8 @@ class Hamiltonian:
         self._prepare_data(configs.device)
         _diagonal_term: typing.Callable[[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
         _diagonal_term = getattr(
-            self._load_module(configs.device.type, configs.size(1), self.particle_cut), "diagonal_term"
+            self._load_module(configs.device.type, configs.size(1), self.particle_cut),
+            "diagonal_term",
         )
         psi_result = torch.view_as_complex(_diagonal_term(configs, self.site, self.kind, self.coef))
         return psi_result
