@@ -1,4 +1,6 @@
-"""Main entry point for the qmp command-line interface."""
+"""
+Main entry point for the qmp command-line interface.
+"""
 
 import pathlib
 import torch
