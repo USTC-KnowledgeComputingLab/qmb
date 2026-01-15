@@ -29,7 +29,7 @@ struct array_less {
 };
 
 // 计算构型的概率权重（振幅模长平方）。
-// 在 Top-K 筛选中，以此作为判断“重要构型”的依据。
+// 在 Top-K 筛选中，以此作为判断重要构型的依据。
 template<typename T, std::int64_t size>
 struct array_square_greater {
     __device__ T square(const std::array<T, size>& value) const {
@@ -58,8 +58,8 @@ __device__ void set_bit(std::uint8_t* data, std::uint8_t index, bool value) {
 }
 
 // 核心逻辑：将哈密顿量的一个项 (term) 作用于当前构型。
-// 1. In-place 修改：直接在 current_configs 内存上进行位翻转，避免拷贝。
-// 2. 物理校验：检查费米子产生/湮灭算符的合法性（Pauli 不相容原理）。
+// 1. 物理校验：检查费米子产生/湮灭算符的合法性（Pauli 不相容原理）。
+// 2. In-place 修改：直接在 current_configs 内存上进行位翻转，避免拷贝。
 // 3. 符号计算：通过统计目标格点前的粒子总数（Parity），处理费米子交换符号 (-1)^N。
 template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
 __device__ std::pair<bool, bool> hamiltonian_apply_kernel(
@@ -145,7 +145,6 @@ __device__ void apply_within_kernel(
     atomicAdd(&result_psi[mid][1], sign * (coef[term_index][0] * psi[batch_index][1] + coef[term_index][1] * psi[batch_index][0]));
 }
 
-// 调度层：将 2D CUDA Grid 映射到 (哈密顿量项, 态向量Batch) 两个物理维度。
 template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
 __global__ void apply_within_kernel_interface(
     std::int64_t term_number,
@@ -180,7 +179,6 @@ __global__ void apply_within_kernel_interface(
     }
 }
 
-// 接口层：处理张量检查、内存分配，并对基组进行排序以供 Kernel 内二分查找使用。
 template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
 auto apply_within_interface(
     const torch::Tensor& configs,
@@ -194,7 +192,13 @@ auto apply_within_interface(
     std::int64_t batch_size = configs.size(0);
     std::int64_t result_batch_size = result_configs.size(0);
     std::int64_t term_number = site.size(0);
+
     at::cuda::CUDAGuard cuda_device_guard(device_id);
+    auto stream = at::cuda::getCurrentCUDAStream(device_id);
+    auto policy = thrust::device.on(stream);
+    cudaDeviceProp prop;
+    AT_CUDA_CHECK(cudaGetDeviceProperties(&prop, device_id));
+    std::int64_t max_threads_per_block = prop.maxThreadsPerBlock;
 
     TORCH_CHECK(configs.device().type() == torch::kCUDA, "configs must be on CUDA.")
     TORCH_CHECK(configs.device().index() == device_id, "configs must be on the same device as others.");
@@ -244,17 +248,8 @@ auto apply_within_interface(
     TORCH_CHECK(coef.size(0) == term_number, "coef size must match the provided term_number.");
     TORCH_CHECK(coef.size(1) == 2, "coef must contain 2 elements for each term.");
 
-    auto stream = at::cuda::getCurrentCUDAStream(device_id);
-    auto policy = thrust::device.on(stream);
-
-    cudaDeviceProp prop;
-    AT_CUDA_CHECK(cudaGetDeviceProperties(&prop, device_id));
-    std::int64_t max_threads_per_block = prop.maxThreadsPerBlock;
-
     auto sorted_result_configs = result_configs.clone(torch::MemoryFormat::Contiguous);
     auto result_sort_index = torch::arange(result_batch_size, torch::TensorOptions().dtype(torch::kInt64).device(device, device_id));
-    auto sorted_result_psi = torch::zeros({result_batch_size, 2}, torch::TensorOptions().dtype(torch::kFloat64).device(device, device_id));
-
     thrust::sort_by_key(
         policy,
         reinterpret_cast<std::array<std::uint8_t, n_qubytes>*>(sorted_result_configs.data_ptr()),
@@ -262,11 +257,11 @@ auto apply_within_interface(
         reinterpret_cast<std::int64_t*>(result_sort_index.data_ptr()),
         array_less<std::uint8_t, n_qubytes>()
     );
+    auto sorted_result_psi = torch::zeros({result_batch_size, 2}, torch::TensorOptions().dtype(torch::kFloat64).device(device, device_id));
 
     auto threads_per_block = dim3{1, max_threads_per_block >> 1}; // I don't know why, but need to divide by 2 to avoid errors
     auto num_blocks =
         dim3{(term_number + threads_per_block.x - 1) / threads_per_block.x, (batch_size + threads_per_block.y - 1) / threads_per_block.y};
-
     apply_within_kernel_interface<max_op_number, n_qubytes, particle_cut><<<num_blocks, threads_per_block, 0, stream>>>(
         /*term_number=*/term_number,
         /*batch_size=*/batch_size,
@@ -286,7 +281,7 @@ auto apply_within_interface(
     return result_psi;
 }
 
-// 自旋锁实现：使用 atomicCAS 获取锁，配合 nanosleep 进行退避(backoff)。
+// 自旋锁实现：使用 atomicCAS 获取锁，配合 nanosleep 进行backoff。
 __device__ void _mutex_lock(int* mutex) {
     // I don't know why we need to wait for these periods of time, but the examples in the CUDA documentation are written this way.
     // https://docs.nvidia.com/cuda/cuda-c-programming-guide/#nanosleep-example
@@ -301,10 +296,9 @@ __device__ void _mutex_lock(int* mutex) {
 
 __device__ void mutex_lock(int* mutex) {
     _mutex_lock(mutex);
-    __threadfence(); // 确保临界区内存访问不被重排到锁获取之前
+    __threadfence();
 }
 
-// 耦合锁 (Hand-over-hand locking) 辅助函数：同时锁定两把锁，用于堆节点交换。
 __device__ void mutex_lock(int* mutex1, int* mutex2) {
     _mutex_lock(mutex1);
     _mutex_lock(mutex2);
@@ -316,7 +310,7 @@ __device__ void _mutex_unlock(int* mutex) {
 }
 
 __device__ void mutex_unlock(int* mutex) {
-    __threadfence(); // 确保临界区内存写入在释放锁之前完成
+    __threadfence();
     _mutex_unlock(mutex);
 }
 
@@ -326,11 +320,10 @@ __device__ void mutex_unlock(int* mutex1, int* mutex2) {
     _mutex_unlock(mutex2);
 }
 
-// 并发 Top-K 筛选堆 (add_into_heap)。
-//
-// 为了在 GPU 上从海量并发数据中筛选前 K 个最大值，采用细粒度锁 (Fine-grained Locking) 策略：
+// 并发 Top-K 筛选堆。
+// 为了在 GPU 上从海量并发数据中筛选前 K 个最大值，采用细粒度锁策略：
 // 不锁定整个堆，而是给每个节点分配独立的 Mutex。
-// 当新元素在堆中下沉 (sift-down) 时，采用“蟹行”锁定：锁定当前节点 -> 锁定子节点 -> 比较/交换 -> 释放当前节点。
+// 当新元素在堆中下沉时，采用“蟹行”锁定：锁定当前节点 -> 锁定子节点 -> 比较/交换 -> 释放当前节点。
 template<typename T, typename Less = thrust::less<T>>
 __device__ void add_into_heap(T* heap, int* mutex, std::int64_t heap_size, const T& value) {
     auto less = Less();
@@ -463,10 +456,10 @@ struct array_first_double_less {
     }
 };
 
-// 子空间扩展逻辑：
+// 子空间扩展：
 // 1. 产生新构型。
-// 2. 二分查找排除掉已存在的构型 (exclude_configs)。
-// 3. 计算权重，尝试插入并发堆 (add_into_heap)。
+// 2. 二分查找排除掉已存在的构型。
+// 3. 计算权重，尝试插入并发堆。
 template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
 __device__ void find_relative_kernel(
     std::int64_t term_index,
@@ -518,6 +511,7 @@ __device__ void find_relative_kernel(
     double real = sign * (coef[term_index][0] * psi[batch_index][0] - coef[term_index][1] * psi[batch_index][1]);
     double imag = sign * (coef[term_index][0] * psi[batch_index][1] + coef[term_index][1] * psi[batch_index][0]);
     // Currently, the weight is calculated as the probability of the state, but it can be changed to other values in the future.
+    // TODO: I should choose a better way to calculate the weight for theoretical reasons.
     double weight = real * real + imag * imag;
     std::array<std::uint8_t, n_qubytes + sizeof(double) / sizeof(std::uint8_t)> value;
     for (std::int64_t i = 0; i < sizeof(double) / sizeof(uint8_t); ++i) {
@@ -534,7 +528,6 @@ __device__ void find_relative_kernel(
     );
 }
 
-// find_relative 全局 Kernel 入口。
 template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
 __global__ void find_relative_kernel_interface(
     std::int64_t term_number,
@@ -573,8 +566,6 @@ __global__ void find_relative_kernel_interface(
     }
 }
 
-// find_relative 接口函数。
-// 负责堆锁显存分配、执行计算流水线并对最终选出的构型进行排序去重。
 template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
 auto find_relative_interface(
     const torch::Tensor& configs,
@@ -589,7 +580,13 @@ auto find_relative_interface(
     std::int64_t batch_size = configs.size(0);
     std::int64_t term_number = site.size(0);
     std::int64_t exclude_size = exclude_configs.size(0);
+
     at::cuda::CUDAGuard cuda_device_guard(device_id);
+    auto stream = at::cuda::getCurrentCUDAStream(device_id);
+    auto policy = thrust::device.on(stream);
+    cudaDeviceProp prop;
+    AT_CUDA_CHECK(cudaGetDeviceProperties(&prop, device_id));
+    std::int64_t max_threads_per_block = prop.maxThreadsPerBlock;
 
     TORCH_CHECK(configs.device().type() == torch::kCUDA, "configs must be on CUDA.")
     TORCH_CHECK(configs.device().index() == device_id, "configs must be on the same device as others.");
@@ -639,13 +636,6 @@ auto find_relative_interface(
     TORCH_CHECK(exclude_configs.size(0) == exclude_size, "configs batch size must match the provided exclude_size.");
     TORCH_CHECK(exclude_configs.size(1) == n_qubytes, "configs must have the same number of qubits as the provided n_qubytes.");
 
-    auto stream = at::cuda::getCurrentCUDAStream(device_id);
-    auto policy = thrust::device.on(stream);
-
-    cudaDeviceProp prop;
-    AT_CUDA_CHECK(cudaGetDeviceProperties(&prop, device_id));
-    std::int64_t max_threads_per_block = prop.maxThreadsPerBlock;
-
     auto sorted_exclude_configs = exclude_configs.clone(torch::MemoryFormat::Contiguous);
 
     thrust::sort(
@@ -661,14 +651,13 @@ auto find_relative_interface(
     );
     std::array<std::uint8_t, n_qubytes + sizeof(double) / sizeof(std::uint8_t)>* heap =
         reinterpret_cast<std::array<std::uint8_t, n_qubytes + sizeof(double) / sizeof(std::uint8_t)>*>(result_pool.data_ptr());
+
     int* mutex;
     AT_CUDA_CHECK(cudaMalloc(&mutex, sizeof(int) * count_selected));
     AT_CUDA_CHECK(cudaMemset(mutex, 0, sizeof(int) * count_selected));
-
     auto threads_per_block = dim3{1, max_threads_per_block >> 1}; // I don't know why, but need to divide by 2 to avoid errors
     auto num_blocks =
         dim3{(term_number + threads_per_block.x - 1) / threads_per_block.x, (batch_size + threads_per_block.y - 1) / threads_per_block.y};
-
     find_relative_kernel_interface<max_op_number, n_qubytes, particle_cut><<<num_blocks, threads_per_block, 0, stream>>>(
         /*term_number=*/term_number,
         /*batch_size=*/batch_size,
@@ -684,7 +673,6 @@ auto find_relative_interface(
         /*heap_size=*/count_selected
     );
     AT_CUDA_CHECK(cudaStreamSynchronize(stream));
-
     AT_CUDA_CHECK(cudaFree(mutex));
 
     // Here, the bytes before sizeof(double) / sizeof(std::uint8_t) in result_pool are weights, and the bytes after are configs
@@ -705,9 +693,8 @@ constexpr std::int64_t max_uint8_t = 256;
 using largest_atomic_int = unsigned int; // The largest int type that can be atomicAdd/atomicSub
 using smallest_atomic_int = unsigned short int; // The smallest int type that can be atomicCAS
 
-// 256 叉前缀树 (Trie)：用于在 GPU 上进行并行的构型去重和振幅累加。
-// 每一层对应构型的一个字节（uint8），叶子节点存储最终合并后的复数振幅。
-// 这种结构通过路径唯一性天然实现了哈希去重，并允许在插入时直接进行物理干涉（振幅叠加）。
+// 256 叉前缀树：用于在 GPU 上进行并行的构型去重和振幅累加。
+// 每一层对应构型的一个字节（uint8），叶子节点存储复数振幅。
 template<std::int64_t n_qubytes>
 struct dictionary_tree {
     using child_t = dictionary_tree<n_qubytes - 1>;
@@ -758,7 +745,7 @@ struct dictionary_tree {
     }
 };
 
-// Trie 递归终点：叶子节点存储合并后的物理振幅。
+// Trie 递归终点：叶子节点存储物理振幅。
 template<>
 struct dictionary_tree<1> {
     double values[max_uint8_t][2];
@@ -794,6 +781,10 @@ struct dictionary_tree<1> {
     }
 };
 
+// 列出子空间：
+// 1. 产生新构型。
+// 2. 二分查找排除掉已存在的构型。
+// 3. 将新构型和振幅加入前缀树。
 template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
 __device__ void list_relative_kernel(
     std::int64_t term_index,
@@ -891,7 +882,7 @@ __global__ void collect_tree_kernel(
 
 bool first_call_to_set_heap_limit = true;
 
-void set_heap_limit() {
+void _set_heap_limit() {
     // 增加 CUDA 动态内存限制以容纳 Trie 节点。
     if (first_call_to_set_heap_limit) {
         size_t expect = 1 << 60;
@@ -919,9 +910,14 @@ auto list_relative_interface(
     std::int64_t batch_size = configs.size(0);
     std::int64_t term_number = site.size(0);
     std::int64_t exclude_size = exclude_configs.size(0);
-    at::cuda::CUDAGuard cuda_device_guard(device_id);
 
-    set_heap_limit();
+    at::cuda::CUDAGuard cuda_device_guard(device_id);
+    auto stream = at::cuda::getCurrentCUDAStream(device_id);
+    auto policy = thrust::device.on(stream);
+    cudaDeviceProp prop;
+    AT_CUDA_CHECK(cudaGetDeviceProperties(&prop, device_id));
+    std::int64_t max_threads_per_block = prop.maxThreadsPerBlock;
+    _set_heap_limit();
 
     TORCH_CHECK(configs.device().type() == torch::kCUDA, "configs must be on CUDA.")
     TORCH_CHECK(configs.device().index() == device_id, "configs must be on the same device as others.");
@@ -971,10 +967,6 @@ auto list_relative_interface(
     TORCH_CHECK(exclude_configs.size(0) == exclude_size, "configs batch size must match the provided exclude_size.");
     TORCH_CHECK(exclude_configs.size(1) == n_qubytes, "configs must have the same number of qubits as the provided n_qubytes.");
 
-    auto stream = at::cuda::getCurrentCUDAStream(device_id);
-    auto policy = thrust::device.on(stream);
-
-    // 确保 exclude_configs 已排序，以支持二分查找
     auto sorted_exclude_configs = exclude_configs.clone(torch::MemoryFormat::Contiguous);
     thrust::sort(
         policy,
@@ -987,14 +979,11 @@ auto list_relative_interface(
     AT_CUDA_CHECK(cudaMalloc(&result_tree, sizeof(dictionary_tree<n_qubytes>)));
     AT_CUDA_CHECK(cudaMemset(result_tree, 0, sizeof(dictionary_tree<n_qubytes>)));
 
-    cudaDeviceProp prop;
-    AT_CUDA_CHECK(cudaGetDeviceProperties(&prop, device_id));
-    auto threads_per_block = dim3{1, (unsigned int)prop.maxThreadsPerBlock >> 1};
+    auto threads_per_block = dim3{1, max_threads_per_block >> 1};
     auto num_blocks = dim3{
         (unsigned int)(term_number + threads_per_block.x - 1) / threads_per_block.x,
         (unsigned int)(batch_size + threads_per_block.y - 1) / threads_per_block.y
     };
-
     list_relative_kernel_interface<max_op_number, n_qubytes, particle_cut><<<num_blocks, threads_per_block, 0, stream>>>(
         term_number,
         batch_size,
@@ -1031,7 +1020,7 @@ auto list_relative_interface(
     return std::make_tuple(result_configs, result_psi);
 }
 
-// diagonal_term_kernel 计算哈密顿量的对角贡献。
+// 计算哈密顿量的对角贡献。
 // 当哈密顿量项作用后的构型保持不变时，累加其复数系数。
 template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
 __device__ void diagonal_term_kernel(
@@ -1057,7 +1046,6 @@ __device__ void diagonal_term_kernel(
         return;
     }
     auto less = array_less<std::uint8_t, n_qubytes>();
-    // 如果作用后的构型不等于原始构型，说明它是非对角项
     if (less(current_configs, configs[batch_index]) || less(configs[batch_index], current_configs)) {
         return; // The term does not apply to the current configuration
     }
@@ -1066,7 +1054,6 @@ __device__ void diagonal_term_kernel(
     atomicAdd(&result_psi[batch_index][1], sign * coef[term_index][1]);
 }
 
-// diagonal_term 全局 Kernel 入口。
 template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
 __global__ void diagonal_term_kernel_interface(
     std::int64_t term_number,
@@ -1095,14 +1082,19 @@ __global__ void diagonal_term_kernel_interface(
     }
 }
 
-// diagonal_term 接口函数。
 template<std::int64_t max_op_number, std::int64_t n_qubytes, std::int64_t particle_cut>
 auto diagonal_term_interface(const torch::Tensor& configs, const torch::Tensor& site, const torch::Tensor& kind, const torch::Tensor& coef)
     -> torch::Tensor {
     std::int64_t device_id = configs.device().index();
     std::int64_t batch_size = configs.size(0);
     std::int64_t term_number = site.size(0);
+
     at::cuda::CUDAGuard cuda_device_guard(device_id);
+    auto stream = at::cuda::getCurrentCUDAStream(device_id);
+    auto policy = thrust::device.on(stream);
+    cudaDeviceProp prop;
+    AT_CUDA_CHECK(cudaGetDeviceProperties(&prop, device_id));
+    std::int64_t max_threads_per_block = prop.maxThreadsPerBlock;
 
     TORCH_CHECK(configs.device().type() == torch::kCUDA, "configs must be on CUDA.")
     TORCH_CHECK(configs.device().index() == device_id, "configs must be on the same device as others.");
@@ -1136,19 +1128,11 @@ auto diagonal_term_interface(const torch::Tensor& configs, const torch::Tensor& 
     TORCH_CHECK(coef.size(0) == term_number, "coef size must match the provided term_number.");
     TORCH_CHECK(coef.size(1) == 2, "coef must contain 2 elements for each term.");
 
-    auto stream = at::cuda::getCurrentCUDAStream(device_id);
-    auto policy = thrust::device.on(stream);
-
-    cudaDeviceProp prop;
-    AT_CUDA_CHECK(cudaGetDeviceProperties(&prop, device_id));
-    std::int64_t max_threads_per_block = prop.maxThreadsPerBlock;
-
     auto result_psi = torch::zeros({batch_size, 2}, torch::TensorOptions().dtype(torch::kFloat64).device(device, device_id));
 
     auto threads_per_block = dim3{1, max_threads_per_block >> 1}; // I don't know why, but need to divide by 2 to avoid errors
     auto num_blocks =
         dim3{(term_number + threads_per_block.x - 1) / threads_per_block.x, (batch_size + threads_per_block.y - 1) / threads_per_block.y};
-
     diagonal_term_kernel_interface<max_op_number, n_qubytes, particle_cut><<<num_blocks, threads_per_block, 0, stream>>>(
         /*term_number=*/term_number,
         /*batch_size=*/batch_size,
