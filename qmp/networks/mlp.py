@@ -331,6 +331,244 @@ class WaveFunctionElectronUpDown(torch.nn.Module):
         return x, amplitude, None, None
 
 
+class WaveFunctionElectron(torch.nn.Module):
+    """
+    The wave function for the MLP network.
+    This module maintains the conservation of total particle number.
+    """
+
+    def __init__(
+        self,
+        *,
+        sites: int,  # Number of qubits
+        physical_dim: int,  # Dimension of the physical space, which is always 2 for MLP
+        is_complex: bool,  # Indicates whether the wave function is complex-valued, which is always true for MLP
+        electrons: int,  # Total number of electrons
+        hidden_size: tuple[int, ...],  # Hidden layer sizes for the MLPs used in the amplitude and phase networks
+        ordering: int
+        | list[int],  # Ordering of sites: +1 for normal order, -1 for reversed order, or a custom order list
+    ) -> None:
+        super().__init__()
+        self.sites: int = sites
+        assert physical_dim == 2
+        assert is_complex == True  # noqa: E712
+        self.electrons: int = electrons
+        self.hidden_size: tuple[int, ...] = hidden_size
+
+        # Amplitude and Phase Networks for Each Site
+        # The amplitude network takes in qubits from previous sites and outputs a vector of dimension 2, representing the configuration of the qubit at the current site.
+        # And the phase network accepts qubits from all sites and outputs the phase.
+        self.amplitude: torch.nn.ModuleList = torch.nn.ModuleList(
+            [MLP(i, 2, self.hidden_size) for i in range(self.sites)]
+        )
+        self.phase: torch.nn.Module = MLP(self.sites, 1, self.hidden_size)
+
+        # Site Ordering Configuration
+        # +1 for normal order, -1 for reversed order
+        if isinstance(ordering, int) and ordering == +1:
+            ordering = list(range(self.sites))
+        if isinstance(ordering, int) and ordering == -1:
+            ordering = list(reversed(range(self.sites)))
+        self.ordering: torch.Tensor
+        self.register_buffer("ordering", torch.tensor(ordering, dtype=torch.int64))
+        self.ordering_reversed: torch.Tensor
+        self.register_buffer(
+            "ordering_reversed",
+            torch.scatter(
+                torch.zeros(self.sites, dtype=torch.int64),
+                0,
+                self.ordering,
+                torch.arange(self.sites, dtype=torch.int64),
+            ),
+        )
+
+        # Dummy Parameter for Device and Dtype Retrieval
+        # This parameter is used to infer the device and dtype of the model.
+        self.dummy_param = torch.nn.Parameter(torch.empty(0))
+
+    @torch.jit.export
+    def _mask(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Determine whether we could append an electron or a hole after incomplete configurations.
+        """
+        # x: batch_size * current_site
+        current_site = x.shape[1]
+        # number: batch_size
+        number = x.sum(dim=1)
+
+        electron = number
+        hole = current_site - electron
+
+        # add_electron/hole: batch_size
+        add_electron = electron < self.electrons
+        add_hole = hole < self.sites - self.electrons
+
+        # return: batch_size * 2
+        return torch.stack([add_hole, add_electron], dim=-1)
+
+    @torch.jit.export
+    def _normalize_amplitude(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Normalize the log amplitude of incomplete configurations.
+        """
+        # x: batch_size * 2
+        # param: batch_size
+        param = (2 * x).exp().sum(dim=[-1]).log() / 2
+        x = x - param.unsqueeze(-1)
+        # 1 = param = sqrt(sum(x.exp()^2)) now
+        return x
+
+    @torch.jit.export
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Compute the wave function psi for the given configurations.
+        """
+        device: torch.device = self.dummy_param.device
+        dtype: torch.dtype = self.dummy_param.dtype
+
+        batch_size: int = x.shape[0]
+        # x: batch_size * sites
+        x = unpack_int(x, size=1, last_dim=self.sites).view([batch_size, self.sites])
+        # Apply ordering
+        x = torch.index_select(x, 1, self.ordering_reversed)
+
+        x_float: torch.Tensor = x.to(dtype=dtype)
+        arange: torch.Tensor = torch.arange(batch_size, device=device)
+        total_amplitude: torch.Tensor = torch.zeros([batch_size], device=device, dtype=dtype).double()
+        for i, amplitude_m in enumerate(self.amplitude):
+            # delta_amplitude : batch_size * 2
+            # delta_amplitude represents the amplitude changes for the configurations at the new site.
+            delta_amplitude: torch.Tensor = amplitude_m(x_float[:, :i].view([batch_size, i])).view([batch_size, 2])
+            # Apply a filter mask to the amplitude to ensure the conservation of particle number.
+            delta_amplitude = delta_amplitude + torch.where(self._mask(x[:, :i]), 0, -torch.inf)
+
+            # normalized_delta_amplitude: batch_size * 2
+            # Normalize the delta amplitude.
+            normalized_delta_amplitude: torch.Tensor = self._normalize_amplitude(delta_amplitude)
+
+            # selected_delta_amplitude: batch
+            # Select the delta amplitude for the current site.
+            xi_int32: torch.Tensor = x[:, i].to(dtype=torch.int32)
+            selected_delta_amplitude: torch.Tensor = normalized_delta_amplitude[arange, xi_int32]
+
+            total_amplitude = total_amplitude + selected_delta_amplitude.double()
+
+        total_phase: torch.Tensor = self.phase(x_float.view([batch_size, self.sites])).view([batch_size])
+
+        return torch.view_as_complex(torch.stack([total_amplitude, total_phase.double()], dim=-1)).exp()
+
+    @torch.jit.export
+    def generate_unique(self, batch_size: int, block_num: int = 1) -> tuple[torch.Tensor, torch.Tensor, None, None]:
+        """
+        Generate configurations uniquely.
+        See https://arxiv.org/pdf/2408.07625.
+        """
+        device: torch.device = self.dummy_param.device
+        dtype: torch.dtype = self.dummy_param.dtype
+
+        # x: local_batch_size * current_site
+        x: torch.Tensor = torch.empty([1, 0], device=device, dtype=torch.uint8)
+        # (un)perturbed_log_probability : local_batch_size
+        unperturbed_probability: torch.Tensor = torch.tensor([0], dtype=dtype, device=device)
+        perturbed_probability: torch.Tensor = torch.tensor([0], dtype=dtype, device=device)
+        for i, amplitude_m in enumerate(self.amplitude):
+            local_batch_size: int = x.shape[0]
+            x_float: torch.Tensor = x.to(dtype=dtype)
+
+            # delta_amplitude: batch * 2
+            # delta_amplitude represents the amplitude changes for the configurations at the new site.
+            local_batch_size_block = local_batch_size // block_num
+            remainder = local_batch_size % block_num
+            delta_amplitude_block_list: list[torch.Tensor] = []
+            for j in range(block_num):
+                if j < remainder:
+                    current_local_batch_size_block = local_batch_size_block + 1
+                else:
+                    current_local_batch_size_block = local_batch_size_block
+                start_index = j * local_batch_size_block + min(j, remainder)
+                end_index = start_index + current_local_batch_size_block
+                batch_indices_block = torch.arange(start_index, end_index, device=device, dtype=torch.int64)
+                delta_amplitude_block = amplitude_m(x_float.view([local_batch_size, i])[batch_indices_block]).view(
+                    [current_local_batch_size_block, 2]
+                )
+                delta_amplitude_block_list.append(delta_amplitude_block)
+            delta_amplitude: torch.Tensor = torch.cat(delta_amplitude_block_list)
+
+            # Apply a filter mask to the amplitude to ensure the conservation of particle number.
+            delta_amplitude = delta_amplitude + torch.where(self._mask(x), 0, -torch.inf)
+
+            # normalized_delta_amplitude: batch_size * 2
+            # Normalize the delta amplitude.
+            normalized_delta_amplitude: torch.Tensor = self._normalize_amplitude(delta_amplitude)
+
+            # The delta unperturbed prob for all batch and 2 adds
+            l: torch.Tensor = (2 * normalized_delta_amplitude).view([local_batch_size, 2])  # noqa: E741
+            # and add to get the current unperturbed prob
+            l = unperturbed_probability.view([local_batch_size, 1]) + l  # noqa: E741
+            # Get perturbed prob by adding GUMBEL(0)
+            L: torch.Tensor = l - (-torch.rand_like(l).log()).log()  # noqa: E741
+            # Get max perturbed prob
+            Z: torch.Tensor = L.max(dim=-1).values.view([local_batch_size, 1])
+            # Evaluate the conditioned prob
+            tildeL: torch.Tensor = -torch.log(
+                torch.exp(-perturbed_probability.view([local_batch_size, 1])) - torch.exp(-Z) + torch.exp(-L)
+            )
+
+            # Calculate appended configurations for 2 adds
+            # local_batch_size * current_site + local_batch_size * 1
+            x0: torch.Tensor = torch.cat(
+                [x, torch.tensor([0], device=device, dtype=torch.uint8).expand(local_batch_size, -1)], dim=1
+            )
+            x1: torch.Tensor = torch.cat(
+                [x, torch.tensor([1], device=device, dtype=torch.uint8).expand(local_batch_size, -1)], dim=1
+            )
+
+            # Cat all configurations to get x : new_local_batch_size * (current_size+1) * 2
+            # (un)perturbed prob : new_local_batch_size
+            x = torch.cat([x0, x1])
+            unperturbed_probability = l.permute(1, 0).reshape([2 * local_batch_size])
+            perturbed_probability = tildeL.permute(1, 0).reshape([2 * local_batch_size])
+
+            # Filter results, only use largest batch_size ones
+            selected = perturbed_probability.argsort(descending=True)[:batch_size]
+            x = x[selected]
+            unperturbed_probability = unperturbed_probability[selected]
+            perturbed_probability = perturbed_probability[selected]
+
+            # If prob = 0, filter it forcibly
+            selected = perturbed_probability.isfinite()
+            x = x[selected]
+            unperturbed_probability = unperturbed_probability[selected]
+            perturbed_probability = perturbed_probability[selected]
+
+        # Apply ordering
+        x = torch.index_select(x, 1, self.ordering)
+        # Flatten site part of x
+        x = x.view([x.size(0), self.sites])
+        # It should return configurations, amplitudes, probabilities and multiplicities.
+        # But it is unique generator, so the last two fields are None
+        x = pack_int(x, size=1)
+
+        # Calculate the amplitude for the generated configurations in the batch.
+        real_batch_size = len(x)
+        real_batch_size_block = real_batch_size // block_num
+        remainder = real_batch_size % block_num
+        amplitude_list = []
+        for j in range(block_num):
+            if j < remainder:
+                current_real_batch_size_block = real_batch_size_block + 1
+            else:
+                current_real_batch_size_block = real_batch_size_block
+            start_index = j * real_batch_size_block + min(j, remainder)
+            end_index = start_index + current_real_batch_size_block
+            batch_indices_block = torch.arange(start_index, end_index, device=device, dtype=torch.int64)
+            amplitude_block = self(x[batch_indices_block])
+            amplitude_list.append(amplitude_block)
+        amplitude: torch.Tensor = torch.cat(amplitude_list)
+
+        return x, amplitude, None, None
+
+
 class WaveFunctionNormal(torch.nn.Module):
     """
     The wave function for the MLP network.
