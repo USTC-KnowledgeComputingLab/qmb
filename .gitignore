@@ -9,11 +9,11 @@ wheels/
 # Virtual environments
 .venv
 
-# CodeQL
-/_codeql_detected_source_root
-
 # Models
 /models
 
 # Version
 /qmp/_version.py
+
+# Worktrees
+/worktree
