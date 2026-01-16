@@ -191,6 +191,7 @@ class MlpConfig:
         return network
 
 
+Model.network_dict["mlp/u1u1"] = MlpConfig
 Model.network_dict["mlp"] = MlpConfig
 
 
@@ -256,6 +257,7 @@ class TransformersConfig:
         return network
 
 
+Model.network_dict["transformers/u1u1"] = TransformersConfig
 Model.network_dict["transformers"] = TransformersConfig
 
 
@@ -286,7 +288,7 @@ class MlpElectronConfig:
         return network
 
 
-Model.network_dict["mlp_electron"] = MlpElectronConfig
+Model.network_dict["mlp/u1"] = MlpElectronConfig
 
 
 @dataclasses.dataclass
@@ -350,4 +352,4 @@ class TransformersElectronConfig:
         return network
 
 
-Model.network_dict["transformers_electron"] = TransformersElectronConfig
+Model.network_dict["transformers/u1"] = TransformersElectronConfig
