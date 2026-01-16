@@ -22,7 +22,7 @@ class RuntimeContext:
     This class defines the common runtime environment.
     """
 
-    # The log path for parent job job name, it is only used for loading the checkpoint from the parent job, leave empty to use the current job name
+    # The parent path to load the checkpoint from, leave empty to use the current folder or start from scratch
     parent_path: pathlib.Path | None = None
     # The manual random seed, leave empty for set seed automatically
     random_seed: int | None = None
@@ -61,27 +61,25 @@ class RuntimeContext:
 
     def setup(self) -> dict[str, typing.Any]:
         """
-        Setup the runtime environment (directories, logging, seed, initial checkpoint load).
-        Returns the loaded checkpoint data (if any).
+        Setup the runtime environment, and returns the loaded checkpoint data (if any).
         """
+        logging.info("Log directory: %s", self.folder())
         self.folder().mkdir(parents=True, exist_ok=True)
 
-        logging.info("Starting script with arguments: %a", sys.argv)
-        logging.info("Log directory: %s", self.folder())
         logging.info("Disabling PyTorch's default gradient computation")
         torch.set_grad_enabled(False)
 
         logging.info("Attempting to load checkpoint")
         data: typing.Any = {}
-        checkpoint_path = (self.folder() if self.parent_path is None else self.parent_path) / "data.pth"
+        checkpoint_path = self.folder() / "data.pth" if self.parent_path is None else self.parent_path
         if checkpoint_path.exists():
-            logging.info("Checkpoint found at: %s, loading...", checkpoint_path)
+            logging.info("Checkpoint found at: %s", checkpoint_path)
             data = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
             logging.info("Checkpoint loaded successfully")
         else:
             if self.parent_path is not None:
                 raise FileNotFoundError(f"Checkpoint not found at: {checkpoint_path}")
-            logging.info("Checkpoint not found at: %s", checkpoint_path)
+            logging.info("Checkpoint not found at: %s, start from scratch", checkpoint_path)
 
         if self.random_seed is not None:
             logging.info("Setting random seed to: %d", self.random_seed)
@@ -120,7 +118,7 @@ class RuntimeContext:
             self.max_absolute_step = step + self.max_relative_step - 1
             self.max_relative_step = None
         if step == self.max_absolute_step:
-            logging.info("Reached the maximum step, exiting.")
+            logging.info("Reached the maximum step, exiting")
             sys.exit(0)
 
     def create_model(self, model_config: omegaconf.DictConfig) -> ModelProto:
@@ -155,7 +153,6 @@ class RuntimeContext:
             state_dict: Optional state dict to load into the network.
         """
         network_name = network_config.name
-
         network_config_t = model.network_dict[network_name]
 
         logging.info("Initializing the network: %s", network_name)
@@ -165,6 +162,7 @@ class RuntimeContext:
             config=dacite.Config(cast=[pathlib.Path, torch.device, tuple]),
         )
         network: NetworkProto = network_param.create(model)
+        logging.info("Network initialized successfully")
 
         if state_dict is not None:
             logging.info("Loading state dict of the network")
@@ -179,7 +177,6 @@ class RuntimeContext:
         logging.info("Compiling the network")
         network = torch.jit.script(network)  # type: ignore[assignment]
 
-        logging.info("Network initialized successfully")
         return network
 
     def create_optimizer(
@@ -199,7 +196,6 @@ class RuntimeContext:
         logging.info("Initializing the optimizer")
 
         optimizer_t = getattr(torch.optim, optimizer_config.name)
-
         optimizer = optimizer_t(params=params, **optimizer_config.params)  # type: ignore[arg-type]
 
         if state_dict is not None:

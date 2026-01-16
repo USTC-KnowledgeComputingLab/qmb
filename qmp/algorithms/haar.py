@@ -40,7 +40,7 @@ class _DynamicLanczos:
     def _extend(self, psi: torch.Tensor, basic_configs: torch.Tensor | None = None) -> None:
         if basic_configs is None:
             basic_configs = self.configs
-        logging.info("Extending basis...")
+        logging.info("Extending basis")
 
         count_core = len(self.configs)
         logging.info("Number of core configurations: %d", count_core)
