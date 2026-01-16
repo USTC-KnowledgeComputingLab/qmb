@@ -19,7 +19,7 @@ from .optimizer import migrate_optimizer
 @dataclasses.dataclass
 class RuntimeContext:
     """
-    This class defines the common runtime environment (logging, device, random seed, checkpoints).
+    This class defines the common runtime environment.
     """
 
     # The log path for parent job job name, it is only used for loading the checkpoint from the parent job, leave empty to use the current job name

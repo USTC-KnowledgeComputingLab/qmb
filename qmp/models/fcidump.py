@@ -9,7 +9,7 @@ import gzip
 import pathlib
 import hashlib
 import torch
-import yaml
+import yaml  # type: ignore[import-untyped]
 import openfermion
 import platformdirs
 from ..networks.mlp import WaveFunctionElectronUpDown as MlpWaveFunction
@@ -151,14 +151,14 @@ class Model(ModelProto[ModelConfig]):
             torch.save((self.hamiltonian.site, self.hamiltonian.kind, self.hamiltonian.coef), cache_file)
             logging.info("OpenFermion Hamiltonian successfully cached")
 
-        self.n_qubit: int = n_orbit * 2
-        self.n_electron: int = n_electron
-        self.n_spin: int = n_spin
+        self.n_qubits: int = n_orbit * 2
+        self.n_electrons: int = n_electron
+        self.n_spins: int = n_spin
         logging.info(
             "Identified %d qubits, %d electrons and %d spin",
-            self.n_qubit,
-            self.n_electron,
-            self.n_spin,
+            self.n_qubits,
+            self.n_electrons,
+            self.n_spins,
         )
 
         self.ref_energy: float
@@ -201,7 +201,7 @@ class Model(ModelProto[ModelConfig]):
         string = "".join(f"{i:08b}"[::-1] for i in config.cpu().numpy())
         return (
             "["
-            + "".join(self._show_config_site(string[index : index + 2]) for index in range(0, self.n_qubit, 2))
+            + "".join(self._show_config_site(string[index : index + 2]) for index in range(0, self.n_qubits, 2))
             + "]"
         )
 
@@ -238,11 +238,11 @@ class MlpConfig:
         logging.info("Hidden layer widths: %a", self.hidden)
 
         network = MlpWaveFunction(
-            double_sites=model.n_qubit,
+            double_sites=model.n_qubits,
             physical_dim=2,
             is_complex=True,
-            spin_up=(model.n_electron + model.n_spin) // 2,
-            spin_down=(model.n_electron - model.n_spin) // 2,
+            spin_up=(model.n_electrons + model.n_spins) // 2,
+            spin_down=(model.n_electrons - model.n_spins) // 2,
             hidden_size=self.hidden,
             ordering=+1,
         )
@@ -298,11 +298,11 @@ class TransformersConfig:
         )
 
         network = TransformersWaveFunction(
-            double_sites=model.n_qubit,
+            double_sites=model.n_qubits,
             physical_dim=2,
             is_complex=True,
-            spin_up=(model.n_electron + model.n_spin) // 2,
-            spin_down=(model.n_electron - model.n_spin) // 2,
+            spin_up=(model.n_electrons + model.n_spins) // 2,
+            spin_down=(model.n_electrons - model.n_spins) // 2,
             embedding_dim=self.embedding_dim,
             heads_num=self.heads_num,
             feed_forward_dim=self.feed_forward_dim,
@@ -336,10 +336,10 @@ class MlpElectronConfig:
         logging.info("Hidden layer widths: %a", self.hidden)
 
         network = MlpWaveFunctionElectron(
-            sites=model.n_qubit,
+            sites=model.n_qubits,
             physical_dim=2,
             is_complex=True,
-            electrons=model.n_electron,
+            electrons=model.n_electrons,
             hidden_size=self.hidden,
             ordering=+1,
         )
@@ -394,10 +394,10 @@ class TransformersElectronConfig:
         )
 
         network = TransformersWaveFunctionElectron(
-            sites=model.n_qubit,
+            sites=model.n_qubits,
             physical_dim=2,
             is_complex=True,
-            electrons=model.n_electron,
+            electrons=model.n_electrons,
             embedding_dim=self.embedding_dim,
             heads_num=self.heads_num,
             feed_forward_dim=self.feed_forward_dim,
