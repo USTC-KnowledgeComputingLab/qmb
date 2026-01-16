@@ -7,7 +7,9 @@ import dataclasses
 import collections
 import torch
 from ..networks.mlp import WaveFunctionNormal as MlpWaveFunction
+from ..networks.mlp import WaveFunctionElectron as MlpWaveFunctionElectron
 from ..networks.transformers import WaveFunctionNormal as TransformersWaveFunction
+from ..networks.transformers import WaveFunctionElectron as TransformersWaveFunctionElectron
 from ..hamiltonian import Hamiltonian
 from ..utility.model_dict import model_dict, ModelProto, NetworkProto, NetworkConfigProto
 
@@ -246,6 +248,7 @@ class MlpConfig:
         return network
 
 
+Model.network_dict["mlp/0"] = MlpConfig
 Model.network_dict["mlp"] = MlpConfig
 
 
@@ -309,4 +312,103 @@ class TransformersConfig:
         return network
 
 
+Model.network_dict["transformers/0"] = TransformersConfig
 Model.network_dict["transformers"] = TransformersConfig
+
+
+@dataclasses.dataclass
+class MlpElectronConfig:
+    """
+    The configuration of the MLP network with electron number conservation.
+    """
+
+    # The hidden widths of the network
+    hidden: tuple[int, ...] = (512,)
+
+    def create(self, model: Model) -> NetworkProto:
+        """
+        Create a MLP network for the model.
+        """
+        logging.info("Hidden layer widths: %a", self.hidden)
+
+        electrons = (model.m * model.n) // 2
+
+        network = MlpWaveFunctionElectron(
+            sites=model.m * model.n,
+            physical_dim=2,
+            is_complex=True,
+            electrons=electrons,
+            hidden_size=self.hidden,
+            ordering=+1,
+        )
+
+        return network
+
+
+Model.network_dict["mlp/u1"] = MlpElectronConfig
+
+
+@dataclasses.dataclass
+class TransformersElectronConfig:
+    """
+    The configuration of the transformers network with electron number conservation.
+    """
+
+    # Embedding dimension
+    embedding_dim: int = 512
+    # Heads number
+    heads_num: int = 8
+    # Feedforward dimension
+    feed_forward_dim: int = 2048
+    # Shared expert number
+    shared_expert_num: int = 1
+    # Routed expert number
+    routed_expert_num: int = 0
+    # Selected expert number
+    selected_expert_num: int = 0
+    # Network depth
+    depth: int = 6
+
+    def create(self, model: Model) -> NetworkProto:
+        """
+        Create a transformers network for the model.
+        """
+        logging.info(
+            "Transformers network configuration: "
+            "embedding dimension: %d, "
+            "number of heads: %d, "
+            "feed-forward dimension: %d, "
+            "shared expert number: %d, "
+            "routed expert number: %d, "
+            "selected expert number: %d, "
+            "depth: %d",
+            self.embedding_dim,
+            self.heads_num,
+            self.feed_forward_dim,
+            self.shared_expert_num,
+            self.routed_expert_num,
+            self.selected_expert_num,
+            self.depth,
+        )
+
+        electrons = (model.m * model.n) // 2
+
+        network = TransformersWaveFunctionElectron(
+            sites=model.m * model.n,
+            physical_dim=2,
+            is_complex=True,
+            electrons=electrons,
+            embedding_dim=self.embedding_dim,
+            heads_num=self.heads_num,
+            feed_forward_dim=self.feed_forward_dim,
+            shared_num=self.shared_expert_num,
+            routed_num=self.routed_expert_num,
+            selected_num=self.selected_expert_num,
+            depth=self.depth,
+            ordering=+1,
+        )
+
+        return network
+
+
+Model.network_dict["transformers/u1"] = TransformersElectronConfig
