@@ -24,8 +24,6 @@ class _DynamicLanczos:
     This class implements the dynamic Lanczos algorithm for solving quantum many-body problems.
     """
 
-    # pylint: disable=too-many-instance-attributes
-
     model: ModelProto
     configs: torch.Tensor
     psi: torch.Tensor
@@ -81,7 +79,7 @@ class _DynamicLanczos:
                 selected = (psi.conj() * psi).real.argsort(descending=True)[: self.count_extend]
                 configs = self.configs
                 self._extend(psi[selected], self.configs[selected])
-                psi = self.model.apply_within(configs, psi, self.configs)  # pylint: disable=assignment-from-no-return
+                psi = self.model.apply_within(configs, psi, self.configs)
             for _, [alpha, beta, v] in zip(range(1 + self.step), self._run()):
                 yield package(self._eigh_tridiagonal(alpha, beta, v))
         elif self.single_extend:
@@ -123,7 +121,7 @@ class _DynamicLanczos:
         # The details are as follows:
         # All data other than v is always on the GPU.
         # The last v is always on the GPU and the rest are moved to the CPU immediately after necessary calculations.
-        v: list[torch.Tensor] = [self.psi / torch.linalg.norm(self.psi)]  # pylint: disable=not-callable
+        v: list[torch.Tensor] = [self.psi / torch.linalg.norm(self.psi)]
         alpha: list[torch.Tensor] = []
         beta: list[torch.Tensor] = []
         w: torch.Tensor
@@ -132,7 +130,7 @@ class _DynamicLanczos:
         yield (alpha, beta, v)
         w = w - alpha[-1] * v[-1]
         while True:
-            norm_w = torch.linalg.norm(w)  # pylint: disable=not-callable
+            norm_w = torch.linalg.norm(w)
             if norm_w < self.threshold:
                 break
             beta.append(norm_w)
@@ -155,7 +153,7 @@ class _DynamicLanczos:
                 current_local_batch_size = local_batch_size
             start_index = i * local_batch_size + min(i, remainder)
             end_index = start_index + current_local_batch_size
-            local_result = self.model.apply_within(  # pylint: disable=assignment-from-no-return
+            local_result = self.model.apply_within(
                 configs_i[start_index:end_index],
                 psi_i[start_index:end_index],
                 configs_j,
@@ -268,8 +266,6 @@ class HaarConfig:
     """
     The two-step optimization process for solving quantum many-body problems based on imaginary time.
     """
-
-    # pylint: disable=too-many-instance-attributes
 
     # The sampling count from neural network
     sampling_count_from_neural_network: int = 1024
