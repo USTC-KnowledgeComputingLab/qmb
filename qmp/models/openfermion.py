@@ -21,7 +21,7 @@ class ModelConfig:
     The configuration of the model.
     """
 
-    # The path of models
+    # The path of the model
     model_path: pathlib.Path
 
 
