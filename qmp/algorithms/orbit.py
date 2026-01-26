@@ -45,7 +45,7 @@ class OrbitConfig:
         configs = configs.to(device=context.device)
         psi = psi.to(device=context.device)
 
-        n_orbit = model.n_qubits // 2
+        n_orbit = typing.cast(typing.Any, model).n_qubits // 2
         calculator = NaturalOrbitCalculator(n_orbit)
 
         # 2. Calculate 1-RDM and Unitary transformation
