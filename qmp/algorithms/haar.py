@@ -386,8 +386,10 @@ class HaarConfig:
             data["haar"] = data["imag"]
             del data["imag"]
         if "haar" not in data:
-            data["haar"] = {"global": 0, "local": 0, "lanczos": 0, "pool": None}
+            data["haar"] = {"global": 0, "local": 0, "lanczos": 0, "pool": None, "excited": {}}
         else:
+            if "excited" not in data["haar"] or not isinstance(data["haar"]["excited"], dict):
+                data["haar"]["excited"] = {}
             pool_configs, pool_psi = data["haar"]["pool"]
             data["haar"]["pool"] = (pool_configs.to(device=context.device), pool_psi.to(device=context.device))
 
@@ -416,6 +418,7 @@ class HaarConfig:
             logging.info("Computing the target for local optimization")
             target_energy: torch.Tensor
             lanczos_results: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
+
             for lanczos_results in _DynamicLanczos(
                 model=model,
                 configs=configs,
@@ -436,7 +439,7 @@ class HaarConfig:
                 writer.add_scalar("haar/lanczos/error", target_energy - model.ref_energy, data["haar"]["lanczos"])  # type: ignore[no-untyped-call]
                 data["haar"]["lanczos"] += 1
 
-            data["haar"]["excited"] = lanczos_results
+            data["haar"]["excited"][data["haar"]["global"]] = lanczos_results
 
             max_index = original_psi.abs().argmax()
             target_psi = original_psi / original_psi[max_index]
