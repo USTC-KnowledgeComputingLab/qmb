@@ -34,19 +34,19 @@ class Model(ModelProto[ModelConfig]):
     def __init__(self, args: ModelConfig) -> None:
         model_path = args.model_path
         logging.info("Loading Optimized Basis Hamiltonian from file: %s", model_path)
-        
+
         # Load the data dictionary
         data = torch.load(model_path, map_location="cpu", weights_only=True)
-        
+
         if not isinstance(data, dict) or "hamiltonian" not in data:
-             raise ValueError(f"Invalid optimized basis file format at {model_path}")
+            raise ValueError(f"Invalid optimized basis file format at {model_path}")
 
         self.hamiltonian = Hamiltonian(data["hamiltonian"], kind="fermi")
         self.n_qubits = data["n_qubits"]
         self.n_electrons = data["n_electrons"]
         self.n_spins = data["n_spins"]
         self.ref_energy = args.ref_energy or data.get("ref_energy", 0.0)
-        
+
         # Store the unitary transformation matrix for future use
         self.orbit_unitary: torch.Tensor | None = data.get("orbit_unitary")
 
@@ -59,7 +59,7 @@ class Model(ModelProto[ModelConfig]):
             self.ref_energy,
         )
         if self.orbit_unitary is not None:
-             logging.info("Orbit unitary matrix loaded (shape: %s)", self.orbit_unitary.shape)
+            logging.info("Orbit unitary matrix loaded (shape: %s)", self.orbit_unitary.shape)
 
     def apply_within(self, configs_i: torch.Tensor, psi_i: torch.Tensor, configs_j: torch.Tensor) -> torch.Tensor:
         return self.hamiltonian.apply_within(configs_i, psi_i, configs_j)
@@ -111,6 +111,7 @@ model_dict["optimized_basis"] = Model
 # Register networks
 try:
     from .fcidump import MlpConfig, TransformersConfig, MlpElectronConfig, TransformersElectronConfig
+
     Model.network_dict["mlp/u1u1"] = MlpConfig
     Model.network_dict["mlp"] = MlpConfig
     Model.network_dict["transformers/u1u1"] = TransformersConfig

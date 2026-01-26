@@ -138,7 +138,7 @@ class _DynamicLanczos:
                 # Orthogonalize the random vector against all previous vectors
                 for prev_v in v:
                     prev_v_device = prev_v.to(device=random_v.device)
-                    dot = (prev_v_device.conj() @ random_v)
+                    dot = prev_v_device.conj() @ random_v
                     random_v = random_v - dot * prev_v_device
                 # Normalize the random vector
                 random_v = random_v / torch.linalg.norm(random_v)
@@ -154,7 +154,7 @@ class _DynamicLanczos:
             # Reorthogonalization after updating w
             for prev_v in v:
                 prev_v_device = prev_v.to(device=w.device)
-                dot = (prev_v_device.conj() @ w)
+                dot = prev_v_device.conj() @ w
                 w = w - dot * prev_v_device
 
             v[-2] = v[-2].cpu()  # v maybe very large, so we need to move it to CPU
@@ -440,6 +440,11 @@ class HaarConfig:
                 data["haar"]["lanczos"] += 1
 
             data["haar"]["excited"][data["haar"]["global"]] = lanczos_results
+
+            target_prob = torch.zeros_like(original_psi, dtype=torch.float64)
+            for _, _, p in lanczos_results:
+                target_prob += (p.conj() * p).real
+            original_psi = target_prob.sqrt()
 
             max_index = original_psi.abs().argmax()
             target_psi = original_psi / original_psi[max_index]
