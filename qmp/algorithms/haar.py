@@ -131,14 +131,32 @@ class _DynamicLanczos:
         w = w - alpha[-1] * v[-1]
         while True:
             norm_w = torch.linalg.norm(w)
-            if norm_w < self.threshold:
-                break
             beta.append(norm_w)
-            v.append(w / beta[-1])
+            if norm_w < self.threshold:
+                # Generate a random vector to continue the Lanczos process
+                random_v = torch.randn_like(v[0])
+                # Orthogonalize the random vector against all previous vectors
+                for prev_v in v:
+                    prev_v_device = prev_v.to(device=random_v.device)
+                    dot = (prev_v_device.conj() @ random_v)
+                    random_v = random_v - dot * prev_v_device
+                # Normalize the random vector
+                random_v = random_v / torch.linalg.norm(random_v)
+                v.append(random_v)
+            else:
+                v.append(w / beta[-1])
+
             w = self._apply_within(self.configs, v[-1], self.configs)
             alpha.append((w.conj() @ v[-1]).real)
             yield (alpha, beta, v)
             w = w - alpha[-1] * v[-1] - beta[-1] * v[-2]
+
+            # Reorthogonalization after updating w
+            for prev_v in v:
+                prev_v_device = prev_v.to(device=w.device)
+                dot = (prev_v_device.conj() @ w)
+                w = w - dot * prev_v_device
+
             v[-2] = v[-2].cpu()  # v maybe very large, so we need to move it to CPU
 
     def _apply_within(self, configs_i: torch.Tensor, psi_i: torch.Tensor, configs_j: torch.Tensor) -> torch.Tensor:
