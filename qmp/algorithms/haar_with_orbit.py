@@ -6,10 +6,8 @@ import copy
 import logging
 import typing
 import dataclasses
-import functools
 import pathlib
 import omegaconf
-import scipy
 import torch
 import torch.utils.tensorboard
 from scipy.optimize import linear_sum_assignment
@@ -21,9 +19,14 @@ from ..utility.optimizer import scale_learning_rate
 from ..hamiltonian import Hamiltonian
 
 # Import components from haar and orbit
-from .haar import _DynamicLanczos, _sampling_from_last_iteration, _merge_pool_from_neural_network_and_pool_from_last_iteration
+from .haar import (
+    _DynamicLanczos,
+    _sampling_from_last_iteration,
+    _merge_pool_from_neural_network_and_pool_from_last_iteration,
+)
 from .orbit import NaturalOrbitCalculator, _read_fcidump_tensors
 from ..models.optimized_basis import Model as OptimizedModel, ModelConfig as OptimizedModelConfig
+
 
 @dataclasses.dataclass
 class HaarWithOrbitConfig:
@@ -33,7 +36,7 @@ class HaarWithOrbitConfig:
 
     # The source FCIDUMP file for orbital optimization
     src_fcidump: pathlib.Path
-    
+
     # --- HAAR Config Params (copied from haar.py) ---
     sampling_count_from_neural_network: int = 1024
     sampling_count_from_last_iteration: int = 1024
@@ -57,72 +60,74 @@ class HaarWithOrbitConfig:
         if self.krylov_extend_count == -1:
             self.krylov_extend_count = 2048 if self.krylov_single_extend else 64
 
-    def _optimize_orbit(self, context: RuntimeContext, model: ModelProto, configs: torch.Tensor, psi: torch.Tensor, step: int) -> tuple[ModelProto, pathlib.Path]:
+    def _optimize_orbit(
+        self, context: RuntimeContext, model: ModelProto, configs: torch.Tensor, psi: torch.Tensor, step: int
+    ) -> tuple[ModelProto, pathlib.Path]:
         """
         Perform orbital optimization and return a new model with the optimized basis and its path.
         """
         logging.info("Performing orbital optimization for step %d", step)
-        
-        n_orbit = model.n_qubits // 2
+
+        n_orbit = typing.cast(typing.Any, model).n_qubits // 2
         calculator = NaturalOrbitCalculator(n_orbit)
-        
+
         # 1. Calculate RDM
         rdm = calculator.calculate_rdm(configs, psi)
-        
+
         # 2. Diagonalize RDM to get Natural Orbitals
         # eigvals are occupation numbers, U columns are NOs in old basis
         eigvals, U = torch.linalg.eigh(rdm)
-        
+
         # 3. Reorder U to be closest to Identity
         # We want to maximize sum(|U_{ii}|^2)
         cost_matrix = -(U.abs() ** 2).cpu().numpy()
         row_ind, col_ind = linear_sum_assignment(cost_matrix)
-        
+
         # row_ind[i] is matched with col_ind[i]
         # We want column row_ind[i] of permuted_U to be column col_ind[i] of U
         permuted_U = torch.zeros_like(U)
         permuted_U[:, row_ind] = U[:, col_ind]
         U = permuted_U
-        
+
         # 4. Load and Transform Integrals
         (norb, nelec, nspin), e0, h1, h2 = _read_fcidump_tensors(self.src_fcidump)
-        
+
         device = context.device
         h1_so = torch.zeros((2 * norb, 2 * norb), dtype=torch.complex128, device=device)
         h1_so[0::2, 0::2] = h1.to(device)
         h1_so[1::2, 1::2] = h1.to(device)
-        
+
         h2_so = torch.zeros((2 * norb, 2 * norb, 2 * norb, 2 * norb), dtype=torch.complex128, device=device)
         h2_so[0::2, 0::2, 0::2, 0::2] = h2.to(device)
         h2_so[0::2, 1::2, 1::2, 0::2] = h2.to(device)
         h2_so[1::2, 0::2, 0::2, 1::2] = h2.to(device)
         h2_so[1::2, 1::2, 1::2, 1::2] = h2.to(device)
-        
+
         # Transform
         h1_opt = U.conj().T @ h1_so @ U
-        
+
         tmp = torch.einsum("sd,pqrs->pqrd", U, h2_so)
         tmp = torch.einsum("rc,pqrd->pqcd", U, tmp)
         tmp = torch.einsum("qb,pqcd->pbcd", U.conj(), tmp)
         h2_opt = torch.einsum("pa,pbcd->abcd", U.conj(), tmp)
-        
+
         # 5. Build Hamiltonian Dict and Save
         ham_dict: dict[tuple[tuple[int, int], ...], complex] = {}
         ham_dict[()] = complex(e0)
-        
+
         h1_indices = torch.nonzero(torch.abs(h1_opt) > 1e-12)
         for p, q in h1_indices:
             p, q = p.item(), q.item()
             ham_dict[((p, 1), (q, 0))] = h1_opt[p, q].item()
-                
+
         h2_indices = torch.nonzero(torch.abs(h2_opt) > 1e-12)
         for p, q, r, s in h2_indices:
             p, q, r, s = p.item(), q.item(), r.item(), s.item()
             key = ((p, 1), (q, 1), (r, 0), (s, 0))
             ham_dict[key] = ham_dict.get(key, 0j) + h2_opt[p, q, r, s].item()
-            
+
         site, kind, coef = Hamiltonian._prepare(ham_dict)
-        
+
         output_data = {
             "hamiltonian": (site.cpu(), kind.cpu(), coef.cpu()),
             "n_qubits": 2 * norb,
@@ -130,15 +135,15 @@ class HaarWithOrbitConfig:
             "n_spins": nspin,
             "ref_energy": 0.0,
             "rdm_eigvals": eigvals.cpu(),
-            "orbit_unitary": U.cpu()
+            "orbit_unitary": U.cpu(),
         }
-        
+
         optimized_path = context.folder() / f"optimized_basis_step_{step}.pt"
         torch.save(output_data, optimized_path)
         logging.info("Saved optimized basis to %s", optimized_path)
-        
+
         new_model = OptimizedModel(OptimizedModelConfig(model_path=optimized_path))
-        
+
         return new_model, optimized_path
 
     def main(
@@ -147,8 +152,8 @@ class HaarWithOrbitConfig:
         runtime_config: omegaconf.DictConfig,
         checkpoint_data: dict[str, typing.Any],
     ) -> None:
-        
         data = checkpoint_data
+        model: ModelProto[typing.Any]
 
         # Determine which model to load (initial or resumed)
         if "haar" in data and "model_path" in data["haar"]:
@@ -161,14 +166,49 @@ class HaarWithOrbitConfig:
                 model = context.create_model(runtime_config.model)
         else:
             model = context.create_model(runtime_config.model)
-        
+
         network = context.create_network(runtime_config.network, model, checkpoint_data.get("network"))
 
         optimizer = context.create_optimizer(
             runtime_config.optimizer, network.parameters(), checkpoint_data.get("optimizer")
         )
-        
+
+        logging.info(
+            "Arguments Summary: "
+            "Sampling Count From neural network: %d, "
+            "Sampling Count From Last iteration: %d, "
+            "Krylov Extend Count: %d, "
+            "Krylov Extend First: %s, "
+            "Krylov Single Extend: %s, "
+            "Krylov Iteration: %d, "
+            "Krylov Threshold: %.10f, "
+            "Krylov Eigen Count: %d, "
+            "Loss Function: %s, "
+            "Local Steps: %d, "
+            "Local Loss Threshold: %.10f, "
+            "Logging Psi: %d, "
+            "Local Batch Count For Generation: %d, "
+            "Local Batch Count For Apply Within: %d, "
+            "Local Batch Count For Loss Function: %d",
+            self.sampling_count_from_neural_network,
+            self.sampling_count_from_last_iteration,
+            self.krylov_extend_count,
+            "Yes" if self.krylov_extend_first else "No",
+            "Yes" if self.krylov_single_extend else "No",
+            self.krylov_iteration,
+            self.krylov_threshold,
+            self.krylov_eigen_count,
+            self.loss_name,
+            self.local_step,
+            self.local_loss,
+            self.logging_psi,
+            self.local_batch_count_generation,
+            self.local_batch_count_apply_within,
+            self.local_batch_count_loss_function,
+        )
+
         if "haar" not in data and "imag" in data:
+            logging.warning("The 'imag' subcommand is deprecated, please use 'haar' instead.")
             data["haar"] = data["imag"]
             del data["imag"]
         if "haar" not in data:
@@ -180,11 +220,11 @@ class HaarWithOrbitConfig:
                 pool_configs, pool_psi = data["haar"]["pool"]
                 data["haar"]["pool"] = (pool_configs.to(device=context.device), pool_psi.to(device=context.device))
 
-        writer = torch.utils.tensorboard.SummaryWriter(log_dir=context.folder()) # type: ignore
+        writer = torch.utils.tensorboard.SummaryWriter(log_dir=context.folder())  # type: ignore
 
         while True:
             logging.info("Starting a new optimization cycle")
-            
+
             # --- HAAR SAMPLING & LANCZOS ---
             logging.info("Sampling configurations from neural network")
             configs_from_neural_network, psi_from_neural_network, _, _ = network.generate_unique(
@@ -206,7 +246,9 @@ class HaarWithOrbitConfig:
             # --- ORBITAL OPTIMIZATION ---
             # Optimize orbitals using the current best available state (merged pool/network)
             # This ensures Lanczos runs in the optimized basis.
-            new_model, optimized_path = self._optimize_orbit(context, model, configs, original_psi, data["haar"]["global"])
+            new_model, optimized_path = self._optimize_orbit(
+                context, model, configs, original_psi, data["haar"]["global"]
+            )
 
             # Update model and persist path
             model = new_model
@@ -230,15 +272,15 @@ class HaarWithOrbitConfig:
             ).run():
                 target_energy, configs, original_psi = lanczos_results[0]
                 logging.info("Current energy: %.10f, samples: %d", target_energy.item(), len(configs))
-                writer.add_scalar("haar/lanczos/energy", target_energy, data["haar"]["lanczos"]) # type: ignore
-                writer.add_scalar("haar/lanczos/error", target_energy - model.ref_energy, data["haar"]["lanczos"]) # type: ignore
+                writer.add_scalar("haar/lanczos/energy", target_energy, data["haar"]["lanczos"])  # type: ignore
+                writer.add_scalar("haar/lanczos/error", target_energy - model.ref_energy, data["haar"]["lanczos"])  # type: ignore
                 data["haar"]["lanczos"] += 1
 
             data["haar"]["excited"][data["haar"]["global"]] = lanczos_results
 
             # --- TARGET PSI CALCULATION ---
             # Update target_psi based on the NEW probabilities (or old ones? technically basis changed)
-            # The 'configs' indices retain their meaning "closest to identity", so we assume 
+            # The 'configs' indices retain their meaning "closest to identity", so we assume
             # the probability distribution over 'configs' is still roughly valid for the new basis.
             # We use the summed probability of the subspace from Lanczos as the target.
             target_prob = torch.zeros_like(original_psi, dtype=torch.float64)
@@ -286,7 +328,7 @@ class HaarWithOrbitConfig:
                 total_loss_tensor = torch.tensor(total_loss)
                 total_loss_tensor.psi = torch.cat(total_psi)  # type: ignore[attr-defined]
                 return total_loss_tensor
-            
+
             loss: torch.Tensor
             try_index = 0
             while True:
@@ -328,13 +370,42 @@ class HaarWithOrbitConfig:
             loss = typing.cast(torch.Tensor, torch.enable_grad(closure)())  # type: ignore[no-untyped-call,call-arg]
             psi: torch.Tensor = loss.psi  # type: ignore[attr-defined]
             final_energy = ((psi.conj() @ model.apply_within(configs, psi, configs)) / (psi.conj() @ psi)).real
-            logging.info("Loss: %.10f, Final energy: %.10f", loss.item(), final_energy.item())
-            
+            logging.info(
+                "Loss: %.10f, Final energy: %.10f, Target energy: %.10f, Reference energy: %.10f, Final error: %.10f",
+                loss.item(),
+                final_energy.item(),
+                target_energy.item(),
+                model.ref_energy,
+                final_energy.item() - model.ref_energy,
+            )
+            writer.add_scalar("haar/energy/state", final_energy, data["haar"]["global"])  # type: ignore[no-untyped-call]
+            writer.add_scalar("haar/energy/target", target_energy, data["haar"]["global"])  # type: ignore[no-untyped-call]
+            writer.add_scalar("haar/error/state", final_energy - model.ref_energy, data["haar"]["global"])  # type: ignore[no-untyped-call]
+            writer.add_scalar("haar/error/target", target_energy - model.ref_energy, data["haar"]["global"])  # type: ignore[no-untyped-call]
+
+            logging.info("Displaying the largest amplitudes")
+            indices = target_psi.abs().argsort(descending=True)
+            text = []
+            for index in indices[: self.logging_psi]:
+                this_config = model.show_config(configs[index])
+                logging.info(
+                    "Configuration: %s, Target amplitude: %s, Final amplitude: %s",
+                    this_config,
+                    f"{target_psi[index].item():.8f}",
+                    f"{psi[index].item():.8f}",
+                )
+                text.append(
+                    f"Configuration: {this_config}, Target amplitude: {target_psi[index].item():.8f}, Final amplitude: {psi[index].item():.8f}"
+                )
+            writer.add_text("config", "\n".join(text), data["haar"]["global"])  # type: ignore[no-untyped-call]
+            writer.flush()  # type: ignore[no-untyped-call]
+
             data["haar"]["pool"] = (configs, original_psi)
             data["haar"]["global"] += 1
             data["network"] = network.state_dict()
             data["optimizer"] = optimizer.state_dict()
             context.save(data, data["haar"]["global"])
+            logging.info("Checkpoint successfully saved")
 
 
 subcommand_dict["haar_with_orbit"] = HaarWithOrbitConfig
