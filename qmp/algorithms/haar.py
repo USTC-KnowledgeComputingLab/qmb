@@ -131,14 +131,32 @@ class _DynamicLanczos:
         w = w - alpha[-1] * v[-1]
         while True:
             norm_w = torch.linalg.norm(w)
-            if norm_w < self.threshold:
-                break
             beta.append(norm_w)
-            v.append(w / beta[-1])
+            if norm_w < self.threshold:
+                # Generate a random vector to continue the Lanczos process
+                random_v = torch.randn_like(v[0])
+                # Orthogonalize the random vector against all previous vectors
+                for prev_v in v:
+                    prev_v_device = prev_v.to(device=random_v.device)
+                    dot = prev_v_device.conj() @ random_v
+                    random_v = random_v - dot * prev_v_device
+                # Normalize the random vector
+                random_v = random_v / torch.linalg.norm(random_v)
+                v.append(random_v)
+            else:
+                v.append(w / beta[-1])
+
             w = self._apply_within(self.configs, v[-1], self.configs)
             alpha.append((w.conj() @ v[-1]).real)
             yield (alpha, beta, v)
             w = w - alpha[-1] * v[-1] - beta[-1] * v[-2]
+
+            # Reorthogonalization after updating w
+            for prev_v in v:
+                prev_v_device = prev_v.to(device=w.device)
+                dot = prev_v_device.conj() @ w
+                w = w - dot * prev_v_device
+
             v[-2] = v[-2].cpu()  # v maybe very large, so we need to move it to CPU
 
     def _apply_within(self, configs_i: torch.Tensor, psi_i: torch.Tensor, configs_j: torch.Tensor) -> torch.Tensor:
@@ -368,8 +386,10 @@ class HaarConfig:
             data["haar"] = data["imag"]
             del data["imag"]
         if "haar" not in data:
-            data["haar"] = {"global": 0, "local": 0, "lanczos": 0, "pool": None}
+            data["haar"] = {"global": 0, "local": 0, "lanczos": 0, "pool": None, "excited": {}}
         else:
+            if "excited" not in data["haar"] or not isinstance(data["haar"]["excited"], dict):
+                data["haar"]["excited"] = {}
             pool_configs, pool_psi = data["haar"]["pool"]
             data["haar"]["pool"] = (pool_configs.to(device=context.device), pool_psi.to(device=context.device))
 
@@ -398,6 +418,7 @@ class HaarConfig:
             logging.info("Computing the target for local optimization")
             target_energy: torch.Tensor
             lanczos_results: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
+
             for lanczos_results in _DynamicLanczos(
                 model=model,
                 configs=configs,
@@ -418,7 +439,12 @@ class HaarConfig:
                 writer.add_scalar("haar/lanczos/error", target_energy - model.ref_energy, data["haar"]["lanczos"])  # type: ignore[no-untyped-call]
                 data["haar"]["lanczos"] += 1
 
-            data["haar"]["excited"] = lanczos_results
+            data["haar"]["excited"][data["haar"]["global"]] = lanczos_results
+
+            target_prob = torch.zeros_like(original_psi, dtype=torch.float64)
+            for _, _, p in lanczos_results:
+                target_prob += (p.conj() * p).real
+            original_psi = target_prob.sqrt().to(dtype=torch.complex128)
 
             max_index = original_psi.abs().argmax()
             target_psi = original_psi / original_psi[max_index]
