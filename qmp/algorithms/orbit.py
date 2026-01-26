@@ -74,11 +74,16 @@ class OrbitConfig:
         logging.info("Transforming integrals to optimized basis...")
         h1_opt = U.conj().T @ h1_so @ U
 
-        # V'_{p'q'r's'} = sum U^*_{pp'} U^*_{qq'} V_{pqrs} U_{rr'} U_{ss'}
-        tmp = torch.einsum("ss',pqrs->pqrs'", U, h2_so)
-        tmp = torch.einsum("rr',pqrs'->pqr's'", U, tmp)
-        tmp = torch.einsum("qq',pqr's'->pq'r's'", U.conj(), tmp)
-        h2_opt = torch.einsum("pp',pq'r's'->p'q'r's'", U.conj(), tmp)
+        # V'_{abcd} = sum U^*_{pa} U^*_{qb} V_{pqrs} U_{rc} U_{sd}
+        # Contractions sequential for O(N^5)
+        # Contract s with U_sd -> d
+        tmp = torch.einsum("sd,pqrs->pqrd", U, h2_so)
+        # Contract r with U_rc -> c
+        tmp = torch.einsum("rc,pqrd->pqcd", U, tmp)
+        # Contract q with U^*_qb -> b
+        tmp = torch.einsum("qb,pqcd->pbcd", U.conj(), tmp)
+        # Contract p with U^*_pa -> a
+        h2_opt = torch.einsum("pa,pbcd->abcd", U.conj(), tmp)
 
         # 5. Build Hamiltonian dictionary
         logging.info("Building Hamiltonian dictionary...")
