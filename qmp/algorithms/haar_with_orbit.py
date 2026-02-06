@@ -45,6 +45,7 @@ class HaarWithOrbitConfig:
     krylov_single_extend: bool = False
     krylov_iteration: int = 32
     krylov_threshold: float = 1e-8
+    krylov_period: int = 256
     krylov_eigen_count: int = 1
     loss_name: str = "sum_filtered_angle_scaled_log"
     local_step: int = -1
@@ -182,6 +183,7 @@ class HaarWithOrbitConfig:
             "Krylov Single Extend: %s, "
             "Krylov Iteration: %d, "
             "Krylov Threshold: %.10f, "
+            "Krylov Period: %d, "
             "Krylov Eigen Count: %d, "
             "Loss Function: %s, "
             "Local Steps: %d, "
@@ -197,6 +199,7 @@ class HaarWithOrbitConfig:
             "Yes" if self.krylov_single_extend else "No",
             self.krylov_iteration,
             self.krylov_threshold,
+            self.krylov_period,
             self.krylov_eigen_count,
             self.loss_name,
             self.local_step,
@@ -269,6 +272,7 @@ class HaarWithOrbitConfig:
                 single_extend=self.krylov_single_extend,
                 first_extend=self.krylov_extend_first,
                 eigen_count=self.krylov_eigen_count,
+                period=self.krylov_period,
             ).run():
                 target_energy, configs, original_psi = lanczos_results[0]
                 logging.info("Current energy: %.10f, samples: %d", target_energy.item(), len(configs))

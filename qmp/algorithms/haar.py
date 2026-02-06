@@ -34,6 +34,7 @@ class _DynamicLanczos:
     single_extend: bool
     first_extend: bool
     eigen_count: int = 1
+    period: int = 256
 
     def _extend(self, psi: torch.Tensor, basic_configs: torch.Tensor | None = None) -> None:
         if basic_configs is None:
@@ -132,9 +133,14 @@ class _DynamicLanczos:
         while True:
             norm_w = torch.linalg.norm(w)
             beta.append(norm_w)
-            if norm_w < self.threshold:
+            if norm_w < self.threshold or (len(v) % self.period == 0):
                 # Generate a random vector to continue the Lanczos process
-                random_v = torch.randn_like(v[0])
+                random_v = torch.randn_like(v[-1])
+                nonzero = torch.zeros_like(random_v, dtype=torch.bool)
+                for prev_v in v:
+                    prev_v_device = prev_v.to(device=random_v.device)
+                    nonzero = torch.logical_or(nonzero, prev_v_device.abs() > self.threshold)
+                random_v = torch.where(nonzero, random_v, 0)
                 # Orthogonalize the random vector against all previous vectors
                 for prev_v in v:
                     prev_v_device = prev_v.to(device=random_v.device)
@@ -299,6 +305,8 @@ class HaarConfig:
     krylov_iteration: int = 32
     # The threshold for the Krylov iteration
     krylov_threshold: float = 1e-8
+    # The period for the Krylov iteration
+    krylov_period: int = 256
     # The number of excited states to calculate
     krylov_eigen_count: int = 1
     # The name of the loss function to use
@@ -356,6 +364,7 @@ class HaarConfig:
             "Krylov Single Extend: %s, "
             "Krylov Iteration: %d, "
             "Krylov Threshold: %.10f, "
+            "Krylov Period: %d, "
             "Krylov Eigen Count: %d, "
             "Loss Function: %s, "
             "Local Steps: %d, "
@@ -371,6 +380,7 @@ class HaarConfig:
             "Yes" if self.krylov_single_extend else "No",
             self.krylov_iteration,
             self.krylov_threshold,
+            self.krylov_period,
             self.krylov_eigen_count,
             self.loss_name,
             self.local_step,
@@ -430,6 +440,7 @@ class HaarConfig:
                 single_extend=self.krylov_single_extend,
                 first_extend=self.krylov_extend_first,
                 eigen_count=self.krylov_eigen_count,
+                period=self.krylov_period,
             ).run():
                 target_energy, configs, original_psi = lanczos_results[0]
                 logging.info(
