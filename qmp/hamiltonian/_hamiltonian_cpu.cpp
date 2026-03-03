@@ -578,7 +578,7 @@ struct dictionary_tree {
                 if (new_size_counter > index) {
                     std::uint64_t new_index = index - size_counter;
                     configs[index][n_total_qubytes - n_qubytes] = i;
-                    children[i]->collect<n_total_qubytes>(new_index, &configs[size_counter], &psi[size_counter]);
+                    children[i]->template collect<n_total_qubytes>(new_index, &configs[size_counter], &psi[size_counter]);
                     if (--children[i]->nonzero_count == 0) {
                         free(children[i]);
                     };
