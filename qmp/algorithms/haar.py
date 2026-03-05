@@ -13,7 +13,7 @@ import torch
 import torch.utils.tensorboard
 from ..utility import losses
 from ..utility.context import RuntimeContext
-from ..utility.subcommand_dict import subcommand_dict
+from ..utility.action_dict import action_dict
 from ..utility.model_dict import ModelProto
 from ..utility.optimizer import scale_learning_rate
 
@@ -392,7 +392,7 @@ class HaarConfig:
         )
 
         if "haar" not in data and "imag" in data:
-            logging.warning("The 'imag' subcommand is deprecated, please use 'haar' instead.")
+            logging.warning("The 'imag' action is deprecated, please use 'haar' instead.")
             data["haar"] = data["imag"]
             del data["imag"]
         if "haar" not in data:
@@ -587,5 +587,5 @@ class HaarConfig:
             logging.info("Current optimization cycle completed")
 
 
-subcommand_dict["haar"] = HaarConfig
-subcommand_dict["imag"] = HaarConfig
+action_dict["haar"] = HaarConfig
+action_dict["imag"] = HaarConfig

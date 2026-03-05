@@ -9,7 +9,7 @@ import hydra
 import omegaconf
 
 from .utility.context import RuntimeContext, DACITE_CAST
-from .utility.subcommand_dict import subcommand_dict
+from .utility.action_dict import action_dict
 
 
 @hydra.main(version_base=None, config_path=str(pathlib.Path().resolve()), config_name="config")
@@ -30,7 +30,7 @@ def main(runtime_config: omegaconf.DictConfig) -> None:
 
     # 2. Instantiate Algorithm
     run = dacite.from_dict(
-        data_class=subcommand_dict[runtime_config.action.name],  # type: ignore[arg-type]
+        data_class=action_dict[runtime_config.action.name],  # type: ignore[arg-type]
         data=omegaconf.OmegaConf.to_container(runtime_config.action.params, resolve=True),  # type: ignore[arg-type]
         config=dacite.Config(cast=DACITE_CAST),
     )

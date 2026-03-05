@@ -9,7 +9,7 @@ import omegaconf
 import torch
 import torch.utils.tensorboard
 from ..utility.context import RuntimeContext
-from ..utility.subcommand_dict import subcommand_dict
+from ..utility.action_dict import action_dict
 
 
 @dataclasses.dataclass
@@ -117,4 +117,4 @@ class VmcConfig:
             logging.info("Current optimization cycle completed")
 
 
-subcommand_dict["vmc"] = VmcConfig
+action_dict["vmc"] = VmcConfig

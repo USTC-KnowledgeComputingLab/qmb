@@ -12,7 +12,7 @@ import torch
 import omegaconf
 from ..hamiltonian import Hamiltonian
 from ..utility.context import RuntimeContext
-from ..utility.subcommand_dict import subcommand_dict
+from ..utility.action_dict import action_dict
 
 
 @dataclasses.dataclass
@@ -202,4 +202,4 @@ class NaturalOrbitCalculator:
         return rdm
 
 
-subcommand_dict["orbit"] = OrbitConfig
+action_dict["orbit"] = OrbitConfig
