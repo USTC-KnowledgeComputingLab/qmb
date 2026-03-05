@@ -73,15 +73,15 @@ def hamiltonian() -> Hamiltonian:
 # Config tensors (shape [batch, n_qubytes=1])
 # ---------------------------------------------------------------------------
 
-C_vacuum = torch.tensor([[0]], dtype=torch.uint8)   # |0000⟩
-C_site0 = torch.tensor([[1]], dtype=torch.uint8)    # |1000⟩ – site 0 occupied
-C_site1 = torch.tensor([[2]], dtype=torch.uint8)    # |0100⟩ – site 1 occupied
-C_site2 = torch.tensor([[4]], dtype=torch.uint8)    # |0010⟩ – site 2 occupied
-C_site3 = torch.tensor([[8]], dtype=torch.uint8)    # |0001⟩ – site 3 occupied
+C_vacuum = torch.tensor([[0]], dtype=torch.uint8)  # |0000⟩
+C_site0 = torch.tensor([[1]], dtype=torch.uint8)  # |1000⟩ – site 0 occupied
+C_site1 = torch.tensor([[2]], dtype=torch.uint8)  # |0100⟩ – site 1 occupied
+C_site2 = torch.tensor([[4]], dtype=torch.uint8)  # |0010⟩ – site 2 occupied
+C_site3 = torch.tensor([[8]], dtype=torch.uint8)  # |0001⟩ – site 3 occupied
 C_sites02 = torch.tensor([[5]], dtype=torch.uint8)  # |1010⟩ – sites 0,2 occupied
 C_sites12 = torch.tensor([[6]], dtype=torch.uint8)  # |0110⟩ – sites 1,2 occupied
-C_sites13 = torch.tensor([[10]], dtype=torch.uint8) # |0101⟩ – sites 1,3 occupied
-C_all = torch.tensor([[15]], dtype=torch.uint8)     # |1111⟩ – all sites occupied
+C_sites13 = torch.tensor([[10]], dtype=torch.uint8)  # |0101⟩ – sites 1,3 occupied
+C_all = torch.tensor([[15]], dtype=torch.uint8)  # |1111⟩ – all sites occupied
 
 # All 1-particle configs (sites 0–3)
 C_1particle = torch.tensor([[1], [2], [4], [8]], dtype=torch.uint8)
