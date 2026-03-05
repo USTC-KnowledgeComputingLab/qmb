@@ -142,7 +142,6 @@ class MlpConfig:
 
 
 Model.network_dict["mlp/u1u1"] = MlpConfig
-Model.network_dict["mlp"] = MlpConfig
 
 
 @dataclasses.dataclass
@@ -208,7 +207,6 @@ class TransformersConfig:
 
 
 Model.network_dict["transformers/u1u1"] = TransformersConfig
-Model.network_dict["transformers"] = TransformersConfig
 
 
 @dataclasses.dataclass
