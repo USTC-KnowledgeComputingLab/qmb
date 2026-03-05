@@ -4,12 +4,11 @@ Main entry point for the qmp command-line interface.
 
 import pathlib
 import importlib
-import torch
 import dacite
 import hydra
 import omegaconf
 
-from .utility.context import RuntimeContext
+from .utility.context import RuntimeContext, DACITE_CAST
 from .utility.subcommand_dict import subcommand_dict
 
 
@@ -25,7 +24,7 @@ def main(runtime_config: omegaconf.DictConfig) -> None:
     context = dacite.from_dict(
         data_class=RuntimeContext,
         data=omegaconf.OmegaConf.to_container(runtime_config.common, resolve=True),  # type: ignore[arg-type]
-        config=dacite.Config(cast=[pathlib.Path, torch.device, tuple]),
+        config=dacite.Config(cast=DACITE_CAST),
     )
     checkpoint_data = context.setup()
 
@@ -33,7 +32,7 @@ def main(runtime_config: omegaconf.DictConfig) -> None:
     run = dacite.from_dict(
         data_class=subcommand_dict[runtime_config.action.name],  # type: ignore[arg-type]
         data=omegaconf.OmegaConf.to_container(runtime_config.action.params, resolve=True),  # type: ignore[arg-type]
-        config=dacite.Config(cast=[pathlib.Path, torch.device, tuple]),
+        config=dacite.Config(cast=DACITE_CAST),
     )
 
     # 3. Execute Algorithm
