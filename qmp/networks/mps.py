@@ -101,23 +101,17 @@ class WaveFunction(torch.nn.Module):
         amplitude: torch.Tensor = v[:, 0]
 
         # Return as complex128 tensor with zero imaginary part
-        return torch.view_as_complex(
-            torch.stack([amplitude.double(), torch.zeros_like(amplitude).double()], dim=-1)
-        )
+        return torch.view_as_complex(torch.stack([amplitude.double(), torch.zeros_like(amplitude).double()], dim=-1))
 
     @torch.jit.export
-    def generate_unique(
-        self, batch_size: int, block_num: int = 1
-    ) -> tuple[torch.Tensor, torch.Tensor, None, None]:
+    def generate_unique(self, batch_size: int, block_num: int = 1) -> tuple[torch.Tensor, torch.Tensor, None, None]:
         """
         Generate a batch of unique configurations.
         """
         raise NotImplementedError("generate_unique is not implemented for the MPS network")
 
     @torch.jit.export
-    def generate(
-        self, batch_size: int, block_num: int = 1
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
+    def generate(self, batch_size: int, block_num: int = 1) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
         """
         Generate a batch of configurations.
 
@@ -205,9 +199,7 @@ class WaveFunction(torch.nn.Module):
         x_packed: torch.Tensor = pack_int(samples, size=self._bit_size())
 
         # torch.unique returns (unique, inverse_indices, counts) in TorchScript
-        x_unique, _, counts = torch.unique(
-            x_packed, sorted=True, return_inverse=True, return_counts=True, dim=0
-        )
+        x_unique, _, counts = torch.unique(x_packed, sorted=True, return_inverse=True, return_counts=True, dim=0)
 
         # Compute amplitudes for the unique configurations
         amplitudes: torch.Tensor = self(x_unique)
