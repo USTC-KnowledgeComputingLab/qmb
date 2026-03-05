@@ -50,7 +50,7 @@ qmp = "qmp.__main__:main"
 qmp-kit = "qmp.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["qmp"]
+include = ["qmp*"]
 
 [tool.setuptools.package-data]
 qmp = [
