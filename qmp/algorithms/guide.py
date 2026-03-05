@@ -9,7 +9,7 @@ import omegaconf
 import torch
 import torch.utils.tensorboard
 from ..utility.context import RuntimeContext
-from ..utility.subcommand_dict import subcommand_dict
+from ..utility.action_dict import action_dict
 
 
 @dataclasses.dataclass
@@ -188,4 +188,4 @@ class GuideConfig:
             logging.info("Current optimization cycle completed")
 
 
-subcommand_dict["guide"] = GuideConfig
+action_dict["guide"] = GuideConfig

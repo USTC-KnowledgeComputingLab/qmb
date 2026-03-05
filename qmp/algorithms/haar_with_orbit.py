@@ -13,7 +13,7 @@ import torch.utils.tensorboard
 from scipy.optimize import linear_sum_assignment
 from ..utility import losses
 from ..utility.context import RuntimeContext
-from ..utility.subcommand_dict import subcommand_dict
+from ..utility.action_dict import action_dict
 from ..utility.model_dict import ModelProto
 from ..utility.optimizer import scale_learning_rate
 from ..hamiltonian import Hamiltonian
@@ -211,7 +211,7 @@ class HaarWithOrbitConfig:
         )
 
         if "haar" not in data and "imag" in data:
-            logging.warning("The 'imag' subcommand is deprecated, please use 'haar' instead.")
+            logging.warning("The 'imag' action is deprecated, please use 'haar' instead.")
             data["haar"] = data["imag"]
             del data["imag"]
         if "haar" not in data:
@@ -412,4 +412,4 @@ class HaarWithOrbitConfig:
             logging.info("Checkpoint successfully saved")
 
 
-subcommand_dict["haar_with_orbit"] = HaarWithOrbitConfig
+action_dict["haar_with_orbit"] = HaarWithOrbitConfig

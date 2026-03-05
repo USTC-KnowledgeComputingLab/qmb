@@ -8,7 +8,7 @@ import dataclasses
 import omegaconf
 import torch.utils.tensorboard
 from ..utility.context import RuntimeContext
-from ..utility.subcommand_dict import subcommand_dict
+from ..utility.action_dict import action_dict
 
 
 @dataclasses.dataclass
@@ -98,4 +98,4 @@ class ChopImagConfig:
         context.save(data, 0)
 
 
-subcommand_dict["chop_imag"] = ChopImagConfig
+action_dict["chop_imag"] = ChopImagConfig

@@ -9,7 +9,7 @@ import omegaconf
 import torch
 from ..utility import losses
 from ..utility.context import RuntimeContext
-from ..utility.subcommand_dict import subcommand_dict
+from ..utility.action_dict import action_dict
 
 
 @dataclasses.dataclass
@@ -74,4 +74,4 @@ class PretrainConfig:
             logging.info("Current optimization cycle completed")
 
 
-subcommand_dict["pretrain"] = PretrainConfig
+action_dict["pretrain"] = PretrainConfig

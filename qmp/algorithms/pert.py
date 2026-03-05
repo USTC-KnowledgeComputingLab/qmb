@@ -7,7 +7,7 @@ import typing
 import dataclasses
 import omegaconf
 from ..utility.context import RuntimeContext
-from ..utility.subcommand_dict import subcommand_dict
+from ..utility.action_dict import action_dict
 
 
 @dataclasses.dataclass
@@ -64,4 +64,4 @@ class PerturbationConfig:
         logging.info("Error is reduced from %.8f to %.8f", energy0 - model.ref_energy, energy2 - model.ref_energy)
 
 
-subcommand_dict["pert"] = PerturbationConfig
+action_dict["pert"] = PerturbationConfig
