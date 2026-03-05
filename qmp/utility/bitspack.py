@@ -41,16 +41,14 @@ def pack_int(tensor: torch.Tensor, size: int) -> torch.Tensor:
     # Calculate the number of groups
     num_bytes = last_dim // elements_per_byte
 
-    # Reshape the tensor to (..., num_bytes, elements_per_bytes)
+    # Reshape the tensor to (..., num_bytes, elements_per_byte)
     shape.append(num_bytes)
     shape.append(elements_per_byte)
     tensor = tensor.view(shape)
 
-    # Define the weights tensor
-    weights = torch.tensor([1 << i for i in range(0, 8, size)], device=tensor.device, dtype=torch.uint8)
-
-    # Calculate the byte value for each group
-    packed = torch.sum(tensor * weights, dim=-1, dtype=torch.uint8)
+    # Define the shifts and calculate the byte value for each group
+    shifts = torch.arange(0, 8, size, device=tensor.device, dtype=torch.uint8)
+    packed = torch.sum(tensor << shifts, dim=-1, dtype=torch.uint8)
 
     assert packed.dtype == torch.uint8
     return packed
@@ -78,21 +76,17 @@ def unpack_int(tensor: torch.Tensor, size: int, last_dim: int) -> torch.Tensor:
     assert tensor.dtype == torch.uint8
     assert size in [1, 2, 4, 8]
 
-    # Define the weights tensor and shifts tensor
-    weights = (
-        torch.tensor([1 << i for i in range(8)], device=tensor.device, dtype=torch.uint8)
-        .view([8 // size, size])
-        .sum(dim=-1, dtype=torch.uint8)
-    )
-    shifts = torch.tensor(list(range(0, 8, size)), device=tensor.device, dtype=torch.uint8)
+    # Define the shifts and mask
+    shifts = torch.arange(0, 8, size, device=tensor.device, dtype=torch.uint8)
+    mask = torch.tensor((1 << size) - 1, device=tensor.device, dtype=torch.uint8)
 
     # Calculate the unpacked values
-    result = torch.bitwise_right_shift(torch.bitwise_and(tensor.unsqueeze(-1), weights), shifts)
+    unpacked = torch.bitwise_and(torch.bitwise_right_shift(tensor.unsqueeze(-1), shifts), mask)
 
-    # Reshape the result to the original shape
-    shape = list(result.shape)
+    # Reshape the unpacked tensor to the original shape
+    shape = list(unpacked.shape)
     shape.append(shape.pop() * shape.pop())
-    unpacked = result.view(shape)[..., :last_dim]
+    unpacked = unpacked.view(shape)[..., :last_dim]
 
     assert unpacked.dtype == torch.uint8
     return unpacked
