@@ -112,11 +112,13 @@ class RuntimeContext:
         data_path = self.folder() / "data.pth"
         local_data_path = self.folder() / f"data.{step}.pth"
         torch.save(data, local_data_path)
-        data_path.unlink(missing_ok=True)
         if step % self.checkpoint_interval == 0:
-            data_path.symlink_to(f"data.{step}.pth")
+            temp_data_path = self.folder() / "data.pth.tmp"
+            temp_data_path.unlink(missing_ok=True)
+            temp_data_path.symlink_to(f"data.{step}.pth")
+            temp_data_path.replace(data_path)
         else:
-            local_data_path.rename(data_path)
+            local_data_path.replace(data_path)
         if self.max_relative_step is not None:
             self.max_absolute_step = step + self.max_relative_step - 1
             self.max_relative_step = None
