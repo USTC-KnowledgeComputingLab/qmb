@@ -110,35 +110,33 @@ class WaveFunction(torch.nn.Module):
         self, batch_size: int, block_num: int = 1
     ) -> tuple[torch.Tensor, torch.Tensor, None, None]:
         """
-        Unique generation is not implemented for the MPS network.
+        Generate a batch of unique configurations.
         """
-        raise RuntimeError("generate_unique is not implemented for the MPS network")
+        raise NotImplementedError("generate_unique is not implemented for the MPS network")
 
     @torch.jit.export
     def generate(
         self, batch_size: int, block_num: int = 1
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
         """
-        Generate configurations by sampling from the MPS distribution.
-
-        Configurations are sampled autoregressively from left to right using
-        right-environment density matrices. After sampling, identical configurations
-        are grouped and counted.
+        Generate a batch of configurations.
 
         Parameters
         ----------
         batch_size : int
-            The number of configurations to sample (before deduplication).
+            The number of configurations to generate.
         block_num : int, default=1
-            Currently unused; kept for interface consistency.
+            The number of batch block to generate. It is used to split the batch into smaller parts to avoid memory issues.
 
         Returns
         -------
         tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]
-            - configs  : unique packed configurations, shape (n_unique, packed_sites), uint8.
-            - amplitudes : wave function amplitudes for the unique configs, shape (n_unique,), complex128.
-            - counts   : number of times each unique config was sampled, shape (n_unique,), int64.
-            - None
+            A tuple containing the generated configurations, their amplitudes, their sample counts, and a None value.
+            The configurations are a two-dimensional uint8 tensor with first dimension equal to the number of unique configurations.
+            The second dimension contains occupation for each qubit which is bitwise encoded.
+            The amplitudes are a one-dimensional complex tensor with the only dimension equal to the number of unique configurations.
+            The counts are a one-dimensional int64 tensor recording how many times each unique configuration was sampled.
+            The last None value is reserved for future use.
         """
         device: torch.device = self.dummy_param.device
         dtype: torch.dtype = self.dummy_param.dtype

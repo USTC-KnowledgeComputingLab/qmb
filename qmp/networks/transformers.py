@@ -631,7 +631,7 @@ class WaveFunctionElectronUpDown(torch.nn.Module):
         """
         Generate is not implemented for this network.
         """
-        raise RuntimeError("generate is not implemented for this network")
+        raise NotImplementedError("generate is not implemented for this network")
 
 
 class WaveFunctionElectron(torch.nn.Module):
@@ -981,7 +981,7 @@ class WaveFunctionElectron(torch.nn.Module):
         """
         Generate is not implemented for this network.
         """
-        raise RuntimeError("generate is not implemented for this network")
+        raise NotImplementedError("generate is not implemented for this network")
 
 
 class WaveFunctionNormal(torch.nn.Module):
@@ -1300,4 +1300,4 @@ class WaveFunctionNormal(torch.nn.Module):
         """
         Generate is not implemented for this network.
         """
-        raise RuntimeError("generate is not implemented for this network")
+        raise NotImplementedError("generate is not implemented for this network")
