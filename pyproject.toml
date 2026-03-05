@@ -35,6 +35,7 @@ classifiers = [
 [project.optional-dependencies]
 dev = [
   "mypy>=1.19.1",
+  "pytest>=8.4.1",
   "ruff>=0.14.10",
   "types-pyyaml>=6.0.12",
 ]
