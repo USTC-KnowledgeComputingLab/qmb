@@ -29,4 +29,4 @@ class SubcommandProto(typing.Protocol):
         """
 
 
-subcommand_dict: dict[str, typing.Callable[..., SubcommandProto]] = {}
+subcommand_dict: dict[str, type[SubcommandProto]] = {}
