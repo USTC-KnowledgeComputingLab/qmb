@@ -199,7 +199,7 @@ class RuntimeContext:
         logging.info("Initializing the optimizer")
 
         optimizer_t = getattr(torch.optim, optimizer_config.name)
-        optimizer = optimizer_t(params=params, **optimizer_config.params)  # type: ignore[arg-type]
+        optimizer: torch.optim.Optimizer = optimizer_t(params=params, **optimizer_config.params)
 
         if state_dict is not None:
             logging.info("Loading state dict of the optimizer")
