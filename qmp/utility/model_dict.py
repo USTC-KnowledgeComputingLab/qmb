@@ -52,6 +52,28 @@ class NetworkProto(typing.Protocol):
             The last two None values are reserved for future use.
         """
 
+    def generate(self, batch_size: int, block_num: int = 1) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
+        """
+        Generate a batch of configurations.
+
+        Parameters
+        ----------
+        batch_size : int
+            The number of configurations to generate.
+        block_num : int, default=1
+            The number of batch block to generate. It is used to split the batch into smaller parts to avoid memory issues.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]
+            A tuple containing the generated configurations, their amplitudes, their sample counts, and a None value.
+            The configurations are a two-dimensional uint8 tensor with first dimension equal to the number of unique configurations.
+            The second dimension contains occupation for each qubit which is bitwise encoded.
+            The amplitudes are a one-dimensional complex tensor with the only dimension equal to the number of unique configurations.
+            The counts are a one-dimensional int64 tensor recording how many times each unique configuration was sampled.
+            The last None value is reserved for future use.
+        """
+
     def load_state_dict(self, data: dict[str, torch.Tensor]) -> typing.Any:
         """torch.nn.Module function"""
 

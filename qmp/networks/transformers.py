@@ -626,6 +626,13 @@ class WaveFunctionElectronUpDown(torch.nn.Module):
 
         return x, amplitude, None, None
 
+    @torch.jit.export
+    def generate(self, batch_size: int, block_num: int = 1) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
+        """
+        Generate is not implemented for this network.
+        """
+        raise NotImplementedError("generate is not implemented for this network")
+
 
 class WaveFunctionElectron(torch.nn.Module):
     """
@@ -969,6 +976,13 @@ class WaveFunctionElectron(torch.nn.Module):
 
         return x, amplitude, None, None
 
+    @torch.jit.export
+    def generate(self, batch_size: int, block_num: int = 1) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
+        """
+        Generate is not implemented for this network.
+        """
+        raise NotImplementedError("generate is not implemented for this network")
+
 
 class WaveFunctionNormal(torch.nn.Module):
     """
@@ -1280,3 +1294,10 @@ class WaveFunctionNormal(torch.nn.Module):
         if self.physical_dim <= 1 << 8:
             return 8
         raise ValueError("physical_dim should be less than or equal to 256")
+
+    @torch.jit.export
+    def generate(self, batch_size: int, block_num: int = 1) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
+        """
+        Generate is not implemented for this network.
+        """
+        raise NotImplementedError("generate is not implemented for this network")
