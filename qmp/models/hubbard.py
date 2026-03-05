@@ -28,8 +28,11 @@ class ModelConfig:
     t: float = 1
     # The coefficient of U
     u: float = 0
+    # The chemical potential mu
+    mu: float = 0
 
-    # The electron number, left empty for half-filling
+    # The electron number, left empty for half-filling.
+    # Note: if a network without particle number conservation is used, this parameter will be ignored.
     electron_number: int | None = None
 
     # The ref energy of the model
@@ -65,11 +68,6 @@ class Model(ModelProto[ModelConfig]):
         hamiltonian_dict: dict[tuple[tuple[int, int], ...], complex] = {}
         for i in range(args.m):
             for j in range(args.n):
-                # On-site interaction
-                hamiltonian_dict[
-                    (_index(i, j, 0), 1), (_index(i, j, 0), 0), (_index(i, j, 1), 1), (_index(i, j, 1), 0)
-                ] = args.u
-
                 # Nearest neighbor hopping
                 if i != 0:
                     hamiltonian_dict[(_index(i, j, 0), 1), (_index(i - 1, j, 0), 0)] = -args.t
@@ -82,6 +80,15 @@ class Model(ModelProto[ModelConfig]):
                     hamiltonian_dict[(_index(i, j, 1), 1), (_index(i, j - 1, 1), 0)] = -args.t
                     hamiltonian_dict[(_index(i, j - 1, 1), 1), (_index(i, j, 1), 0)] = -args.t
 
+                # On-site interaction
+                hamiltonian_dict[
+                    (_index(i, j, 0), 1), (_index(i, j, 0), 0), (_index(i, j, 1), 1), (_index(i, j, 1), 0)
+                ] = args.u
+
+                # Chemical potential
+                hamiltonian_dict[(_index(i, j, 0), 1), (_index(i, j, 0), 0)] = -args.mu
+                hamiltonian_dict[(_index(i, j, 1), 1), (_index(i, j, 1), 0)] = -args.mu
+
         return hamiltonian_dict
 
     def __init__(self, args: ModelConfig):
@@ -90,11 +97,12 @@ class Model(ModelProto[ModelConfig]):
         self.n: int = args.n
         self.electron_number: int = args.electron_number
         logging.info(
-            "Constructing Hubbard model: width = %d, height = %d, t = %.4f, U = %.4f, N = %d, ref_energy = %.4f",
+            "Constructing Hubbard model: width = %d, height = %d, t = %.4f, U = %.4f, mu = %.4f, N = %d, ref_energy = %.4f",
             self.m,
             self.n,
             args.t,
             args.u,
+            args.mu,
             args.electron_number,
             args.ref_energy,
         )
