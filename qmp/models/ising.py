@@ -10,6 +10,7 @@ from ..networks.mlp import WaveFunctionNormal as MlpWaveFunction
 from ..networks.mlp import WaveFunctionElectron as MlpWaveFunctionElectron
 from ..networks.transformers import WaveFunctionNormal as TransformersWaveFunction
 from ..networks.transformers import WaveFunctionElectron as TransformersWaveFunctionElectron
+from ..networks.mps import WaveFunction as MpsWaveFunction
 from ..hamiltonian import Hamiltonian
 from ..utility.model_dict import model_dict, ModelProto, NetworkProto, NetworkConfigProto
 
@@ -408,3 +409,30 @@ class TransformersElectronConfig:
 
 
 Model.network_dict["transformers/u1"] = TransformersElectronConfig
+
+
+@dataclasses.dataclass
+class MpsConfig:
+    """
+    The configuration of the MPS network.
+    """
+
+    # The bond dimension of the MPS
+    virtual_dim: int = 16
+
+    def create(self, model: Model) -> NetworkProto:
+        """
+        Create an MPS network for the model.
+        """
+        logging.info("MPS bond dimension: %d", self.virtual_dim)
+
+        network = MpsWaveFunction(
+            sites=model.m * model.n,
+            physical_dim=2,
+            virtual_dim=self.virtual_dim,
+        )
+
+        return network
+
+
+Model.network_dict["mps"] = MpsConfig
