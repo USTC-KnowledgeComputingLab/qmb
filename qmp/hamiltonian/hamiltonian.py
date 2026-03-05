@@ -3,7 +3,6 @@ This file contains the Hamiltonian class, which is used to store the Hamiltonian
 """
 
 import os
-import typing
 import platformdirs
 import torch
 import torch.utils.cpp_extension
@@ -153,9 +152,6 @@ class Hamiltonian:
             A tensor of shape [batch_size_j] representing the output amplitudes on the given configurations.
         """
         self._prepare_data(configs_i.device)
-        _apply_within: typing.Callable[
-            [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor
-        ]
         _apply_within = getattr(
             self._load_module(configs_i.device.type, configs_i.size(1), self.particle_cut),
             "apply_within",
@@ -195,9 +191,6 @@ class Hamiltonian:
         if configs_exclude is None:
             configs_exclude = configs_i
         self._prepare_data(configs_i.device)
-        _find_relative: typing.Callable[
-            [torch.Tensor, torch.Tensor, int, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor
-        ]
         _find_relative = getattr(
             self._load_module(configs_i.device.type, configs_i.size(1), self.particle_cut),
             "find_relative",
@@ -258,7 +251,6 @@ class Hamiltonian:
             A complex64 tensor of shape [batch_size] representing the diagonal term of the Hamiltonian for the given configurations.
         """
         self._prepare_data(configs.device)
-        _diagonal_term: typing.Callable[[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
         _diagonal_term = getattr(
             self._load_module(configs.device.type, configs.size(1), self.particle_cut),
             "diagonal_term",

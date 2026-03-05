@@ -7,7 +7,7 @@ wheels/
 *.egg-info
 
 # Virtual environments
-.venv
+/.venv
 
 # Models
 /models
@@ -17,3 +17,6 @@ wheels/
 
 # Worktrees
 /worktree
+
+# IDE
+/.vscode
