@@ -1,5 +1,5 @@
 """
-This file implements the MLP network from https://arxiv.org/pdf/2109.12606 with the sampling method introduced in https://arxiv.org/pdf/2408.07625.
+This file implements a MLP network from https://arxiv.org/pdf/2109.12606.
 """
 
 import itertools
@@ -333,9 +333,79 @@ class WaveFunctionElectronUpDown(torch.nn.Module):
     @torch.jit.export
     def generate(self, batch_size: int, block_num: int = 1) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
         """
-        Generate is not implemented for this network.
+        Generate a batch of configurations.
+        See https://arxiv.org/pdf/2109.12606.
+
+        Parameters
+        ----------
+        batch_size : int
+            The number of configurations to generate.
+        block_num : int, default=1
+            The number of batch blocks used for the final amplitude computation to avoid memory issues.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]
+            A tuple containing the generated configurations, their amplitudes, their sample counts, and a None value.
+            The configurations are a two-dimensional uint8 tensor with first dimension equal to the number of unique configurations.
+            The second dimension contains occupation for each qubit which is bitwise encoded.
+            The amplitudes are a one-dimensional complex tensor with the only dimension equal to the number of unique configurations.
+            The counts are a one-dimensional int64 tensor recording how many times each unique configuration was sampled.
+            The last None value is reserved for future use.
         """
-        raise NotImplementedError("generate is not implemented for this network")
+        device: torch.device = self.dummy_param.device
+        dtype: torch.dtype = self.dummy_param.dtype
+
+        # samples: batch_size * sites * 2
+        samples: torch.Tensor = torch.zeros([batch_size, self.sites, 2], device=device, dtype=torch.uint8)
+
+        for i, amplitude_m in enumerate(self.amplitude):
+            # x_partial: batch_size * i * 2
+            x_partial: torch.Tensor = samples[:, :i, :]
+            x_float: torch.Tensor = x_partial.to(dtype=dtype)
+
+            # delta_amplitude: batch_size * 2 * 2
+            delta_amplitude: torch.Tensor = amplitude_m(x_float.view([batch_size, 2 * i])).view([batch_size, 2, 2])
+            # Apply a filter mask to ensure conservation of particle number.
+            delta_amplitude = delta_amplitude + torch.where(self._mask(x_partial), 0, -torch.inf)
+            # Normalize the delta amplitude.
+            normalized_delta_amplitude: torch.Tensor = self._normalize_amplitude(delta_amplitude)
+
+            # prob: batch_size * 4
+            prob: torch.Tensor = (2 * normalized_delta_amplitude).exp().view([batch_size, 4]).clamp(min=0)
+
+            # Sample next state for each element in the batch.
+            s_i: torch.Tensor = torch.multinomial(prob, num_samples=1).squeeze(1)
+
+            # Decode: up = s_i // 2, down = s_i % 2
+            samples[:, i, 0] = (s_i // 2).to(dtype=torch.uint8)
+            samples[:, i, 1] = (s_i % 2).to(dtype=torch.uint8)
+
+        # Apply ordering and pack.
+        samples_ordered: torch.Tensor = torch.index_select(samples, 1, self.ordering)
+        x: torch.Tensor = pack_int(samples_ordered.view([batch_size, self.double_sites]), size=1)
+
+        # Deduplicate and count.
+        x_unique, _, counts = torch.unique(x, sorted=True, return_inverse=True, return_counts=True, dim=0)
+
+        # Compute amplitudes for unique configurations.
+        real_batch_size: int = len(x_unique)
+        real_batch_size_block: int = real_batch_size // block_num
+        remainder: int = real_batch_size % block_num
+        amplitude_list: list[torch.Tensor] = []
+        for j in range(block_num):
+            if j < remainder:
+                current_real_batch_size_block: int = real_batch_size_block + 1
+            else:
+                current_real_batch_size_block = real_batch_size_block
+            start_index: int = j * real_batch_size_block + min(j, remainder)
+            end_index: int = start_index + current_real_batch_size_block
+            batch_indices_block: torch.Tensor = torch.arange(start_index, end_index, device=device, dtype=torch.int64)
+            amplitude_block: torch.Tensor = self(x_unique[batch_indices_block])
+            amplitude_list.append(amplitude_block)
+        amplitude: torch.Tensor = torch.cat(amplitude_list)
+
+        return x_unique, amplitude, counts, None
 
 
 class WaveFunctionElectron(torch.nn.Module):
@@ -578,9 +648,76 @@ class WaveFunctionElectron(torch.nn.Module):
     @torch.jit.export
     def generate(self, batch_size: int, block_num: int = 1) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
         """
-        Generate is not implemented for this network.
+        Generate a batch of configurations.
+        See https://arxiv.org/pdf/2109.12606.
+
+        Parameters
+        ----------
+        batch_size : int
+            The number of configurations to generate.
+        block_num : int, default=1
+            The number of batch blocks used for the final amplitude computation to avoid memory issues.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]
+            A tuple containing the generated configurations, their amplitudes, their sample counts, and a None value.
+            The configurations are a two-dimensional uint8 tensor with first dimension equal to the number of unique configurations.
+            The second dimension contains occupation for each qubit which is bitwise encoded.
+            The amplitudes are a one-dimensional complex tensor with the only dimension equal to the number of unique configurations.
+            The counts are a one-dimensional int64 tensor recording how many times each unique configuration was sampled.
+            The last None value is reserved for future use.
         """
-        raise NotImplementedError("generate is not implemented for this network")
+        device: torch.device = self.dummy_param.device
+        dtype: torch.dtype = self.dummy_param.dtype
+
+        # samples: batch_size * sites
+        samples: torch.Tensor = torch.zeros([batch_size, self.sites], device=device, dtype=torch.uint8)
+
+        for i, amplitude_m in enumerate(self.amplitude):
+            # x_partial: batch_size * i
+            x_partial: torch.Tensor = samples[:, :i]
+            x_float: torch.Tensor = x_partial.to(dtype=dtype)
+
+            # delta_amplitude: batch_size * 2
+            delta_amplitude: torch.Tensor = amplitude_m(x_float.view([batch_size, i])).view([batch_size, 2])
+            # Apply a filter mask to ensure conservation of particle number.
+            delta_amplitude = delta_amplitude + torch.where(self._mask(x_partial), 0, -torch.inf)
+            # Normalize the delta amplitude.
+            normalized_delta_amplitude: torch.Tensor = self._normalize_amplitude(delta_amplitude)
+
+            # prob: batch_size * 2
+            prob: torch.Tensor = (2 * normalized_delta_amplitude).exp().clamp(min=0)
+
+            # Sample next state for each element in the batch.
+            s_i: torch.Tensor = torch.multinomial(prob, num_samples=1).squeeze(1)
+            samples[:, i] = s_i.to(dtype=torch.uint8)
+
+        # Apply ordering and pack.
+        x_ordered: torch.Tensor = torch.index_select(samples, 1, self.ordering)
+        x: torch.Tensor = pack_int(x_ordered, size=1)
+
+        # Deduplicate and count.
+        x_unique, _, counts = torch.unique(x, sorted=True, return_inverse=True, return_counts=True, dim=0)
+
+        # Compute amplitudes for unique configurations.
+        real_batch_size: int = len(x_unique)
+        real_batch_size_block: int = real_batch_size // block_num
+        remainder: int = real_batch_size % block_num
+        amplitude_list: list[torch.Tensor] = []
+        for j in range(block_num):
+            if j < remainder:
+                current_real_batch_size_block: int = real_batch_size_block + 1
+            else:
+                current_real_batch_size_block = real_batch_size_block
+            start_index: int = j * real_batch_size_block + min(j, remainder)
+            end_index: int = start_index + current_real_batch_size_block
+            batch_indices_block: torch.Tensor = torch.arange(start_index, end_index, device=device, dtype=torch.int64)
+            amplitude_block: torch.Tensor = self(x_unique[batch_indices_block])
+            amplitude_list.append(amplitude_block)
+        amplitude: torch.Tensor = torch.cat(amplitude_list)
+
+        return x_unique, amplitude, counts, None
 
 
 class WaveFunctionNormal(torch.nn.Module):
@@ -796,6 +933,71 @@ class WaveFunctionNormal(torch.nn.Module):
     @torch.jit.export
     def generate(self, batch_size: int, block_num: int = 1) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
         """
-        Generate is not implemented for this network.
+        Generate a batch of configurations.
+        See https://arxiv.org/pdf/2109.12606.
+
+        Parameters
+        ----------
+        batch_size : int
+            The number of configurations to generate.
+        block_num : int, default=1
+            The number of batch blocks used for the final amplitude computation to avoid memory issues.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]
+            A tuple containing the generated configurations, their amplitudes, their sample counts, and a None value.
+            The configurations are a two-dimensional uint8 tensor with first dimension equal to the number of unique configurations.
+            The second dimension contains occupation for each qubit which is bitwise encoded.
+            The amplitudes are a one-dimensional complex tensor with the only dimension equal to the number of unique configurations.
+            The counts are a one-dimensional int64 tensor recording how many times each unique configuration was sampled.
+            The last None value is reserved for future use.
         """
-        raise NotImplementedError("generate is not implemented for this network")
+        device: torch.device = self.dummy_param.device
+        dtype: torch.dtype = self.dummy_param.dtype
+
+        # samples: batch_size * sites
+        samples: torch.Tensor = torch.zeros([batch_size, self.sites], device=device, dtype=torch.uint8)
+
+        for i, amplitude_m in enumerate(self.amplitude):
+            # x_partial: batch_size * i
+            x_partial: torch.Tensor = samples[:, :i]
+            x_float: torch.Tensor = x_partial.to(dtype=dtype)
+
+            # delta_amplitude: batch_size * 2
+            delta_amplitude: torch.Tensor = amplitude_m(x_float.view([batch_size, i])).view([batch_size, 2])
+            # Normalize the delta amplitude.
+            normalized_delta_amplitude: torch.Tensor = self._normalize_amplitude(delta_amplitude)
+
+            # prob: batch_size * 2
+            prob: torch.Tensor = (2 * normalized_delta_amplitude).exp().clamp(min=0)
+
+            # Sample next state for each element in the batch.
+            s_i: torch.Tensor = torch.multinomial(prob, num_samples=1).squeeze(1)
+            samples[:, i] = s_i.to(dtype=torch.uint8)
+
+        # Apply ordering and pack.
+        x_ordered: torch.Tensor = torch.index_select(samples, 1, self.ordering)
+        x: torch.Tensor = pack_int(x_ordered, size=1)
+
+        # Deduplicate and count.
+        x_unique, _, counts = torch.unique(x, sorted=True, return_inverse=True, return_counts=True, dim=0)
+
+        # Compute amplitudes for unique configurations.
+        real_batch_size: int = len(x_unique)
+        real_batch_size_block: int = real_batch_size // block_num
+        remainder: int = real_batch_size % block_num
+        amplitude_list: list[torch.Tensor] = []
+        for j in range(block_num):
+            if j < remainder:
+                current_real_batch_size_block: int = real_batch_size_block + 1
+            else:
+                current_real_batch_size_block = real_batch_size_block
+            start_index: int = j * real_batch_size_block + min(j, remainder)
+            end_index: int = start_index + current_real_batch_size_block
+            batch_indices_block: torch.Tensor = torch.arange(start_index, end_index, device=device, dtype=torch.int64)
+            amplitude_block: torch.Tensor = self(x_unique[batch_indices_block])
+            amplitude_list.append(amplitude_block)
+        amplitude: torch.Tensor = torch.cat(amplitude_list)
+
+        return x_unique, amplitude, counts, None
