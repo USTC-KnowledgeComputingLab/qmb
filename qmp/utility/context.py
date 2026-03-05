@@ -16,6 +16,9 @@ from .random_engine import dump_random_engine_state, load_random_engine_state
 from .optimizer import migrate_optimizer
 
 
+DACITE_CAST = [pathlib.Path, torch.device, tuple]
+
+
 @dataclasses.dataclass
 class RuntimeContext:
     """
@@ -131,7 +134,7 @@ class RuntimeContext:
         model_param = dacite.from_dict(
             data_class=model_t.config_t,
             data=omegaconf.OmegaConf.to_container(model_config.params, resolve=True),  # type: ignore[arg-type]
-            config=dacite.Config(cast=[pathlib.Path, torch.device, tuple]),
+            config=dacite.Config(cast=DACITE_CAST),
         )
         # Then create the model
         model: ModelProto = model_t(model_param)
@@ -159,7 +162,7 @@ class RuntimeContext:
         network_param = dacite.from_dict(
             data_class=network_config_t,
             data=omegaconf.OmegaConf.to_container(network_config.params, resolve=True),  # type: ignore[arg-type]
-            config=dacite.Config(cast=[pathlib.Path, torch.device, tuple]),
+            config=dacite.Config(cast=DACITE_CAST),
         )
         network: NetworkProto = network_param.create(model)
         logging.info("Network initialized successfully")
