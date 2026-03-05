@@ -62,6 +62,26 @@ from ..utility.model_dict import ModelProto
 # ---------------------------------------------------------------------------
 
 
+class _CIArray(numpy.ndarray):
+    """
+    A numpy array subclass that stores a QMP checkpoint dictionary.
+
+    This allows the FCI solver to return a standard-looking CI wavefunction
+    (the array) while still carrying the full state (network, optimizer, etc.)
+    needed for a high-performance warm start in the next call to :meth:`kernel`.
+    """
+
+    def __new__(cls, input_array: numpy.ndarray, checkpoint: dict[str, typing.Any]) -> "_CIArray":
+        obj = numpy.asanyarray(input_array).view(cls)
+        obj.checkpoint = checkpoint
+        return obj
+
+    def __array_finalize__(self, obj: typing.Any) -> None:
+        if obj is None:
+            return
+        self.checkpoint: dict[str, typing.Any] = getattr(obj, "checkpoint", {})
+
+
 class _PyscfRuntimeContext(RuntimeContext):
     """
     A :class:`~qmp.utility.context.RuntimeContext` subclass for programmatic
@@ -95,6 +115,118 @@ class _PyscfRuntimeContext(RuntimeContext):
 
     def create_model(self, model_config: omegaconf.DictConfig) -> ModelProto:
         return self._model_instance
+
+
+def _to_pyscf_ci(
+    data: dict[str, typing.Any], action_name: str, norb: int, nelec: int | tuple[int, int]
+) -> numpy.ndarray | None:
+    """
+    Convert QMP sampled configurations and amplitudes to a PySCF CI vector.
+    """
+    try:
+        from pyscf.fci import cistring
+    except ImportError:
+        return None
+
+    if action_name not in ("haar", "imag"):
+        return None
+
+    haar_data = data.get("haar")
+    if not haar_data:
+        return None
+    pool = haar_data.get("pool")
+    if not pool:
+        return None
+
+    configs, psi = pool
+    if configs is None or psi is None:
+        return None
+
+    if isinstance(nelec, (int, numpy.integer)):
+        nalpha = (int(nelec) + 1) // 2
+        nbeta = int(nelec) - nalpha
+    else:
+        nalpha, nbeta = int(nelec[0]), int(nelec[1])
+
+    na = cistring.num_strings(norb, nalpha)
+    nb = cistring.num_strings(norb, nbeta)
+
+    # Limit CI vector size to avoid memory overflow (approx 10^8 elements ~ 1.6GB)
+    if na * nb > 10**8:
+        return None
+
+    configs_np = configs.cpu().numpy()
+    psi_np = psi.cpu().numpy()
+
+    # Unpack bits: QMP order is little-endian bit-packed bytes
+    bits = numpy.unpackbits(configs_np, axis=1, bitorder="little")
+
+    # Extract alpha and beta occupancy (alpha=even, beta=odd bits)
+    alpha_bits = bits[:, 0 : 2 * norb : 2]
+    beta_bits = bits[:, 1 : 2 * norb : 2]
+
+    # Convert to integer bitmasks
+    pw2 = 2 ** numpy.arange(norb, dtype=numpy.uint64)
+    alpha_dets = (alpha_bits.astype(numpy.uint64) * pw2).sum(axis=1)
+    beta_dets = (beta_bits.astype(numpy.uint64) * pw2).sum(axis=1)
+
+    # Map bitmasks to PySCF determinant indices
+    try:
+        addr_a = cistring.str2addr(norb, nalpha, alpha_dets)
+        addr_b = cistring.str2addr(norb, nbeta, beta_dets)
+    except Exception:
+        # Fallback for older PySCF or if vectorized call fails
+        addr_a = numpy.array([cistring.str2addr(norb, nalpha, int(d)) for d in alpha_dets])
+        addr_b = numpy.array([cistring.str2addr(norb, nbeta, int(d)) for d in beta_dets])
+
+    ci_array = numpy.zeros((na, nb), dtype=psi_np.dtype)
+    ci_array[addr_a, addr_b] = psi_np
+
+    return ci_array
+
+
+def _from_pyscf_ci(ci_array: numpy.ndarray, norb: int, nelec: int | tuple[int, int]) -> dict[str, typing.Any]:
+    """
+    Convert a PySCF CI vector back to a QMP checkpoint (sampled pool).
+    """
+    try:
+        from pyscf.fci import cistring
+    except ImportError:
+        return {}
+
+    if isinstance(nelec, (int, numpy.integer)):
+        nalpha = (int(nelec) + 1) // 2
+        nbeta = int(nelec) - nalpha
+    else:
+        nalpha, nbeta = int(nelec[0]), int(nelec[1])
+
+    idx_a, idx_b = numpy.where(ci_array != 0)
+    amplitudes = ci_array[idx_a, idx_b]
+
+    str_a = cistring.addrs2str(norb, nalpha, idx_a)
+    str_b = cistring.addrs2str(norb, nbeta, idx_b)
+
+    n_qubytes = (2 * norb + 7) // 8
+    N = len(str_a)
+    configs = numpy.zeros((N, n_qubytes), dtype=numpy.uint8)
+
+    for j in range(norb):
+        a_bit = (str_a >> j) & 1
+        b_bit = (str_b >> j) & 1
+        pos_a = 2 * j
+        pos_b = 2 * j + 1
+        configs[:, pos_a // 8] |= (a_bit << (pos_a % 8)).astype(numpy.uint8)
+        configs[:, pos_b // 8] |= (b_bit << (pos_b % 8)).astype(numpy.uint8)
+
+    return {
+        "haar": {
+            "global": 0,
+            "local": 0,
+            "lanczos": 0,
+            "pool": (torch.from_numpy(configs), torch.from_numpy(amplitudes)),
+            "excited": {},
+        }
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -140,11 +272,11 @@ class Solver:
         eri: numpy.ndarray,
         norb: int,
         nelec: int | tuple[int, int],
-        ci0: dict[str, typing.Any] | None = None,
+        ci0: dict[str, typing.Any] | numpy.ndarray | None = None,
         nuclear_repulsion: float = 0.0,
         ref_energy: float = 0.0,
         **kwargs: typing.Any,
-    ) -> tuple[float, dict[str, typing.Any]]:
+    ) -> tuple[float, numpy.ndarray | dict[str, typing.Any]]:
         """
         Solve the electronic structure problem for the given integrals.
 
@@ -159,7 +291,7 @@ class Solver:
 
             * ``(norb, norb, norb, norb)`` – full 4-index array.
             * ``(nij, nij)`` – 4-fold symmetric compressed array
-              (``nij = norb*(norb+1)//2``).
+              (nij = norb*(norb+1)//2).
         norb : int
             Number of spatial orbitals.
         nelec : int or tuple[int, int]
@@ -167,12 +299,10 @@ class Solver:
             as evenly as possible between alpha and beta spin (rounding alpha
             up).  If a 2-tuple ``(nalpha, nbeta)``, each spin count is used
             directly.
-        ci0 : dict, optional
-            Checkpoint data from a previous :meth:`kernel` call (the ``ci``
-            value returned by that call).  When provided it is written to the
-            temporary checkpoint directory so that the algorithm resumes from
-            the saved state, analogous to passing an initial CI vector in a
-            conventional FCI solver.
+        ci0 : dict or numpy.ndarray, optional
+            Initial guess or checkpoint data. If a ``dict``, it is treated as
+            the full QMP checkpoint. If a ``numpy.ndarray``, it is treated as
+            the PySCF CI vector and converted to a QMP pool.
         nuclear_repulsion : float
             Constant nuclear repulsion energy added to the Hamiltonian.
         ref_energy : float
@@ -183,21 +313,18 @@ class Solver:
         Returns
         -------
         energy : float
-            Ground-state energy after ``common.max_absolute_step`` global
-            algorithm steps, extracted from the saved checkpoint.
-        ci : dict
-            Checkpoint data (without random engine state) that can be passed
-            back as ``ci0`` in a subsequent call to continue optimisation.
-            For the ``haar`` algorithm this contains, among other things,
-            ``ci["haar"]["pool"]`` — a ``(configs, psi)`` tuple representing
-            the sampled basis and its Lanczos-optimised amplitudes.
+            Ground-state energy after global algorithm steps.
+        ci : numpy.ndarray or dict
+            CI wavefunction as a numpy array. The array is an instance of
+            ``_CIArray`` which carries the full QMP checkpoint for warm-start
+            compatibility.
         """
         # ------------------------------------------------------------------
         # 1. Resolve electron counts
         # ------------------------------------------------------------------
-        if isinstance(nelec, int):
-            nalpha = (nelec + 1) // 2
-            nbeta = nelec - nalpha
+        if isinstance(nelec, (int, numpy.integer)):
+            nalpha = (int(nelec) + 1) // 2
+            nbeta = int(nelec) - nalpha
         else:
             nalpha, nbeta = int(nelec[0]), int(nelec[1])
 
@@ -260,11 +387,15 @@ class Solver:
         tmpdir: pathlib.Path | None = None
         try:
             tmpdir = pathlib.Path(tempfile.mkdtemp())
-            # If ci0 is provided, save it as the initial checkpoint so that
-            # setup() loads it automatically — the same way __main__.py
-            # resumes from an existing checkpoint file.
+            # Handle ci0: could be full checkpoint dict or amplitudes array
             if ci0 is not None:
-                torch.save(ci0, tmpdir / "data.pth")
+                if isinstance(ci0, _CIArray) and ci0.checkpoint:
+                    checkpoint_to_save = ci0.checkpoint
+                elif isinstance(ci0, numpy.ndarray):
+                    checkpoint_to_save = _from_pyscf_ci(ci0, norb, (nalpha, nbeta))
+                else:
+                    checkpoint_to_save = ci0
+                torch.save(checkpoint_to_save, tmpdir / "data.pth")
 
             context = _PyscfRuntimeContext(
                 model_instance=model,
@@ -325,7 +456,16 @@ class Solver:
             # ------------------------------------------------------------------
             energy = _extract_energy(data, self.config.action.name)
             # Strip the random engine state — it is stale by the next call.
-            ci: dict[str, typing.Any] = {k: v for k, v in data.items() if k != "random"}
+            full_checkpoint: dict[str, typing.Any] = {
+                k: v for k, v in data.items() if k != "random"
+            }
+
+            # Try to convert to PySCF CI vector format
+            ci_array = _to_pyscf_ci(data, self.config.action.name, norb, (nalpha, nbeta))
+            if ci_array is not None:
+                ci: numpy.ndarray | dict[str, typing.Any] = _CIArray(ci_array, full_checkpoint)
+            else:
+                ci = full_checkpoint
 
         finally:
             if tmpdir is not None:
