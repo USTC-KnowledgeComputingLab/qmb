@@ -38,6 +38,9 @@ dev = [
   "ruff>=0.14.10",
   "types-pyyaml>=6.0.12",
 ]
+pyscf = [
+    "pyscf>=2.12.1",
+]
 
 [project.urls]
 Homepage = "https://github.com/USTC-KnowledgeComputingLab/qmp-kit"

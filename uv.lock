@@ -1174,6 +1174,24 @@ wheels = [
 ]
 
 [[package]]
+name = "pyscf"
+version = "2.12.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "h5py" },
+    { name = "numpy" },
+    { name = "scipy" },
+    { name = "setuptools" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ce/c9/555f8a27e2fbc55d73e5034dcf3d1b58db98f127f770ce6038c3eb90dd27/pyscf-2.12.1.tar.gz", hash = "sha256:cae3b026a928ce866965242056a833a17e46b89035d2e3abbf5429a158da4d48", size = 10472353, upload-time = "2026-02-04T01:03:28.034Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/aa/cc/76888e9667b5f3b512dd43d83cc07818339f2a1452708417d5ceacec0eea/pyscf-2.12.1-py3-none-macosx_10_9_x86_64.whl", hash = "sha256:283b94e48699a91c391d6c1de7cf5517d3573e5080b9ec56b69abce4880c1a71", size = 35952312, upload-time = "2026-02-04T00:39:44Z" },
+    { url = "https://files.pythonhosted.org/packages/03/5b/8857c05ef602276b094e7be8695766da1cc68b48dad7128fe1aa882591eb/pyscf-2.12.1-py3-none-macosx_11_0_arm64.whl", hash = "sha256:18f150403afd56b671ec3c337f18f8ff309ec9a7c71fb4bb7a27ebb534e65fc8", size = 35293657, upload-time = "2026-02-04T00:38:02.095Z" },
+    { url = "https://files.pythonhosted.org/packages/b3/9f/310b7e3753f1f9405459b270bbcbc09032a16bb1d2745421b3c5e4b7972a/pyscf-2.12.1-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:e780605991a91d3386b670b1d9fd5e300e6953d02b2958ed1f995904536ada73", size = 44773502, upload-time = "2026-02-04T03:24:39.922Z" },
+    { url = "https://files.pythonhosted.org/packages/8b/12/48c9b68186f8dc12e4220821ae4d3079844d657141b68f6ed7c426c134aa/pyscf-2.12.1-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:025a98c21a9014f1efae21a11f0f80ce14b9a2232cf2d3d934d83691b97b999f", size = 51580734, upload-time = "2026-02-04T01:03:00.43Z" },
+]
+
+[[package]]
 name = "python-dateutil"
 version = "2.9.0.post0"
 source = { registry = "https://pypi.org/simple" }
@@ -1262,6 +1280,9 @@ dev = [
     { name = "ruff" },
     { name = "types-pyyaml" },
 ]
+pyscf = [
+    { name = "pyscf" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -1273,13 +1294,14 @@ requires-dist = [
     { name = "openfermion", specifier = ">=1.7.1" },
     { name = "platformdirs", specifier = ">=4.5.1" },
     { name = "pybind11", specifier = ">=3.0.1" },
+    { name = "pyscf", marker = "extra == 'pyscf'", specifier = ">=2.12.1" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.14.10" },
     { name = "scipy", specifier = ">=1.16.3" },
     { name = "tensorboard", specifier = ">=2.20.0" },
     { name = "torch", specifier = ">=2.9.1" },
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.12" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dev", "pyscf"]
 
 [[package]]
 name = "requests"
