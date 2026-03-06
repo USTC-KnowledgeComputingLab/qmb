@@ -71,9 +71,7 @@ def _restore_eri(eri: numpy.ndarray, norb: int) -> numpy.ndarray:
     if eri.ndim == 2:
         nij = norb * (norb + 1) // 2
         if eri.shape != (nij, nij):
-            raise ValueError(
-                f"For 2D ERI, expected shape ({nij}, {nij}) for norb={norb}, got {eri.shape}"
-            )
+            raise ValueError(f"For 2D ERI, expected shape ({nij}, {nij}) for norb={norb}, got {eri.shape}")
         eri_full = numpy.zeros((norb, norb, norb, norb), dtype=eri.dtype)
         i_idx, j_idx = numpy.tril_indices(norb)
         ij_list = list(zip(i_idx.tolist(), j_idx.tolist()))
@@ -147,9 +145,7 @@ class Model(ModelProto[ModelConfig]):
         interaction_operator: openfermion.InteractionOperator = openfermion.InteractionOperator(
             args.nuclear_repulsion, energy_1_b.numpy(), energy_2_b.numpy()
         )  # type: ignore[no-untyped-call]
-        fermion_operator: openfermion.FermionOperator = openfermion.get_fermion_operator(
-            interaction_operator
-        )  # type: ignore[no-untyped-call]
+        fermion_operator: openfermion.FermionOperator = openfermion.get_fermion_operator(interaction_operator)  # type: ignore[no-untyped-call]
         openfermion_hamiltonian_dict = {
             k: complex(v)
             for k, v in openfermion.normal_ordered(fermion_operator).terms.items()  # type: ignore[no-untyped-call]

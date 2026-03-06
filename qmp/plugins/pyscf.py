@@ -419,9 +419,7 @@ class Solver:
             # ------------------------------------------------------------------
             run = dacite.from_dict(
                 data_class=action_dict[self.config.action.name],
-                data=omegaconf.OmegaConf.to_container(
-                    self.config.action.params, resolve=True
-                ),  # type: ignore[arg-type]
+                data=omegaconf.OmegaConf.to_container(self.config.action.params, resolve=True),  # type: ignore[arg-type]
                 config=dacite.Config(cast=DACITE_CAST),
             )
 
@@ -445,9 +443,7 @@ class Solver:
             # ------------------------------------------------------------------
             data_path = tmpdir / "data.pth"
             if data_path.exists():
-                data: dict[str, typing.Any] = torch.load(
-                    data_path, map_location="cpu", weights_only=True
-                )
+                data: dict[str, typing.Any] = torch.load(data_path, map_location="cpu", weights_only=True)
             else:
                 data = {}
 
@@ -456,9 +452,7 @@ class Solver:
             # ------------------------------------------------------------------
             energy = _extract_energy(data, self.config.action.name)
             # Strip the random engine state — it is stale by the next call.
-            full_checkpoint: dict[str, typing.Any] = {
-                k: v for k, v in data.items() if k != "random"
-            }
+            full_checkpoint: dict[str, typing.Any] = {k: v for k, v in data.items() if k != "random"}
 
             # Try to convert to PySCF CI vector format
             ci_array = _to_pyscf_ci(data, self.config.action.name, norb, (nalpha, nbeta))
