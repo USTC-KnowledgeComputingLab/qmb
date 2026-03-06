@@ -320,8 +320,6 @@ class WaveFunction(torch.nn.Module):
             # M_next is the right-environment density matrix for positions after site i
             M_next: torch.Tensor = renv[self.sites - i - 1]
 
-            prob: torch.Tensor
-            v_new_all: torch.Tensor
             prob, v_new_all = self.mps.site_probs(v, i, M_next)
 
             # Sample a physical state at site i for each batch element

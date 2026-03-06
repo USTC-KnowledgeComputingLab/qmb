@@ -26,6 +26,8 @@ class GuideConfig:
     local_step: int = 1000
     # The number of steps for the distribution optimizer
     dist_step: int = 100
+    # Generate configuration uniquely
+    unique: bool = True
 
     def main(
         self,
@@ -58,11 +60,12 @@ class GuideConfig:
         )
 
         logging.info(
-            "Arguments Summary: Sampling Count: %d, Relative Count: %d, Local Steps: %d, Dist Steps: %d",
+            "Arguments Summary: Sampling Count: %d, Relative Count: %d, Local Steps: %d, Dist Steps: %d, Unique: %s",
             self.sampling_count,
             self.relative_count,
             self.local_step,
             self.dist_step,
+            self.unique,
         )
 
         if "guide" not in data:
@@ -74,8 +77,16 @@ class GuideConfig:
             logging.info("Starting a new optimization cycle")
 
             logging.info("Sampling configurations")
-            configs_src_network, psi_src_network, _, _ = network.generate_unique(self.sampling_count)
-            configs_src_sampling, psi_src_sampling, _, _ = sampling.generate_unique(self.sampling_count)
+            if self.unique:
+                configs_src_network, psi_src_network, _, _ = network.generate_unique(self.sampling_count)
+                reweight_network = torch.ones_like(psi_src_network, dtype=torch.float64)
+                configs_src_sampling, psi_src_sampling, _, _ = sampling.generate_unique(self.sampling_count)
+                reweight_sampling = torch.ones_like(psi_src_sampling, dtype=torch.float64)
+            else:
+                configs_src_network, psi_src_network, count_network, _ = network.generate(self.sampling_count)
+                reweight_network = count_network / psi_src_network.abs() ** 2
+                configs_src_sampling, psi_src_sampling, count_sampling, _ = sampling.generate(self.sampling_count)
+                reweight_sampling = count_sampling / psi_src_sampling.abs() ** 2
 
             logging.info("Calculating relative configurations")
             if self.relative_count <= len(configs_src_network):
@@ -108,8 +119,9 @@ class GuideConfig:
                 with torch.no_grad():
                     psi_dst = network(configs_dst)
                     hamiltonian_psi_dst = model.apply_within(configs_dst, psi_dst, configs_src)
-                num = psi_src.conj() @ hamiltonian_psi_dst
-                den = psi_src.conj() @ psi_src.detach()
+                psi_src_reweight = psi_src.conj() * reweight_sampling
+                num = psi_src_reweight @ hamiltonian_psi_dst
+                den = psi_src_reweight @ psi_src.detach()
                 energy = num / den
                 energy.real.backward()  # type: ignore[no-untyped-call]
                 return energy.real
@@ -121,8 +133,9 @@ class GuideConfig:
                     psi_src = network(configs_src)
                     psi_dst = network(configs_dst)
                     hamiltonian_psi_dst = model.apply_within(configs_dst, psi_dst, configs_src)
-                    num = psi_src.conj() @ hamiltonian_psi_dst
-                    den = psi_src.conj() @ psi_src.detach()
+                    psi_src_reweight = psi_src.conj() * reweight_network
+                    num = psi_src_reweight @ hamiltonian_psi_dst
+                    den = psi_src_reweight @ psi_src.detach()
                     energy = num / den
                     return energy.real
 
@@ -133,8 +146,9 @@ class GuideConfig:
                     psi_src = network(configs_src)
                     psi_dst = network(configs_dst)
                     hamiltonian_psi_dst = model.apply_within(configs_dst, psi_dst, configs_src)
-                    num = psi_src.conj() @ hamiltonian_psi_dst
-                    den = psi_src.conj() @ psi_src
+                    psi_src_reweight = psi_src.conj() * reweight_sampling
+                    num = psi_src_reweight @ hamiltonian_psi_dst
+                    den = psi_src_reweight @ psi_src
                     energy = num / den
                     local_energy = hamiltonian_psi_dst / psi_src
                     energy_diff = local_energy - energy

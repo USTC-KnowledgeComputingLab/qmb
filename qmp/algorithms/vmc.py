@@ -24,6 +24,8 @@ class VmcConfig:
     relative_count: int = 40000
     # The number of steps for the local optimizer
     local_step: int = 1000
+    # Generate configuration uniquely
+    unique: bool = True
 
     def main(
         self,
@@ -46,10 +48,11 @@ class VmcConfig:
         )
 
         logging.info(
-            "Arguments Summary: Sampling Count: %d, Relative Count: %d, Local Steps: %d, ",
+            "Arguments Summary: Sampling Count: %d, Relative Count: %d, Local Steps: %d, Unique: %s",
             self.sampling_count,
             self.relative_count,
             self.local_step,
+            self.unique,
         )
 
         if "vmc" not in data:
@@ -61,7 +64,12 @@ class VmcConfig:
             logging.info("Starting a new optimization cycle")
 
             logging.info("Sampling configurations")
-            configs_i, psi_i, _, _ = network.generate_unique(self.sampling_count)
+            if self.unique:
+                configs_i, psi_i, _, _ = network.generate_unique(self.sampling_count)
+                reweight = torch.ones_like(psi_i, dtype=torch.float64)
+            else:
+                configs_i, psi_i, count, _ = network.generate(self.sampling_count)
+                reweight = count / psi_i.abs() ** 2
             logging.info("Sampling completed, unique configurations count: %d", len(configs_i))
 
             logging.info("Calculating relative configurations")
@@ -82,8 +90,9 @@ class VmcConfig:
                 with torch.no_grad():
                     psi_dst = network(configs_dst)
                     hamiltonian_psi_dst = model.apply_within(configs_dst, psi_dst, configs_src)
-                num = psi_src.conj() @ hamiltonian_psi_dst
-                den = psi_src.conj() @ psi_src.detach()
+                psi_src_reweight = psi_src.conj() * reweight
+                num = psi_src_reweight @ hamiltonian_psi_dst
+                den = psi_src_reweight @ psi_src.detach()
                 energy = num / den
                 energy = energy.real
                 energy.backward()  # type: ignore[no-untyped-call]
