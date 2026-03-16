@@ -16,6 +16,7 @@ dependencies = [
   "openfermion>=1.7.1",
   "tensorboard>=2.20.0",
   "dacite>=1.9.2",
+  "pyscf>=2.12.1",
 ]
 requires-python = ">=3.12"
 authors = [{ name = "Hao Zhang", email = "hzhangxyz@outlook.com" }]

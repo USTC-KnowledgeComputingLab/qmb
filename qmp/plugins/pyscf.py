@@ -450,7 +450,7 @@ class Solver:
             # ------------------------------------------------------------------
             # 11. Extract energy and build ci output
             # ------------------------------------------------------------------
-            energy = _extract_energy(data, self.config.action.name)
+            energy = _extract_energy(data, self.config.action.name, model)
             # Strip the random engine state — it is stale by the next call.
             full_checkpoint: dict[str, typing.Any] = {k: v for k, v in data.items() if k != "random"}
 
@@ -469,7 +469,7 @@ class Solver:
         return energy, ci
 
 
-def _extract_energy(data: dict[str, typing.Any], action_name: str) -> float:
+def _extract_energy(data: dict[str, typing.Any], action_name: str, model: ModelProto | None = None) -> float:
     """
     Extract the final ground-state energy from algorithm checkpoint data.
 
@@ -479,6 +479,8 @@ def _extract_energy(data: dict[str, typing.Any], action_name: str) -> float:
         Checkpoint data loaded from the temporary directory.
     action_name : str
         Name of the algorithm that produced the checkpoint.
+    model : ModelProto, optional
+        The model instance for computing energy expectation value if needed.
 
     Returns
     -------
@@ -490,15 +492,36 @@ def _extract_energy(data: dict[str, typing.Any], action_name: str) -> float:
         haar_data = data.get("haar")
         if haar_data is None:
             return 0.0
-        haar_global_step: int = haar_data.get("global", 0)
-        # In haar.py, excited states are stored with key = global_step *before*
-        # the increment, so the last entry key is (global_step - 1).
-        last_key = haar_global_step - 1
-        excited: dict[int, list[typing.Any]] = haar_data.get("excited", {})
-        results = excited.get(last_key)
-        if results:
-            # results is list[(energy_tensor, configs, psi)]; index 0 is ground state.
-            energy_val = results[0][0]
+
+        # Try to get the final energy directly if stored
+        if "final_energy" in haar_data:
+            energy_val = haar_data["final_energy"]
             if hasattr(energy_val, "item"):
                 return float(energy_val.item())
+            return float(energy_val)
+
+        # Try to compute energy from the pool (configs, psi) if model is available
+        pool = haar_data.get("pool")
+        if pool is not None and model is not None:
+            configs, psi = pool
+            if configs is not None and psi is not None:
+                # Compute expectation value <psi|H|psi> / <psi|psi>
+                h_psi = model.apply_within(configs, psi, configs)
+                energy = ((psi.conj() @ h_psi) / (psi.conj() @ psi)).real
+                if hasattr(energy, "item"):
+                    return float(energy.item())
+                return float(energy)
+
+        # Fallback: try to get from excited state results (Lanczos energy)
+        haar_global_step: int = haar_data.get("global", 0)
+        if haar_global_step > 0:
+            last_key = haar_global_step - 1
+            excited: dict[int, list[typing.Any]] = haar_data.get("excited", {})
+            results = excited.get(last_key)
+            if results:
+                # results is list[(energy_tensor, configs, psi)]; index 0 is ground state.
+                energy_val = results[0][0]
+                if hasattr(energy_val, "item"):
+                    return float(energy_val.item())
+
     return 0.0
