@@ -66,66 +66,86 @@ class HaarWithOrbitConfig:
     ) -> tuple[ModelProto, pathlib.Path]:
         """
         Perform orbital optimization and return a new model with the optimized basis and its path.
+
+        This implementation uses SPATIAL orbital optimization (not spin-orbital) to preserve
+        spin symmetry in restricted calculations. The same unitary transformation is applied
+        to both alpha and beta spin-orbitals.
         """
         logging.info("Performing orbital optimization for step %d", step)
 
         n_orbit = typing.cast(typing.Any, model).n_qubits // 2
         calculator = NaturalOrbitCalculator(n_orbit)
 
-        # 1. Calculate RDM
-        rdm = calculator.calculate_rdm(configs, psi)
+        # 1. Calculate SPATIAL RDM (this now returns spatial orbital RDM, not spin-orbital)
+        rdm_spatial = calculator.calculate_rdm(configs, psi)
 
-        # 2. Diagonalize RDM to get Natural Orbitals
-        # eigvals are occupation numbers, U columns are NOs in old basis
-        eigvals, U = torch.linalg.eigh(rdm)
+        # 2. Diagonalize SPATIAL RDM to get Natural Orbitals
+        # eigvals are occupation numbers, U_spatial columns are NOs in old basis
+        eigvals, U_spatial = torch.linalg.eigh(rdm_spatial)
 
-        # 3. Reorder U to be closest to Identity
+        # 3. Reorder U_spatial to be closest to Identity
         # We want to maximize sum(|U_{ii}|^2)
-        cost_matrix = -(U.abs() ** 2).cpu().numpy()
+        cost_matrix = -(U_spatial.abs() ** 2).cpu().numpy()
         row_ind, col_ind = linear_sum_assignment(cost_matrix)
 
         # row_ind[i] is matched with col_ind[i]
-        # We want column row_ind[i] of permuted_U to be column col_ind[i] of U
-        permuted_U = torch.zeros_like(U)
-        permuted_U[:, row_ind] = U[:, col_ind]
-        U = permuted_U
+        # We want column row_ind[i] of permuted_U to be column col_ind[i] of U_spatial
+        permuted_U = torch.zeros_like(U_spatial)
+        permuted_U[:, row_ind] = U_spatial[:, col_ind]
+        U_spatial = permuted_U
 
-        # 4. Load and Transform Integrals
+        # 4. Load and Transform SPATIAL Integrals
         (norb, nelec, nspin), e0, h1, h2 = _read_fcidump_tensors(self.src_fcidump)
 
         device = context.device
+        U_spatial = U_spatial.to(device=device, dtype=torch.complex128)
+        h1 = h1.to(device=device, dtype=torch.complex128)
+        h2 = h2.to(device=device, dtype=torch.complex128)
+
+        # Transform SPATIAL integrals first (preserves spin symmetry)
+        logging.info("Transforming spatial orbital integrals...")
+
+        # Transform h1: h1' = U^† h1 U
+        h1_opt_spatial = U_spatial.conj().T @ h1 @ U_spatial
+
+        # Transform h2: h2'_{abcd} = sum U^*_{pa} U^*_{qb} h2_{pqrs} U_{rc} U_{sd}
+        tmp = torch.einsum("sd,pqrs->pqrd", U_spatial, h2)
+        tmp = torch.einsum("rc,pqrd->pqcd", U_spatial, tmp)
+        tmp = torch.einsum("qb,pqcd->pbcd", U_spatial.conj(), tmp)
+        h2_opt_spatial = torch.einsum("pa,pbcd->abcd", U_spatial.conj(), tmp)
+
+        # 5. Expand transformed spatial integrals to spin-orbital basis
+        # For restricted calculations, alpha and beta use the same spatial orbitals
+        logging.info("Expanding transformed integrals to spin-orbital basis...")
         h1_so = torch.zeros((2 * norb, 2 * norb), dtype=torch.complex128, device=device)
-        h1_so[0::2, 0::2] = h1.to(device)
-        h1_so[1::2, 1::2] = h1.to(device)
+        h1_so[0::2, 0::2] = h1_opt_spatial  # alpha-alpha
+        h1_so[1::2, 1::2] = h1_opt_spatial  # beta-beta
 
         h2_so = torch.zeros((2 * norb, 2 * norb, 2 * norb, 2 * norb), dtype=torch.complex128, device=device)
-        h2_so[0::2, 0::2, 0::2, 0::2] = h2.to(device)
-        h2_so[0::2, 1::2, 1::2, 0::2] = h2.to(device)
-        h2_so[1::2, 0::2, 0::2, 1::2] = h2.to(device)
-        h2_so[1::2, 1::2, 1::2, 1::2] = h2.to(device)
+        h2_so[0::2, 0::2, 0::2, 0::2] = h2_opt_spatial  # aaaa
+        h2_so[0::2, 1::2, 1::2, 0::2] = h2_opt_spatial  # abba
+        h2_so[1::2, 0::2, 0::2, 1::2] = h2_opt_spatial  # baab
+        h2_so[1::2, 1::2, 1::2, 1::2] = h2_opt_spatial  # bbbb
 
-        # Transform
-        h1_opt = U.conj().T @ h1_so @ U
+        # Build spin-orbital unitary for storage (block-diagonal: same U for alpha and beta)
+        U_spin = torch.zeros((2 * norb, 2 * norb), dtype=torch.complex128, device=device)
+        U_spin[0::2, 0::2] = U_spatial  # alpha block
+        U_spin[1::2, 1::2] = U_spatial  # beta block
 
-        tmp = torch.einsum("sd,pqrs->pqrd", U, h2_so)
-        tmp = torch.einsum("rc,pqrd->pqcd", U, tmp)
-        tmp = torch.einsum("qb,pqcd->pbcd", U.conj(), tmp)
-        h2_opt = torch.einsum("pa,pbcd->abcd", U.conj(), tmp)
-
-        # 5. Build Hamiltonian Dict and Save
+        # 6. Build Hamiltonian Dict and Save
         ham_dict: dict[tuple[tuple[int, int], ...], complex] = {}
         ham_dict[()] = complex(e0)
 
-        h1_indices = torch.nonzero(torch.abs(h1_opt) > 1e-12)
+        h1_indices = torch.nonzero(torch.abs(h1_so) > 1e-12)
         for p, q in h1_indices:
             p, q = p.item(), q.item()
-            ham_dict[((p, 1), (q, 0))] = h1_opt[p, q].item()
+            ham_dict[((p, 1), (q, 0))] = h1_so[p, q].item()
 
-        h2_indices = torch.nonzero(torch.abs(h2_opt) > 1e-12)
+        h2_indices = torch.nonzero(torch.abs(h2_so) > 1e-12)
         for p, q, r, s in h2_indices:
             p, q, r, s = p.item(), q.item(), r.item(), s.item()
             key = ((p, 1), (q, 1), (r, 0), (s, 0))
-            ham_dict[key] = ham_dict.get(key, 0j) + h2_opt[p, q, r, s].item()
+            ham_dict[key] = ham_dict.get(key, 0j) + h2_so[p, q, r, s].item()
 
         site, kind, coef = Hamiltonian._prepare(ham_dict)
 
@@ -136,7 +156,7 @@ class HaarWithOrbitConfig:
             "n_spins": nspin,
             "ref_energy": 0.0,
             "rdm_eigvals": eigvals.cpu(),
-            "orbit_unitary": U.cpu(),
+            "orbit_unitary": U_spin.cpu(),  # Store the spin-orbital unitary (block-diagonal)
         }
 
         optimized_path = context.folder() / f"optimized_basis_step_{step}.pt"
