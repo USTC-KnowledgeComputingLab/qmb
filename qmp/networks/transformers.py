@@ -143,7 +143,7 @@ class DecoderUnit(torch.nn.Module):
         similarity = torch.nn.functional.softmax(x @ self.centroid.t(), dim=-1)
         # top_k_indices: batch * site * selected
         _, top_k_indices = torch.topk(similarity + self.bias, self.selected_num, dim=-1)
-        # gate, gate: batch * site * routed
+        # gate: batch * site * routed
         gate = torch.zeros_like(similarity).scatter_(-1, top_k_indices, similarity.gather(-1, top_k_indices))
         for i, expert in enumerate(self.feed_forward_routed):
             y = y + expert(x) * gate[:, :, i].unsqueeze(-1)
