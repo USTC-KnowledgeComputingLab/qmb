@@ -81,7 +81,7 @@ class SelfAttention(torch.nn.Module):
         # attn: batch, heads_num, site, heads_dim
         out = attn.transpose(1, 2).reshape([batch_size, sites, embedding_dim])
         # out: batch, site, embedding_dim
-        return self.out(out), (k, v)
+        return self.out(out), (k.detach(), v.detach())
 
 
 class DecoderUnit(torch.nn.Module):
