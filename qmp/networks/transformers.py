@@ -81,7 +81,7 @@ class SelfAttention(torch.nn.Module):
         # attn: batch, heads_num, site, heads_dim
         out = attn.transpose(1, 2).reshape([batch_size, sites, embedding_dim])
         # out: batch, site, embedding_dim
-        return self.out(out), (k, v)
+        return self.out(out), (k.detach(), v.detach())
 
 
 class DecoderUnit(torch.nn.Module):
@@ -143,9 +143,8 @@ class DecoderUnit(torch.nn.Module):
         similarity = torch.nn.functional.softmax(x @ self.centroid.t(), dim=-1)
         # top_k_indices: batch * site * selected
         _, top_k_indices = torch.topk(similarity + self.bias, self.selected_num, dim=-1)
-        # gate_prime, gate: batch * site * routed
-        gate_prime = torch.zeros_like(similarity).scatter_(-1, top_k_indices, similarity.gather(-1, top_k_indices))
-        gate = gate_prime / gate_prime.sum(dim=-1).unsqueeze(-1)
+        # gate: batch * site * routed
+        gate = torch.zeros_like(similarity).scatter_(-1, top_k_indices, similarity.gather(-1, top_k_indices))
         for i, expert in enumerate(self.feed_forward_routed):
             y = y + expert(x) * gate[:, :, i].unsqueeze(-1)
         x = self.norm2(y)
