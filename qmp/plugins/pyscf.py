@@ -1,270 +1,195 @@
 """
-PySCF-compatible FCI solver plugin for QMP.
+PySCF-compatible FCI solver plugin for QMP's HAAR algorithm.
 
-This module exposes a :class:`Solver` that conforms to the PySCF FCI-solver
-interface::
+This module provides a HAAR class that conforms to PySCF's FCI solver interface,
+allowing it to be used as a drop-in replacement for PySCF's native FCI solver
+in CASCI/CASSCF calculations.
 
-    solver = Solver(config)
-    energy, ci = solver.kernel(h1e, eri, norb, nelec)
-
-The ``config`` argument mirrors the YAML config accepted by ``qmp.__main__``::
-
-    config = {
-        "action": {"name": "haar", "params": {}},
-        "network": {"name": "mlp/u1u1", "params": {}},
-        "optimizer": {"name": "Adam", "params": {"lr": 1e-3}},
-        "common": {
-            "device": "cpu",
-            "dtype": "float64",
-            "max_absolute_step": 10,
-        },
-    }
-
-Internally the solver closely mimics :func:`qmp.__main__.main`:
-
-1. Imports the requested algorithm and model modules.
-2. Builds a :class:`~qmp.models.pyscf.Model` from the supplied integral arrays.
-3. Constructs a :class:`_PyscfRuntimeContext` that overrides
-   :meth:`~qmp.utility.context.RuntimeContext.folder` to use a temporary
-   directory and :meth:`~qmp.utility.context.RuntimeContext.create_model` to
-   inject the pre-built model.  All other methods — including ``setup()`` and
-   ``save()`` — are inherited unchanged from :class:`RuntimeContext` and work
-   via normal polymorphism.
-4. Runs the algorithm via its ``main()`` method.
-5. When ``max_absolute_step`` is reached, the base ``save()`` writes the
-   checkpoint to the temporary directory and calls ``sys.exit(0)``.  The
-   solver catches the resulting :class:`SystemExit` and reads the saved
-   checkpoint file to extract the energy and CI data.
-
-The returned ``ci`` dict may be passed back as ``ci0`` to warm-start
-subsequent calls.
+Example
+-------
+>>> from pyscf import gto, scf, mcscf
+>>> from qmp.plugins.pyscf import HAAR, HAARSCF
+>>> mol = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g')
+>>> mf = scf.RHF(mol).run()
+>>> mc = HAARSCF(mf, 2, 2)
+>>> mc.kernel()
 """
 
-import importlib
-import pathlib
-import shutil
-import tempfile
-import typing
+from __future__ import annotations
 
-import dacite
+import copy
+import logging
+import sys
+import typing
+import dataclasses
+
 import numpy
-import omegaconf
 import torch
 
+# PySCF imports (optional, required for CASSCF integration)
+try:
+    import pyscf.lib
+    from pyscf import mcscf
+    from pyscf.lib import logger
+    HAS_PYSCF = True
+except ImportError:
+    HAS_PYSCF = False
+    pyscf = None  # type: ignore[misc,assignment]
+
+# QMP internal imports
 from ..models.pyscf import Model, ModelConfig
-from ..utility.action_dict import action_dict
-from ..utility.context import DACITE_CAST, RuntimeContext
-from ..utility.model_dict import ModelProto
+from ..utility.model_dict import NetworkProto
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
+class HAAR(pyscf.lib.StreamObject if HAS_PYSCF else object):  # type: ignore[misc,assignment]
+    """HAAR FCI solver for PySCF.
 
+    This solver uses the Hamiltonian-Guided Autoregressive (HAAR) algorithm
+    to solve the FCI problem. It is designed to be used as a drop-in
+    replacement for PySCF's native FCI solver in CASCI/CASSCF calculations.
 
-class _CIArray(numpy.ndarray):
-    """
-    A numpy array subclass that stores a QMP checkpoint dictionary.
+    The wave function is represented as a set of configurations (determinants)
+    and their amplitudes, which can be converted to/from PySCF's CI vector
+    format for RDM calculations.
 
-    This allows the FCI solver to return a standard-looking CI wavefunction
-    (the array) while still carrying the full state (network, optimizer, etc.)
-    needed for a high-performance warm start in the next call to :meth:`kernel`.
-    """
-
-    def __new__(cls, input_array: numpy.ndarray, checkpoint: dict[str, typing.Any]) -> "_CIArray":
-        obj = numpy.asanyarray(input_array).view(cls)
-        obj.checkpoint = checkpoint
-        return obj
-
-    def __array_finalize__(self, obj: typing.Any) -> None:
-        if obj is None:
-            return
-        self.checkpoint: dict[str, typing.Any] = getattr(obj, "checkpoint", {})
-
-
-class _PyscfRuntimeContext(RuntimeContext):
-    """
-    A :class:`~qmp.utility.context.RuntimeContext` subclass for programmatic
-    (non-Hydra) use from the PySCF solver plugin.
-
-    The only behavioural differences from the base class are:
-
-    * :meth:`folder` returns an explicit path supplied at construction time
-      instead of reading the Hydra output directory.
-    * :meth:`create_model` returns a pre-built :class:`~qmp.models.pyscf.Model`
-      instead of instantiating one from the OmegaConf config.
-
-    All other methods, including :meth:`~RuntimeContext.setup` and
-    :meth:`~RuntimeContext.save`, are inherited unchanged.  Because they call
-    ``self.folder()`` internally, they automatically use the temporary
-    directory via normal polymorphism.
-    """
-
-    def __init__(
-        self,
-        model_instance: ModelProto,
-        folder_path: pathlib.Path,
-        **kwargs: typing.Any,
-    ) -> None:
-        super().__init__(**kwargs)
-        self._model_instance: ModelProto = model_instance
-        self._folder_path: pathlib.Path = folder_path
-
-    def folder(self) -> pathlib.Path:
-        return self._folder_path
-
-    def create_model(self, model_config: omegaconf.DictConfig) -> ModelProto:
-        return self._model_instance
-
-
-def _to_pyscf_ci(
-    data: dict[str, typing.Any], action_name: str, norb: int, nelec: int | tuple[int, int]
-) -> numpy.ndarray | None:
-    """
-    Convert QMP sampled configurations and amplitudes to a PySCF CI vector.
-    """
-    try:
-        from pyscf.fci import cistring
-    except ImportError:
-        return None
-
-    if action_name not in ("haar", "imag"):
-        return None
-
-    haar_data = data.get("haar")
-    if not haar_data:
-        return None
-    pool = haar_data.get("pool")
-    if not pool:
-        return None
-
-    configs, psi = pool
-    if configs is None or psi is None:
-        return None
-
-    if isinstance(nelec, (int, numpy.integer)):
-        nalpha = (int(nelec) + 1) // 2
-        nbeta = int(nelec) - nalpha
-    else:
-        nalpha, nbeta = int(nelec[0]), int(nelec[1])
-
-    na = cistring.num_strings(norb, nalpha)
-    nb = cistring.num_strings(norb, nbeta)
-
-    # Limit CI vector size to avoid memory overflow (approx 10^8 elements ~ 1.6GB)
-    if na * nb > 10**8:
-        return None
-
-    configs_np = configs.cpu().numpy()
-    psi_np = psi.cpu().numpy()
-
-    # Unpack bits: QMP order is little-endian bit-packed bytes
-    bits = numpy.unpackbits(configs_np, axis=1, bitorder="little")
-
-    # Extract alpha and beta occupancy (alpha=even, beta=odd bits)
-    alpha_bits = bits[:, 0 : 2 * norb : 2]
-    beta_bits = bits[:, 1 : 2 * norb : 2]
-
-    # Convert to integer bitmasks
-    pw2 = 2 ** numpy.arange(norb, dtype=numpy.uint64)
-    alpha_dets = (alpha_bits.astype(numpy.uint64) * pw2).sum(axis=1)
-    beta_dets = (beta_bits.astype(numpy.uint64) * pw2).sum(axis=1)
-
-    # Map bitmasks to PySCF determinant indices
-    try:
-        addr_a = cistring.str2addr(norb, nalpha, alpha_dets)
-        addr_b = cistring.str2addr(norb, nbeta, beta_dets)
-    except Exception:
-        # Fallback for older PySCF or if vectorized call fails
-        addr_a = numpy.array([cistring.str2addr(norb, nalpha, int(d)) for d in alpha_dets])
-        addr_b = numpy.array([cistring.str2addr(norb, nbeta, int(d)) for d in beta_dets])
-
-    ci_array = numpy.zeros((na, nb), dtype=psi_np.dtype)
-    ci_array[addr_a, addr_b] = psi_np
-
-    return ci_array
-
-
-def _from_pyscf_ci(ci_array: numpy.ndarray, norb: int, nelec: int | tuple[int, int]) -> dict[str, typing.Any]:
-    """
-    Convert a PySCF CI vector back to a QMP checkpoint (sampled pool).
-    """
-    try:
-        from pyscf.fci import cistring
-    except ImportError:
-        return {}
-
-    if isinstance(nelec, (int, numpy.integer)):
-        nalpha = (int(nelec) + 1) // 2
-        nbeta = int(nelec) - nalpha
-    else:
-        nalpha, nbeta = int(nelec[0]), int(nelec[1])
-
-    idx_a, idx_b = numpy.where(ci_array != 0)
-    amplitudes = ci_array[idx_a, idx_b]
-
-    str_a = cistring.addrs2str(norb, nalpha, idx_a)
-    str_b = cistring.addrs2str(norb, nbeta, idx_b)
-
-    n_qubytes = (2 * norb + 7) // 8
-    N = len(str_a)
-    configs = numpy.zeros((N, n_qubytes), dtype=numpy.uint8)
-
-    for j in range(norb):
-        a_bit = (str_a >> j) & 1
-        b_bit = (str_b >> j) & 1
-        pos_a = 2 * j
-        pos_b = 2 * j + 1
-        configs[:, pos_a // 8] |= (a_bit << (pos_a % 8)).astype(numpy.uint8)
-        configs[:, pos_b // 8] |= (b_bit << (pos_b % 8)).astype(numpy.uint8)
-
-    return {
-        "haar": {
-            "global": 0,
-            "local": 0,
-            "lanczos": 0,
-            "pool": (torch.from_numpy(configs), torch.from_numpy(amplitudes)),
-            "excited": {},
-        }
-    }
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-
-class Solver:
-    """
-    PySCF-compatible FCI solver backed by QMP algorithms.
-
-    The interface mirrors that of ``pyscf.fci.direct_spin1.FCISolver``::
-
-        from qmp.plugins.pyscf import Solver
-        solver = Solver({
-            "action": {"name": "haar", "params": {}},
-            "network": {"name": "mlp/u1u1", "params": {}},
-            "optimizer": {"name": "Adam", "params": {"lr": 1e-3}},
-            "common": {"device": "cpu", "max_absolute_step": 10},
-        })
-        energy, ci = solver.kernel(h1e, eri, norb, nelec)
-
-    Parameters
+    Attributes
     ----------
-    config : dict or omegaconf.DictConfig
-        Configuration in the same format as the ``qmp.__main__`` YAML config.
-        Required top-level keys: ``action``, ``network``, ``optimizer``,
-        ``common``.  The ``model`` key is ignored (the model is built
-        automatically from the integral arrays passed to :meth:`kernel`).
-        ``common.max_absolute_step`` controls how many global algorithm steps
-        to run before returning.
+    mol : Mole object or None
+        PySCF molecule object.
+    sampling_count : int
+        Number of configurations to sample from the neural network.
+    krylov_iteration : int
+        Number of Krylov iterations for the Lanczos algorithm.
+    krylov_extend_count : int
+        Number of configurations to add during Krylov subspace extension.
+    krylov_threshold : float
+        Convergence threshold for Krylov iteration.
+    local_step : int
+        Number of local optimization steps.
+    local_loss : float
+        Loss threshold for local optimization convergence.
+    network_name : str
+        Name of the neural network architecture (e.g., "mlp/u1u1").
+    network_hidden : tuple
+        Hidden layer sizes for the neural network.
+    learning_rate : float
+        Learning rate for the optimizer.
+    max_cycle : int
+        Maximum number of global optimization cycles.
+    device : str or torch.device
+        Device to run on ('cpu' or 'cuda').
+    dtype : str or torch.dtype
+        Data type for the network.
+    nroots : int
+        Number of roots to solve for.
+    verbose : int
+        Verbosity level (0-10).
+
+    Examples
+    --------
+    >>> from pyscf import gto, scf, mcscf
+    >>> from qmp.plugins.pyscf import HAAR
+    >>> mol = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g')
+    >>> mf = scf.RHF(mol).run()
+    >>> mc = mcscf.CASSCF(mf, 2, 2)
+    >>> mc.fcisolver = HAAR(mol)
+    >>> mc.fcisolver.sampling_count = 512
+    >>> mc.kernel()
     """
 
-    def __init__(self, config: dict[str, typing.Any] | omegaconf.DictConfig) -> None:
-        if isinstance(config, dict):
-            self.config: omegaconf.DictConfig = omegaconf.OmegaConf.create(config)
+    def __init__(self, mol: typing.Any = None, **kwargs: typing.Any) -> None:
+        """Initialize the HAAR solver.
+
+        Parameters
+        ----------
+        mol : Mole object, optional
+            PySCF molecule object. If None, some attributes must be set manually.
+        **kwargs : dict
+            Additional keyword arguments to override default parameters.
+        """
+        self.mol = mol
+
+        # Set up logging
+        if mol is None:
+            self.stdout = sys.stdout
+            self.verbose = 0
         else:
-            self.config = config
+            self.stdout = mol.stdout  # type: ignore[union-attr]
+            self.verbose = mol.verbose  # type: ignore[union-attr]
+
+        # HAAR algorithm parameters
+        self.sampling_count: int = 1024
+        self.sampling_count_last: int = 1024
+        self.krylov_iteration: int = 32
+        self.krylov_extend_count: int = 64
+        self.krylov_threshold: float = 1e-8
+        self.krylov_single_extend: bool = False
+        self.krylov_extend_first: bool = False
+        self.local_step: int = 200
+        self.local_loss: float = 1e-8
+        self.max_cycle: int = 10
+
+        # Network parameters
+        self.network_name: str = "mlp/u1u1"
+        self.network_hidden: tuple[int, ...] = (512, 512)
+
+        # Optimizer parameters
+        self.learning_rate: float = 1e-3
+        self.optimizer_name: str = "Adam"
+
+        # Runtime parameters
+        self.device: str | torch.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.dtype: str | torch.dtype = "float64"
+        self.random_seed: int | None = None
+
+        # Multi-root support
+        self.nroots: int = 1
+        self.spin: int | None = None  # Spin multiplicity - 1 (2S)
+
+        # Internal state for storing results
+        self._converged: bool = False
+        self._energy: float | None = None
+        self._nuclear_repulsion: float = 0.0
+        self._configs: torch.Tensor | None = None
+        self._psi: torch.Tensor | None = None
+        self._norb: int | None = None
+        self._nelec: tuple[int, int] | None = None
+        self._network: NetworkProto | None = None
+        self._model: Model | None = None
+
+        # Update with any provided kwargs
+        self.__dict__.update(kwargs)
+
+        # Keys for PySCF's StreamObject
+        if HAS_PYSCF:
+            self._keys = set(self.__dict__.keys())
+
+    def dump_flags(self, verbose: int | None = None) -> "HAAR":
+        """Print the solver parameters."""
+        if not HAS_PYSCF:
+            return self
+
+        log = logger.new_logger(self, verbose)
+        log.info("")
+        log.info("******** HAAR FCI solver flags ********")
+        log.info("sampling_count         = %d", self.sampling_count)
+        log.info("sampling_count_last    = %d", self.sampling_count_last)
+        log.info("krylov_iteration       = %d", self.krylov_iteration)
+        log.info("krylov_extend_count    = %d", self.krylov_extend_count)
+        log.info("krylov_threshold       = %g", self.krylov_threshold)
+        log.info("krylov_single_extend   = %s", self.krylov_single_extend)
+        log.info("krylov_extend_first    = %s", self.krylov_extend_first)
+        log.info("local_step             = %d", self.local_step)
+        log.info("local_loss             = %g", self.local_loss)
+        log.info("max_cycle              = %d", self.max_cycle)
+        log.info("network_name           = %s", self.network_name)
+        log.info("network_hidden         = %s", self.network_hidden)
+        log.info("learning_rate          = %g", self.learning_rate)
+        log.info("device                 = %s", self.device)
+        log.info("dtype                  = %s", self.dtype)
+        log.info("nroots                 = %d", self.nroots)
+        log.info("")
+        return self
 
     def kernel(
         self,
@@ -272,56 +197,47 @@ class Solver:
         eri: numpy.ndarray,
         norb: int,
         nelec: int | tuple[int, int],
-        ci0: dict[str, typing.Any] | numpy.ndarray | None = None,
-        nuclear_repulsion: float = 0.0,
-        ref_energy: float = 0.0,
+        ci0: typing.Any = None,
+        ecore: float = 0.0,
         **kwargs: typing.Any,
-    ) -> tuple[float, numpy.ndarray | dict[str, typing.Any]]:
-        """
-        Solve the electronic structure problem for the given integrals.
+    ) -> tuple[float, int]:
+        """Solve the FCI problem using the HAAR algorithm.
 
         Parameters
         ----------
-        h1e : numpy.ndarray
-            1-electron integrals in MO basis, shape ``(norb, norb)``, in
-            chemist's notation (same convention as PySCF).
-        eri : numpy.ndarray
-            2-electron repulsion integrals in MO basis in chemist's (ij|kl)
-            notation.  Accepted shapes:
-
-            * ``(norb, norb, norb, norb)`` – full 4-index array.
-            * ``(nij, nij)`` – 4-fold symmetric compressed array
-              (nij = norb*(norb+1)//2).
+        h1e : ndarray
+            1-electron integrals in MO basis, shape (norb, norb).
+            In chemist's notation, same convention as PySCF.
+        eri : ndarray
+            2-electron repulsion integrals in MO basis.
+            Shape (norb, norb, norb, norb) or compressed 4-fold symmetric.
+            In chemist's (ij|kl) notation.
         norb : int
             Number of spatial orbitals.
         nelec : int or tuple[int, int]
-            Number of electrons.  If a plain ``int``, the electrons are split
-            as evenly as possible between alpha and beta spin (rounding alpha
-            up).  If a 2-tuple ``(nalpha, nbeta)``, each spin count is used
-            directly.
-        ci0 : dict or numpy.ndarray, optional
-            Initial guess or checkpoint data. If a ``dict``, it is treated as
-            the full QMP checkpoint. If a ``numpy.ndarray``, it is treated as
-            the PySCF CI vector and converted to a QMP pool.
-        nuclear_repulsion : float
-            Constant nuclear repulsion energy added to the Hamiltonian.
-        ref_energy : float
-            Reference energy used for logging only.
-        **kwargs
-            Ignored; present for drop-in compatibility with PySCF solvers.
+            Number of electrons. If int, split evenly between alpha and beta.
+            If tuple, (nalpha, nbeta).
+        ci0 : optional
+            Initial guess. Can be:
+            - None: Start from scratch
+            - dict: HAAR checkpoint data with 'pool' key
+            - ndarray: PySCF CI vector (will be converted)
+        ecore : float
+            Core energy (nuclear repulsion, frozen core contribution, etc.).
+        **kwargs : dict
+            Additional keyword arguments. Recognized: 'orbsym'.
 
         Returns
         -------
         energy : float
-            Ground-state energy after global algorithm steps.
-        ci : numpy.ndarray or dict
-            CI wavefunction as a numpy array. The array is an instance of
-            ``_CIArray`` which carries the full QMP checkpoint for warm-start
-            compatibility.
+            Ground state energy (including ecore).
+        ci : int
+            CI vector identifier. For nroots=1, returns 0.
         """
-        # ------------------------------------------------------------------
-        # 1. Resolve electron counts
-        # ------------------------------------------------------------------
+        # Dump flags
+        self.dump_flags(self.verbose)
+
+        # Resolve electron counts
         if isinstance(nelec, (int, numpy.integer)):
             nalpha = (int(nelec) + 1) // 2
             nbeta = int(nelec) - nalpha
@@ -331,197 +247,601 @@ class Solver:
         n_electron = nalpha + nbeta
         n_spin = nalpha - nbeta
 
-        # ------------------------------------------------------------------
-        # 2. Dynamic imports — mirroring __main__.py
-        # ------------------------------------------------------------------
-        importlib.import_module(f"qmp.algorithms.{self.config.action.name}")
-        importlib.import_module("qmp.models.pyscf")
+        if HAS_PYSCF and self.verbose >= logger.INFO:
+            logger.info(self, "HAAR kernel: norb=%d, nalpha=%d, nbeta=%d",
+                        norb, nalpha, nbeta)
 
-        # ------------------------------------------------------------------
-        # 3. Build PySCF model from integral arrays
-        # ------------------------------------------------------------------
-        model = Model(
-            ModelConfig(
-                h1e=numpy.asarray(h1e, dtype=numpy.float64),
-                eri=numpy.asarray(eri, dtype=numpy.float64),
-                n_orbit=norb,
-                n_electron=n_electron,
-                n_spin=n_spin,
-                nuclear_repulsion=nuclear_repulsion,
-                ref_energy=ref_energy,
-            )
-        )
+        # Store parameters
+        self._norb = norb
+        self._nelec = (nalpha, nbeta)
+        self._nuclear_repulsion = ecore
 
-        # ------------------------------------------------------------------
-        # 4. Build OmegaConf runtime_config — same structure as the YAML
-        #    config, but with model.name = "pyscf" so that the algorithm
-        #    can log the model type.  create_model() is overridden so the
-        #    params field is never read.
-        # ------------------------------------------------------------------
-        runtime_config: omegaconf.DictConfig = omegaconf.OmegaConf.create(
-            {
-                "action": omegaconf.OmegaConf.to_container(self.config.action, resolve=True),
-                "model": {"name": "pyscf", "params": {}},
-                "network": omegaconf.OmegaConf.to_container(self.config.network, resolve=True),
-                "optimizer": omegaconf.OmegaConf.to_container(self.config.optimizer, resolve=True),
+        # Build the QMP model from integrals
+        if HAS_PYSCF and self.verbose >= logger.INFO:
+            logger.info(self, "Building QMP model from integrals")
+
+        model = Model(ModelConfig(
+            h1e=numpy.asarray(h1e, dtype=numpy.float64),
+            eri=numpy.asarray(eri, dtype=numpy.float64),
+            n_orbit=norb,
+            n_electron=n_electron,
+            n_spin=n_spin,
+            nuclear_repulsion=ecore,
+        ))
+        self._model = model
+
+        # Set up device and dtype
+        device = torch.device(self.device) if isinstance(self.device, str) else self.device
+        if isinstance(self.dtype, str):
+            dtype_map = {
+                "float64": torch.float64,
+                "float32": torch.float32,
+                "bfloat16": torch.bfloat16,
+                "float16": torch.float16,
             }
+            dtype = dtype_map.get(self.dtype, torch.float64)
+        else:
+            dtype = self.dtype
+
+        # Create network
+        if HAS_PYSCF and self.verbose >= logger.INFO:
+            logger.info(self, "Creating network: %s", self.network_name)
+
+        network_config = self._get_network_config()
+        network = network_config.create(model)
+        network = network.to(device=device, dtype=dtype)
+
+        # Handle initial guess
+        if ci0 is not None:
+            if HAS_PYSCF and self.verbose >= logger.INFO:
+                logger.info(self, "Loading initial guess")
+            if isinstance(ci0, dict) and "haar" in ci0:
+                # HAAR checkpoint data
+                pool = ci0["haar"].get("pool")
+                if pool is not None and pool[0] is not None:
+                    configs, psi = pool
+                    # Use these as starting point
+            elif isinstance(ci0, numpy.ndarray):
+                # PySCF CI vector - convert to pool
+                configs, psi = self._ci_vector_to_configs(ci0, norb, nalpha, nbeta)
+                if configs is not None and psi is not None:
+                    psi = psi.to(device=device)
+
+        # Compile network for better performance
+        if HAS_PYSCF and self.verbose >= logger.INFO:
+            logger.info(self, "Compiling network with torch.jit.script")
+        network = torch.jit.script(network)  # type: ignore[assignment]
+        self._network = network
+
+        # Set random seed if specified
+        if self.random_seed is not None:
+            torch.manual_seed(self.random_seed)
+
+        # Create optimizer
+        optimizer = torch.optim.Adam(network.parameters(), lr=self.learning_rate)
+
+        # Run HAAR optimization
+        energy, configs, psi = self._run_haar_optimization(
+            model=model,
+            network=network,
+            optimizer=optimizer,
+            device=device,
         )
 
-        # ------------------------------------------------------------------
-        # 5. Construct _PyscfRuntimeContext from config.common
-        # ------------------------------------------------------------------
-        common_data = omegaconf.OmegaConf.to_container(self.config.common, resolve=True)
-        assert isinstance(common_data, dict)
-        # Use dacite for type conversion (pathlib.Path, torch.device, etc.),
-        # matching the same approach used in __main__.py.
-        rt = dacite.from_dict(
-            data_class=RuntimeContext,
-            data=common_data,
-            config=dacite.Config(cast=DACITE_CAST),
-        )
+        # Add nuclear repulsion to get total energy
+        total_energy = float(energy) + ecore
 
-        # ------------------------------------------------------------------
-        # 6. Save caller gradient state; create temp directory
-        # ------------------------------------------------------------------
-        prev_grad_enabled = torch.is_grad_enabled()
-        tmpdir: pathlib.Path | None = None
+        # Store results
+        self._converged = True
+        self._energy = total_energy
+        self._configs = configs
+        self._psi = psi
+
+        if HAS_PYSCF and self.verbose >= logger.INFO:
+            logger.info(self, "HAAR kernel finished. Energy = %.10f", self._energy)
+
+        return self._energy, 0
+
+    def _get_network_config(self) -> typing.Any:
+        """Get the network configuration based on network_name."""
+        if self.network_name == "mlp/u1u1":
+            from ..models.pyscf import MlpConfig
+            return MlpConfig(hidden=self.network_hidden)
+        elif self.network_name == "mlp/u1":
+            from ..models.pyscf import MlpElectronConfig
+            return MlpElectronConfig(hidden=self.network_hidden)
+        elif self.network_name == "transformers/u1u1":
+            from ..models.pyscf import TransformersConfig
+            return TransformersConfig()
+        elif self.network_name == "transformers/u1":
+            from ..models.pyscf import TransformersElectronConfig
+            return TransformersElectronConfig()
+        else:
+            raise ValueError(f"Unknown network name: {self.network_name}")
+
+    def _run_haar_optimization(
+        self,
+        model: Model,
+        network: NetworkProto,
+        optimizer: torch.optim.Optimizer,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Run the HAAR optimization loop.
+
+        This is a simplified version of the HAAR algorithm that performs
+        global optimization cycles.
+
+        Parameters
+        ----------
+        model : Model
+            The QMP model with Hamiltonian.
+        network : NetworkProto
+            The neural network wave function.
+        optimizer : Optimizer
+            The optimizer for training.
+        device : torch.device
+            The device to run on.
+
+        Returns
+        -------
+        energy : torch.Tensor
+            The final energy.
+        configs : torch.Tensor
+            The final configurations.
+        psi : torch.Tensor
+            The final amplitudes.
+        """
+        from ..algorithms.haar import _DynamicLanczos, _sampling_from_last_iteration
+        from ..algorithms.haar import _merge_pool_from_neural_network_and_pool_from_last_iteration
+        from ..utility import losses
+
+        loss_func = getattr(losses, "sum_filtered_angle_scaled_log")
+
+        # Initialize pool from previous run if available
+        pool: tuple[torch.Tensor, torch.Tensor] | None = None
+
+        for cycle in range(self.max_cycle):
+            if HAS_PYSCF and self.verbose >= logger.INFO:
+                logger.info(self, "HAAR cycle %d/%d", cycle + 1, self.max_cycle)
+
+            # Sample configurations from neural network
+            configs_nn, psi_nn, _, _ = network.generate_unique(
+                self.sampling_count, block_num=1
+            )
+
+            # Sample from last iteration if available
+            configs_last, psi_last = _sampling_from_last_iteration(
+                pool, self.sampling_count_last
+            )
+
+            # Merge configurations
+            configs, original_psi = _merge_pool_from_neural_network_and_pool_from_last_iteration(
+                configs_nn, psi_nn, configs_last, psi_last
+            )
+
+            if HAS_PYSCF and self.verbose >= logger.INFO:
+                logger.info(self, "  Sampled %d unique configurations", len(configs))
+
+            # Run Lanczos (no gradient needed for this part)
+            target_energy: torch.Tensor
+            lanczos_results: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
+
+            with torch.no_grad():
+                for lanczos_results in _DynamicLanczos(
+                    model=model,
+                    configs=configs,
+                    psi=original_psi,
+                    step=self.krylov_iteration,
+                    threshold=self.krylov_threshold,
+                    count_extend=self.krylov_extend_count,
+                    batch_count_apply_within=1,
+                    single_extend=self.krylov_single_extend,
+                    first_extend=self.krylov_extend_first,
+                ).run():
+                    target_energy, configs, original_psi = lanczos_results[0]
+
+            if HAS_PYSCF and self.verbose >= logger.INFO:
+                logger.info(self, "  Lanczos energy: %.10f", target_energy.item())
+
+            # Store the Lanczos eigenvector for final energy calculation
+            lanczos_psi = original_psi.clone()
+
+            # Compute target psi for optimization
+            target_prob = torch.zeros_like(original_psi, dtype=torch.float64)
+            for _, _, p in lanczos_results:
+                target_prob += (p.conj() * p).real
+            original_psi = target_prob.sqrt().to(dtype=torch.complex128)
+
+            max_index = original_psi.abs().argmax()
+            target_psi = original_psi / original_psi[max_index]
+
+            # Local optimization with gradient enabled
+            total_size = len(configs)
+
+            def closure() -> torch.Tensor:
+                optimizer.zero_grad()
+                total_loss = 0.0
+                total_psi = []
+                # Process all configs
+                psi_all = network(configs)
+                psi_max = psi_all[max_index]
+                psi_all = psi_all / psi_max
+                loss = loss_func(psi_all, target_psi)
+                loss.backward()  # type: ignore[no-untyped-call]
+                total_loss_tensor = torch.tensor(loss.item())
+                total_loss_tensor.psi = psi_all.detach()  # type: ignore[attr-defined]
+                return total_loss_tensor
+
+            # Run local optimization steps with gradient enabled
+            with torch.enable_grad():
+                for step in range(self.local_step):
+                    loss = optimizer.step(closure)  # type: ignore[arg-type]
+                    if step % 50 == 0 and HAS_PYSCF and self.verbose >= logger.INFO:
+                        logger.info(self, "  Local step %d, loss = %.10f", step, loss.item())
+                    if loss < self.local_loss:
+                        break
+
+            # Update pool for next iteration
+            pool = (configs, lanczos_psi)
+
+        # Final energy calculation using Lanczos eigenvector
+        final_energy = ((lanczos_psi.conj() @ model.apply_within(configs, lanczos_psi, configs)) / (lanczos_psi.conj() @ lanczos_psi)).real
+
+        if HAS_PYSCF and self.verbose >= logger.INFO:
+            logger.info(self, "Final energy: %.10f", final_energy.item())
+
+        return final_energy, configs, lanczos_psi
+
+    def _configs_to_ci_vector(
+        self,
+        configs: torch.Tensor,
+        psi: torch.Tensor,
+        norb: int,
+        nalpha: int,
+        nbeta: int,
+    ) -> numpy.ndarray:
+        """Convert configs/psi representation to PySCF CI vector.
+
+        Parameters
+        ----------
+        configs : torch.Tensor
+            Shape (N, n_qubytes), bit-packed configurations.
+        psi : torch.Tensor
+            Shape (N,), amplitudes.
+        norb : int
+            Number of spatial orbitals.
+        nalpha, nbeta : int
+            Number of alpha and beta electrons.
+
+        Returns
+        -------
+        ndarray
+            CI vector of shape (na, nb).
+        """
+        from pyscf.fci import cistring
+
+        na = cistring.num_strings(norb, nalpha)
+        nb = cistring.num_strings(norb, nbeta)
+
+        ci = numpy.zeros((na, nb), dtype=numpy.complex128)
+
+        # Unpack bits: QMP order is little-endian bit-packed bytes
+        configs_np = configs.cpu().numpy()
+        psi_np = psi.cpu().numpy()
+        bits = numpy.unpackbits(configs_np, axis=1, bitorder="little")
+
+        # Extract alpha and beta occupancy (alpha=even, beta=odd bits)
+        alpha_bits = bits[:, 0 : 2 * norb : 2]
+        beta_bits = bits[:, 1 : 2 * norb : 2]
+
+        # Convert to integer bitmasks
+        pw2 = 2 ** numpy.arange(norb, dtype=numpy.uint64)
+        alpha_dets = (alpha_bits.astype(numpy.uint64) * pw2).sum(axis=1)
+        beta_dets = (beta_bits.astype(numpy.uint64) * pw2).sum(axis=1)
+
+        # Map bitmasks to PySCF determinant indices
         try:
-            tmpdir = pathlib.Path(tempfile.mkdtemp())
-            # Handle ci0: could be full checkpoint dict or amplitudes array
-            if ci0 is not None:
-                if isinstance(ci0, _CIArray) and ci0.checkpoint:
-                    checkpoint_to_save = ci0.checkpoint
-                elif isinstance(ci0, numpy.ndarray):
-                    checkpoint_to_save = _from_pyscf_ci(ci0, norb, (nalpha, nbeta))
-                else:
-                    checkpoint_to_save = ci0
-                torch.save(checkpoint_to_save, tmpdir / "data.pth")
+            addr_a = cistring.str2addr(norb, nalpha, alpha_dets)
+            addr_b = cistring.str2addr(norb, nbeta, beta_dets)
+        except Exception:
+            # Fallback for older PySCF or if vectorized call fails
+            addr_a = numpy.array([cistring.str2addr(norb, nalpha, int(d)) for d in alpha_dets])
+            addr_b = numpy.array([cistring.str2addr(norb, nbeta, int(d)) for d in beta_dets])
 
-            context = _PyscfRuntimeContext(
-                model_instance=model,
-                folder_path=tmpdir,
-                parent_path=rt.parent_path,
-                random_seed=rt.random_seed,
-                checkpoint_interval=rt.checkpoint_interval,
-                device=rt.device,
-                dtype=rt.dtype,
-                max_absolute_step=rt.max_absolute_step,
-                max_relative_step=rt.max_relative_step,
-            )
+        ci[addr_a, addr_b] = psi_np
 
-            # ------------------------------------------------------------------
-            # 7. Setup context — loads checkpoint / ci0, configures RNG
-            # ------------------------------------------------------------------
-            checkpoint_data = context.setup()
+        return ci
 
-            # ------------------------------------------------------------------
-            # 8. Instantiate algorithm — mirroring __main__.py
-            # ------------------------------------------------------------------
-            run = dacite.from_dict(
-                data_class=action_dict[self.config.action.name],
-                data=omegaconf.OmegaConf.to_container(self.config.action.params, resolve=True),  # type: ignore[arg-type]
-                config=dacite.Config(cast=DACITE_CAST),
-            )
+    def _ci_vector_to_configs(
+        self,
+        ci: numpy.ndarray,
+        norb: int,
+        nalpha: int,
+        nbeta: int,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """Convert PySCF CI vector to configs/psi representation.
 
-            # ------------------------------------------------------------------
-            # 9. Run algorithm — mirroring __main__.py
-            #    The base save() writes the checkpoint to the temp dir and
-            #    then calls sys.exit(0) when max_absolute_step is reached.
-            #    We catch the resulting SystemExit so kernel() can return.
-            # ------------------------------------------------------------------
-            try:
-                run.main(
-                    context=context,
-                    runtime_config=runtime_config,
-                    checkpoint_data=checkpoint_data,
-                )
-            except SystemExit:
-                pass
+        Parameters
+        ----------
+        ci : ndarray
+            CI vector of shape (na, nb).
+        norb : int
+            Number of spatial orbitals.
+        nalpha, nbeta : int
+            Number of alpha and beta electrons.
 
-            # ------------------------------------------------------------------
-            # 10. Read the checkpoint that was saved by save()
-            # ------------------------------------------------------------------
-            data_path = tmpdir / "data.pth"
-            if data_path.exists():
-                data: dict[str, typing.Any] = torch.load(data_path, map_location="cpu", weights_only=True)
-            else:
-                data = {}
+        Returns
+        -------
+        configs : torch.Tensor or None
+            Bit-packed configurations.
+        psi : torch.Tensor or None
+            Amplitudes.
+        """
+        from pyscf.fci import cistring
 
-            # ------------------------------------------------------------------
-            # 11. Extract energy and build ci output
-            # ------------------------------------------------------------------
-            energy = _extract_energy(data, self.config.action.name, model)
-            # Strip the random engine state — it is stale by the next call.
-            full_checkpoint: dict[str, typing.Any] = {k: v for k, v in data.items() if k != "random"}
+        idx_a, idx_b = numpy.where(ci != 0)
+        amplitudes = ci[idx_a, idx_b]
 
-            # Try to convert to PySCF CI vector format
-            ci_array = _to_pyscf_ci(data, self.config.action.name, norb, (nalpha, nbeta))
-            if ci_array is not None:
-                ci: numpy.ndarray | dict[str, typing.Any] = _CIArray(ci_array, full_checkpoint)
-            else:
-                ci = full_checkpoint
+        str_a = cistring.addrs2str(norb, nalpha, idx_a)
+        str_b = cistring.addrs2str(norb, nbeta, idx_b)
 
-        finally:
-            if tmpdir is not None:
-                shutil.rmtree(tmpdir, ignore_errors=True)
-            torch.set_grad_enabled(prev_grad_enabled)
+        n_qubytes = (2 * norb + 7) // 8
+        N = len(str_a)
+        configs = numpy.zeros((N, n_qubytes), dtype=numpy.uint8)
 
-        return energy, ci
+        for j in range(norb):
+            a_bit = (str_a >> j) & 1
+            b_bit = (str_b >> j) & 1
+            pos_a = 2 * j
+            pos_b = 2 * j + 1
+            configs[:, pos_a // 8] |= (a_bit << (pos_a % 8)).astype(numpy.uint8)
+            configs[:, pos_b // 8] |= (b_bit << (pos_b % 8)).astype(numpy.uint8)
+
+        return torch.from_numpy(configs), torch.from_numpy(amplitudes)
+
+    def make_rdm1(
+        self,
+        state: int,
+        norb: int,
+        nelec: int | tuple[int, int],
+        link_index: typing.Any = None,
+        **kwargs: typing.Any,
+    ) -> numpy.ndarray:
+        """Compute the 1-particle reduced density matrix.
+
+        Parameters
+        ----------
+        state : int
+            State index (0 for ground state).
+        norb : int
+            Number of spatial orbitals.
+        nelec : int or tuple[int, int]
+            Number of electrons.
+
+        Returns
+        -------
+        ndarray
+            1-RDM, shape (norb, norb).
+        """
+        return self.make_rdm12(state, norb, nelec, link_index, **kwargs)[0]
+
+    def make_rdm12(
+        self,
+        state: int,
+        norb: int,
+        nelec: int | tuple[int, int],
+        link_index: typing.Any = None,
+        **kwargs: typing.Any,
+    ) -> tuple[numpy.ndarray, numpy.ndarray]:
+        """Compute 1- and 2-particle reduced density matrices.
+
+        This implementation converts the sparse wave function to a full CI vector
+        and uses PySCF's RDM calculation functions.
+
+        Parameters
+        ----------
+        state : int
+            State index (0 for ground state).
+        norb : int
+            Number of spatial orbitals.
+        nelec : int or tuple[int, int]
+            Number of electrons.
+        link_index : optional
+            Unused, kept for PySCF API compatibility.
+
+        Returns
+        -------
+        dm1 : ndarray
+            1-RDM, shape (norb, norb).
+        dm2 : ndarray
+            2-RDM, shape (norb, norb, norb, norb).
+        """
+        if self._configs is None or self._psi is None:
+            raise RuntimeError("No wave function available. Run kernel() first.")
+
+        if isinstance(nelec, (int, numpy.integer)):
+            nalpha = (int(nelec) + 1) // 2
+            nbeta = int(nelec) - nalpha
+        else:
+            nalpha, nbeta = int(nelec[0]), int(nelec[1])
+
+        # Convert to CI vector
+        ci = self._configs_to_ci_vector(self._configs, self._psi, norb, nalpha, nbeta)
+
+        # Use PySCF's RDM calculation
+        from pyscf.fci.direct_spin1 import make_rdm12
+
+        # Take real part if wave function is effectively real
+        if numpy.allclose(ci.imag, 0):
+            ci = ci.real
+
+        dm1, dm2 = make_rdm12(ci, norb, nelec)
+
+        return dm1, dm2
+
+    def make_rdm1s(
+        self,
+        state: int,
+        norb: int,
+        nelec: int | tuple[int, int],
+        link_index: typing.Any = None,
+        **kwargs: typing.Any,
+    ) -> tuple[numpy.ndarray, numpy.ndarray]:
+        """Compute spin-separated 1-particle RDMs.
+
+        Returns
+        -------
+        dm1a : ndarray
+            Alpha 1-RDM, shape (norb, norb).
+        dm1b : ndarray
+            Beta 1-RDM, shape (norb, norb).
+        """
+        if isinstance(nelec, (int, numpy.integer)):
+            nalpha = (int(nelec) + 1) // 2
+            nbeta = int(nelec) - nalpha
+        else:
+            nalpha, nbeta = int(nelec[0]), int(nelec[1])
+
+        dm1, _ = self.make_rdm12(state, norb, nelec, link_index, **kwargs)
+
+        # For a closed-shell singlet, dm1a = dm1b = dm1 / 2
+        # For more accurate spin-resolved RDMs, we need the full spin-RDM calculation
+        dm1a = dm1 / 2
+        dm1b = dm1 / 2
+
+        return dm1a, dm1b
+
+    def spin_square(
+        self,
+        civec: typing.Any,
+        norb: int,
+        nelec: int | tuple[int, int],
+    ) -> tuple[float, float]:
+        """Compute <S^2> expectation value.
+
+        For U(1)×U(1) symmetric wave functions (conserved nalpha and nbeta),
+        S_z = (nalpha - nbeta) / 2 is fixed. The expectation value of S^2
+        is computed as S_z(S_z + 1) for the spin-adapted case.
+
+        Parameters
+        ----------
+        civec : int or list
+            State index or list of indices (unused for U(1)×U(1) case).
+        norb : int
+            Number of spatial orbitals (unused).
+        nelec : int or tuple[int, int]
+            Number of electrons.
+
+        Returns
+        -------
+        ss : float
+            <S^2> expectation value.
+        s : float
+            2S + 1 (spin multiplicity).
+        """
+        if isinstance(nelec, (int, numpy.integer)):
+            nelecb = int(nelec) // 2
+            neleca = int(nelec) - nelecb
+        else:
+            neleca, nelecb = int(nelec[0]), int(nelec[1])
+
+        s = (neleca - nelecb) * 0.5
+        ss = s * (s + 1)
+
+        if isinstance(civec, int):
+            return float(ss), float(s * 2 + 1)
+        else:
+            # Multiple states
+            return [float(ss)] * len(civec), [float(s * 2 + 1)] * len(civec)
+
+    @property
+    def nstates(self) -> int:
+        """Number of states (alias for nroots)."""
+        return self.nroots
+
+    @property
+    def e_tot(self) -> float:
+        """Total energy of the ground state."""
+        if self._energy is None:
+            raise RuntimeError("No energy available. Run kernel() first.")
+        return self._energy
 
 
-def _extract_energy(data: dict[str, typing.Any], action_name: str, model: ModelProto | None = None) -> float:
-    """
-    Extract the final ground-state energy from algorithm checkpoint data.
+def HAARSCF(
+    mf: typing.Any,
+    norb: int,
+    nelec: int | tuple[int, int],
+    **kwargs: typing.Any,
+) -> typing.Any:
+    """Create a CASSCF object using the HAAR FCI solver.
+
+    This is a convenience function that creates a CASSCF object and sets
+    the FCI solver to HAAR.
 
     Parameters
     ----------
-    data : dict
-        Checkpoint data loaded from the temporary directory.
-    action_name : str
-        Name of the algorithm that produced the checkpoint.
-    model : ModelProto, optional
-        The model instance for computing energy expectation value if needed.
+    mf : SCF object
+        Mean-field object from PySCF (RHF, ROHF, UHF, etc.).
+    norb : int
+        Number of active orbitals.
+    nelec : int or tuple[int, int]
+        Number of active electrons.
+    **kwargs : dict
+        Additional keyword arguments passed to HAAR solver.
 
     Returns
     -------
-    float
-        Ground-state energy, or ``0.0`` if it cannot be determined from the
-        checkpoint (e.g. the algorithm does not store energy in its checkpoint).
+    CASSCF
+        CASSCF object with HAAR as the FCI solver.
+
+    Examples
+    --------
+    >>> from pyscf import gto, scf
+    >>> from qmp.plugins.pyscf import HAARSCF
+    >>> mol = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g')
+    >>> mf = scf.RHF(mol).run()
+    >>> mc = HAARSCF(mf, 2, 2)
+    >>> mc.fcisolver.sampling_count = 512
+    >>> mc.kernel()
     """
-    if action_name in ("haar", "imag"):
-        haar_data = data.get("haar")
-        if haar_data is None:
-            return 0.0
+    if not HAS_PYSCF:
+        raise ImportError("PySCF is required for HAARSCF")
 
-        # Try to get the final energy directly if stored
-        if "final_energy" in haar_data:
-            energy_val = haar_data["final_energy"]
-            if hasattr(energy_val, "item"):
-                return float(energy_val.item())
-            return float(energy_val)
+    mc = mcscf.CASSCF(mf, norb, nelec)
+    mc.fcisolver = HAAR(mf.mol, **kwargs)
+    return mc
 
-        # Try to compute energy from the pool (configs, psi) if model is available
-        pool = haar_data.get("pool")
-        if pool is not None and model is not None:
-            configs, psi = pool
-            if configs is not None and psi is not None:
-                # Compute expectation value <psi|H|psi> / <psi|psi>
-                h_psi = model.apply_within(configs, psi, configs)
-                energy = ((psi.conj() @ h_psi) / (psi.conj() @ psi)).real
-                if hasattr(energy, "item"):
-                    return float(energy.item())
-                return float(energy)
 
-        # Fallback: try to get from excited state results (Lanczos energy)
-        haar_global_step: int = haar_data.get("global", 0)
-        if haar_global_step > 0:
-            last_key = haar_global_step - 1
-            excited: dict[int, list[typing.Any]] = haar_data.get("excited", {})
-            results = excited.get(last_key)
-            if results:
-                # results is list[(energy_tensor, configs, psi)]; index 0 is ground state.
-                energy_val = results[0][0]
-                if hasattr(energy_val, "item"):
-                    return float(energy_val.item())
+def HAARCI(
+    mf: typing.Any,
+    norb: int,
+    nelec: int | tuple[int, int],
+    **kwargs: typing.Any,
+) -> typing.Any:
+    """Create a CASCI object using the HAAR FCI solver.
 
-    return 0.0
+    This is a convenience function that creates a CASCI object and sets
+    the FCI solver to HAAR.
+
+    Parameters
+    ----------
+    mf : SCF object
+        Mean-field object from PySCF.
+    norb : int
+        Number of active orbitals.
+    nelec : int or tuple[int, int]
+        Number of active electrons.
+    **kwargs : dict
+        Additional keyword arguments passed to HAAR solver.
+
+    Returns
+    -------
+    CASCI
+        CASCI object with HAAR as the FCI solver.
+    """
+    if not HAS_PYSCF:
+        raise ImportError("PySCF is required for HAARCI")
+
+    mc = mcscf.CASCI(mf, norb, nelec)
+    mc.fcisolver = HAAR(mf.mol, **kwargs)
+    return mc
