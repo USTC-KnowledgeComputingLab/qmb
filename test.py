@@ -4,8 +4,8 @@
 from pyscf import gto, scf, fci, ao2mo
 from qmp.plugins.pyscf import HAAR
 
-# 1. Create molecule
-mol = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g', verbose=0)
+# 1. Create molecule - N2
+mol = gto.M(atom='N 0 0 0; N 0 0 1.098', basis='cc-pvdz', verbose=0)
 mf = scf.RHF(mol).run()
 print(f"HF energy: {mf.e_tot:.8f}")
 
