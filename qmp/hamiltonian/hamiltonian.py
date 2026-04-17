@@ -233,19 +233,21 @@ class Hamiltonian:
 
             if stream is not None:
                 # CUDA device: use stream for parallel execution
-                with torch.cuda.stream(stream):
-                    configs_i_chunk = configs_i[start_idx:end_idx].to(device=device, non_blocking=True)
-                    psi_i_chunk = psi_i[start_idx:end_idx].to(device=device, non_blocking=True)
-                    configs_j_dev = configs_j.to(device=device, non_blocking=True)
+                # Must set device context before using stream
+                with torch.cuda.device(device.index):
+                    with torch.cuda.stream(stream):
+                        configs_i_chunk = configs_i[start_idx:end_idx].to(device=device, non_blocking=True)
+                        psi_i_chunk = psi_i[start_idx:end_idx].to(device=device, non_blocking=True)
+                        configs_j_dev = configs_j.to(device=device, non_blocking=True)
 
-                    _apply_within = getattr(
-                        self._load_module(device.type, configs_i_chunk.size(1), self.particle_cut),
-                        "apply_within",
-                    )
-                    psi_j_chunk = torch.view_as_complex(
-                        _apply_within(configs_i_chunk, torch.view_as_real(psi_i_chunk), configs_j_dev, site, kind, coef)
-                    )
-                    pending_results.append((psi_j_chunk, device, stream))
+                        _apply_within = getattr(
+                            self._load_module(device.type, configs_i_chunk.size(1), self.particle_cut),
+                            "apply_within",
+                        )
+                        psi_j_chunk = torch.view_as_complex(
+                            _apply_within(configs_i_chunk, torch.view_as_real(psi_i_chunk), configs_j_dev, site, kind, coef)
+                        )
+                        pending_results.append((psi_j_chunk, device, stream))
             else:
                 # CPU device: execute directly (no stream support)
                 configs_i_chunk = configs_i[start_idx:end_idx].to(device=device)
@@ -344,19 +346,20 @@ class Hamiltonian:
             stream = _get_stream(device)
 
             if stream is not None:
-                with torch.cuda.stream(stream):
-                    configs_i_chunk = configs_i[start_idx:end_idx].to(device=device, non_blocking=True)
-                    psi_i_chunk = psi_i[start_idx:end_idx].to(device=device, non_blocking=True)
-                    configs_exclude_dev = configs_exclude.to(device=device, non_blocking=True)
+                with torch.cuda.device(device.index):
+                    with torch.cuda.stream(stream):
+                        configs_i_chunk = configs_i[start_idx:end_idx].to(device=device, non_blocking=True)
+                        psi_i_chunk = psi_i[start_idx:end_idx].to(device=device, non_blocking=True)
+                        configs_exclude_dev = configs_exclude.to(device=device, non_blocking=True)
 
-                    _find_relative = getattr(
-                        self._load_module(device.type, configs_i_chunk.size(1), self.particle_cut),
-                        "find_relative",
-                    )
-                    configs_j_chunk = _find_relative(
-                        configs_i_chunk, torch.view_as_real(psi_i_chunk), count_selected, site, kind, coef, configs_exclude_dev
-                    )
-                    pending_results.append((configs_j_chunk, stream))
+                        _find_relative = getattr(
+                            self._load_module(device.type, configs_i_chunk.size(1), self.particle_cut),
+                            "find_relative",
+                        )
+                        configs_j_chunk = _find_relative(
+                            configs_i_chunk, torch.view_as_real(psi_i_chunk), count_selected, site, kind, coef, configs_exclude_dev
+                        )
+                        pending_results.append((configs_j_chunk, stream))
             else:
                 configs_i_chunk = configs_i[start_idx:end_idx].to(device=device)
                 psi_i_chunk = psi_i[start_idx:end_idx].to(device=device)
@@ -466,20 +469,21 @@ class Hamiltonian:
             stream = _get_stream(device)
 
             if stream is not None:
-                with torch.cuda.stream(stream):
-                    configs_i_chunk = configs_i[start_idx:end_idx].to(device=device, non_blocking=True)
-                    psi_i_chunk = psi_i[start_idx:end_idx].to(device=device, non_blocking=True)
-                    configs_exclude_dev = configs_exclude.to(device=device, non_blocking=True)
+                with torch.cuda.device(device.index):
+                    with torch.cuda.stream(stream):
+                        configs_i_chunk = configs_i[start_idx:end_idx].to(device=device, non_blocking=True)
+                        psi_i_chunk = psi_i[start_idx:end_idx].to(device=device, non_blocking=True)
+                        configs_exclude_dev = configs_exclude.to(device=device, non_blocking=True)
 
-                    _list_relative = getattr(
-                        self._load_module(device.type, configs_i_chunk.size(1), self.particle_cut),
-                        "list_relative",
-                    )
-                    configs_j_chunk, psi_j_chunk_real = _list_relative(
-                        configs_i_chunk, torch.view_as_real(psi_i_chunk), site, kind, coef, configs_exclude_dev
-                    )
-                    psi_j_chunk = torch.view_as_complex(psi_j_chunk_real)
-                    pending_results.append((configs_j_chunk, psi_j_chunk, stream))
+                        _list_relative = getattr(
+                            self._load_module(device.type, configs_i_chunk.size(1), self.particle_cut),
+                            "list_relative",
+                        )
+                        configs_j_chunk, psi_j_chunk_real = _list_relative(
+                            configs_i_chunk, torch.view_as_real(psi_i_chunk), site, kind, coef, configs_exclude_dev
+                        )
+                        psi_j_chunk = torch.view_as_complex(psi_j_chunk_real)
+                        pending_results.append((configs_j_chunk, psi_j_chunk, stream))
             else:
                 configs_i_chunk = configs_i[start_idx:end_idx].to(device=device)
                 psi_i_chunk = psi_i[start_idx:end_idx].to(device=device)
@@ -579,15 +583,16 @@ class Hamiltonian:
             stream = _get_stream(device)
 
             if stream is not None:
-                with torch.cuda.stream(stream):
-                    configs_chunk = configs[start_idx:end_idx].to(device=device, non_blocking=True)
+                with torch.cuda.device(device.index):
+                    with torch.cuda.stream(stream):
+                        configs_chunk = configs[start_idx:end_idx].to(device=device, non_blocking=True)
 
-                    _diagonal_term = getattr(
-                        self._load_module(device.type, configs_chunk.size(1), self.particle_cut),
-                        "diagonal_term",
-                    )
-                    psi_chunk = torch.view_as_complex(_diagonal_term(configs_chunk, site, kind, coef))
-                    pending_results.append((psi_chunk, start_idx, end_idx, stream))
+                        _diagonal_term = getattr(
+                            self._load_module(device.type, configs_chunk.size(1), self.particle_cut),
+                            "diagonal_term",
+                        )
+                        psi_chunk = torch.view_as_complex(_diagonal_term(configs_chunk, site, kind, coef))
+                        pending_results.append((psi_chunk, start_idx, end_idx, stream))
             else:
                 configs_chunk = configs[start_idx:end_idx].to(device=device)
 
