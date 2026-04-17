@@ -7,6 +7,7 @@ import logging
 import platformdirs
 import torch
 import torch.utils.cpp_extension
+from concurrent.futures import ThreadPoolExecutor
 
 
 # Cache for CUDA streams per device
@@ -207,33 +208,32 @@ class Hamiltonian:
             )
             return psi_j
 
-        # Multi-device case: parallel execution using CUDA streams
+        # Multi-device case: parallel execution using ThreadPoolExecutor + CUDA streams
         n_devices = len(devices)
         batch_size_i = configs_i.size(0)
         chunk_size = batch_size_i // n_devices
         remainder = batch_size_i % n_devices
 
-        # Pre-prepare Hamiltonian data for all devices (this can be done in parallel too)
+        # Pre-prepare Hamiltonian data for all devices
         for device in devices:
             self._prepare_data_for_device(device)
 
-        # Launch all computations in parallel using streams
-        pending_results: list[tuple[torch.Tensor, torch.device, torch.cuda.Stream | None]] = []
         result_device = devices[0]
+        hamiltonian_self = self  # Capture self for use in worker function
 
-        for idx, device in enumerate(devices):
+        def compute_chunk(idx: int, device: torch.device) -> torch.Tensor | None:
+            """Worker function to compute a chunk on a specific device."""
             start_idx = idx * chunk_size + min(idx, remainder)
             end_idx = start_idx + chunk_size + (1 if idx < remainder else 0)
 
             if start_idx >= end_idx:
-                continue
+                return None
 
-            site, kind, coef = self._prepare_data_for_device(device)
+            site, kind, coef = hamiltonian_self._prepare_data_for_device(device)
             stream = _get_stream(device)
 
             if stream is not None:
-                # CUDA device: use stream for parallel execution
-                # Must set device context before using stream
+                # CUDA device: use thread + stream for true parallel execution
                 with torch.cuda.device(device.index):
                     with torch.cuda.stream(stream):
                         configs_i_chunk = configs_i[start_idx:end_idx].to(device=device, non_blocking=True)
@@ -241,34 +241,46 @@ class Hamiltonian:
                         configs_j_dev = configs_j.to(device=device, non_blocking=True)
 
                         _apply_within = getattr(
-                            self._load_module(device.type, configs_i_chunk.size(1), self.particle_cut),
+                            hamiltonian_self._load_module(device.type, configs_i_chunk.size(1), hamiltonian_self.particle_cut),
                             "apply_within",
                         )
                         psi_j_chunk = torch.view_as_complex(
                             _apply_within(configs_i_chunk, torch.view_as_real(psi_i_chunk), configs_j_dev, site, kind, coef)
                         )
-                        pending_results.append((psi_j_chunk, device, stream))
+                        # Synchronize within thread to ensure result is complete
+                        stream.synchronize()
+                        return psi_j_chunk.to(device=result_device)
             else:
-                # CPU device: execute directly (no stream support)
+                # CPU device: execute directly
                 configs_i_chunk = configs_i[start_idx:end_idx].to(device=device)
                 psi_i_chunk = psi_i[start_idx:end_idx].to(device=device)
                 configs_j_dev = configs_j.to(device=device)
 
                 _apply_within = getattr(
-                    self._load_module(device.type, configs_i_chunk.size(1), self.particle_cut),
+                    hamiltonian_self._load_module(device.type, configs_i_chunk.size(1), hamiltonian_self.particle_cut),
                     "apply_within",
                 )
                 psi_j_chunk = torch.view_as_complex(
                     _apply_within(configs_i_chunk, torch.view_as_real(psi_i_chunk), configs_j_dev, site, kind, coef)
                 )
-                pending_results.append((psi_j_chunk, device, None))
+                return psi_j_chunk.to(device=result_device)
 
-        # Synchronize and accumulate results
+        # Parallel execution using ThreadPoolExecutor
+        results: list[torch.Tensor] = []
+        with ThreadPoolExecutor(max_workers=n_devices) as executor:
+            futures = [executor.submit(compute_chunk, idx, device) for idx, device in enumerate(devices)]
+            for future in futures:
+                result = future.result()
+                if result is not None:
+                    results.append(result)
+
+        # Accumulate results
+        if len(results) == 0:
+            return torch.zeros(configs_j.size(0), dtype=torch.complex64, device=result_device)
+
         final_result = torch.zeros(configs_j.size(0), dtype=torch.complex64, device=result_device)
-        for psi_j_chunk, device, stream in pending_results:
-            if stream is not None:
-                stream.synchronize()
-            final_result = final_result + psi_j_chunk.to(device=result_device, non_blocking=False)
+        for psi_j_chunk in results:
+            final_result = final_result + psi_j_chunk
 
         return final_result
 
@@ -320,7 +332,7 @@ class Hamiltonian:
             )
             return configs_j
 
-        # Multi-device case: parallel execution using CUDA streams
+        # Multi-device case: parallel execution using ThreadPoolExecutor + CUDA streams
         n_devices = len(devices)
         batch_size_i = configs_i.size(0)
         chunk_size = batch_size_i // n_devices
@@ -331,18 +343,17 @@ class Hamiltonian:
             self._prepare_data_for_device(device)
 
         result_device = devices[0]
+        hamiltonian_self = self
 
-        # Launch all computations in parallel
-        pending_results: list[tuple[torch.Tensor, torch.cuda.Stream | None]] = []
-
-        for idx, device in enumerate(devices):
+        def compute_chunk(idx: int, device: torch.device) -> torch.Tensor | None:
+            """Worker function to compute find_relative on a specific device."""
             start_idx = idx * chunk_size + min(idx, remainder)
             end_idx = start_idx + chunk_size + (1 if idx < remainder else 0)
 
             if start_idx >= end_idx:
-                continue
+                return None
 
-            site, kind, coef = self._prepare_data_for_device(device)
+            site, kind, coef = hamiltonian_self._prepare_data_for_device(device)
             stream = _get_stream(device)
 
             if stream is not None:
@@ -353,33 +364,36 @@ class Hamiltonian:
                         configs_exclude_dev = configs_exclude.to(device=device, non_blocking=True)
 
                         _find_relative = getattr(
-                            self._load_module(device.type, configs_i_chunk.size(1), self.particle_cut),
+                            hamiltonian_self._load_module(device.type, configs_i_chunk.size(1), hamiltonian_self.particle_cut),
                             "find_relative",
                         )
                         configs_j_chunk = _find_relative(
                             configs_i_chunk, torch.view_as_real(psi_i_chunk), count_selected, site, kind, coef, configs_exclude_dev
                         )
-                        pending_results.append((configs_j_chunk, stream))
+                        stream.synchronize()
+                        return configs_j_chunk.to(device=result_device)
             else:
                 configs_i_chunk = configs_i[start_idx:end_idx].to(device=device)
                 psi_i_chunk = psi_i[start_idx:end_idx].to(device=device)
                 configs_exclude_dev = configs_exclude.to(device=device)
 
                 _find_relative = getattr(
-                    self._load_module(device.type, configs_i_chunk.size(1), self.particle_cut),
+                    hamiltonian_self._load_module(device.type, configs_i_chunk.size(1), hamiltonian_self.particle_cut),
                     "find_relative",
                 )
                 configs_j_chunk = _find_relative(
                     configs_i_chunk, torch.view_as_real(psi_i_chunk), count_selected, site, kind, coef, configs_exclude_dev
                 )
-                pending_results.append((configs_j_chunk, None))
+                return configs_j_chunk.to(device=result_device)
 
-        # Synchronize and collect results
+        # Parallel execution using ThreadPoolExecutor
         results: list[torch.Tensor] = []
-        for configs_j_chunk, stream in pending_results:
-            if stream is not None:
-                stream.synchronize()
-            results.append(configs_j_chunk.to(device=result_device, non_blocking=False))
+        with ThreadPoolExecutor(max_workers=n_devices) as executor:
+            futures = [executor.submit(compute_chunk, idx, device) for idx, device in enumerate(devices)]
+            for future in futures:
+                result = future.result()
+                if result is not None:
+                    results.append(result)
 
         # Handle empty results
         if len(results) == 0:
@@ -443,7 +457,7 @@ class Hamiltonian:
             )
             return configs_j, torch.view_as_complex(psi_j_real)
 
-        # Multi-device case: parallel execution using CUDA streams
+        # Multi-device case: parallel execution using ThreadPoolExecutor + CUDA streams
         n_devices = len(devices)
         batch_size_i = configs_i.size(0)
         chunk_size = batch_size_i // n_devices
@@ -454,18 +468,17 @@ class Hamiltonian:
             self._prepare_data_for_device(device)
 
         result_device = devices[0]
+        hamiltonian_self = self
 
-        # Launch all computations in parallel
-        pending_results: list[tuple[torch.Tensor, torch.Tensor, torch.cuda.Stream | None]] = []
-
-        for idx, device in enumerate(devices):
+        def compute_chunk(idx: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor] | None:
+            """Worker function to compute list_relative on a specific device."""
             start_idx = idx * chunk_size + min(idx, remainder)
             end_idx = start_idx + chunk_size + (1 if idx < remainder else 0)
 
             if start_idx >= end_idx:
-                continue
+                return None
 
-            site, kind, coef = self._prepare_data_for_device(device)
+            site, kind, coef = hamiltonian_self._prepare_data_for_device(device)
             stream = _get_stream(device)
 
             if stream is not None:
@@ -476,38 +489,40 @@ class Hamiltonian:
                         configs_exclude_dev = configs_exclude.to(device=device, non_blocking=True)
 
                         _list_relative = getattr(
-                            self._load_module(device.type, configs_i_chunk.size(1), self.particle_cut),
+                            hamiltonian_self._load_module(device.type, configs_i_chunk.size(1), hamiltonian_self.particle_cut),
                             "list_relative",
                         )
                         configs_j_chunk, psi_j_chunk_real = _list_relative(
                             configs_i_chunk, torch.view_as_real(psi_i_chunk), site, kind, coef, configs_exclude_dev
                         )
                         psi_j_chunk = torch.view_as_complex(psi_j_chunk_real)
-                        pending_results.append((configs_j_chunk, psi_j_chunk, stream))
+                        stream.synchronize()
+                        return (configs_j_chunk.to(device=result_device), psi_j_chunk.to(device=result_device))
             else:
                 configs_i_chunk = configs_i[start_idx:end_idx].to(device=device)
                 psi_i_chunk = psi_i[start_idx:end_idx].to(device=device)
                 configs_exclude_dev = configs_exclude.to(device=device)
 
                 _list_relative = getattr(
-                    self._load_module(device.type, configs_i_chunk.size(1), self.particle_cut),
+                    hamiltonian_self._load_module(device.type, configs_i_chunk.size(1), hamiltonian_self.particle_cut),
                     "list_relative",
                 )
                 configs_j_chunk, psi_j_chunk_real = _list_relative(
                     configs_i_chunk, torch.view_as_real(psi_i_chunk), site, kind, coef, configs_exclude_dev
                 )
                 psi_j_chunk = torch.view_as_complex(psi_j_chunk_real)
-                pending_results.append((configs_j_chunk, psi_j_chunk, None))
+                return (configs_j_chunk.to(device=result_device), psi_j_chunk.to(device=result_device))
 
-        # Synchronize and collect results
+        # Parallel execution using ThreadPoolExecutor
         results_configs: list[torch.Tensor] = []
         results_psi: list[torch.Tensor] = []
-
-        for configs_j_chunk, psi_j_chunk, stream in pending_results:
-            if stream is not None:
-                stream.synchronize()
-            results_configs.append(configs_j_chunk.to(device=result_device, non_blocking=False))
-            results_psi.append(psi_j_chunk.to(device=result_device, non_blocking=False))
+        with ThreadPoolExecutor(max_workers=n_devices) as executor:
+            futures = [executor.submit(compute_chunk, idx, device) for idx, device in enumerate(devices)]
+            for future in futures:
+                result = future.result()
+                if result is not None:
+                    results_configs.append(result[0])
+                    results_psi.append(result[1])
 
         # Handle empty results
         if len(results_configs) == 0:
@@ -557,7 +572,7 @@ class Hamiltonian:
             psi_result = torch.view_as_complex(_diagonal_term(configs_dev, site, kind, coef))
             return psi_result
 
-        # Multi-device case: parallel execution using CUDA streams
+        # Multi-device case: parallel execution using ThreadPoolExecutor + CUDA streams
         n_devices = len(devices)
         batch_size = configs.size(0)
         chunk_size = batch_size // n_devices
@@ -568,18 +583,17 @@ class Hamiltonian:
             self._prepare_data_for_device(device)
 
         result_device = devices[0]
+        hamiltonian_self = self
 
-        # Launch all computations in parallel
-        pending_results: list[tuple[torch.Tensor, int, int, torch.cuda.Stream | None]] = []
-
-        for idx, device in enumerate(devices):
+        def compute_chunk(idx: int, device: torch.device) -> tuple[torch.Tensor, int] | None:
+            """Worker function to compute diagonal_term on a specific device."""
             start_idx = idx * chunk_size + min(idx, remainder)
             end_idx = start_idx + chunk_size + (1 if idx < remainder else 0)
 
             if start_idx >= end_idx:
-                continue
+                return None
 
-            site, kind, coef = self._prepare_data_for_device(device)
+            site, kind, coef = hamiltonian_self._prepare_data_for_device(device)
             stream = _get_stream(device)
 
             if stream is not None:
@@ -588,30 +602,37 @@ class Hamiltonian:
                         configs_chunk = configs[start_idx:end_idx].to(device=device, non_blocking=True)
 
                         _diagonal_term = getattr(
-                            self._load_module(device.type, configs_chunk.size(1), self.particle_cut),
+                            hamiltonian_self._load_module(device.type, configs_chunk.size(1), hamiltonian_self.particle_cut),
                             "diagonal_term",
                         )
                         psi_chunk = torch.view_as_complex(_diagonal_term(configs_chunk, site, kind, coef))
-                        pending_results.append((psi_chunk, start_idx, end_idx, stream))
+                        stream.synchronize()
+                        return (psi_chunk.to(device=result_device), start_idx)
             else:
                 configs_chunk = configs[start_idx:end_idx].to(device=device)
 
                 _diagonal_term = getattr(
-                    self._load_module(device.type, configs_chunk.size(1), self.particle_cut),
+                    hamiltonian_self._load_module(device.type, configs_chunk.size(1), hamiltonian_self.particle_cut),
                     "diagonal_term",
                 )
                 psi_chunk = torch.view_as_complex(_diagonal_term(configs_chunk, site, kind, coef))
-                pending_results.append((psi_chunk, start_idx, end_idx, None))
+                return (psi_chunk.to(device=result_device), start_idx)
 
-        # Synchronize and collect results in order
+        # Parallel execution using ThreadPoolExecutor
+        pending_results: list[tuple[torch.Tensor, int]] = []
+        with ThreadPoolExecutor(max_workers=n_devices) as executor:
+            futures = [executor.submit(compute_chunk, idx, device) for idx, device in enumerate(devices)]
+            for future in futures:
+                result = future.result()
+                if result is not None:
+                    pending_results.append(result)
+
         # Sort by start_idx to maintain order
         pending_results.sort(key=lambda x: x[1])
 
         results: list[torch.Tensor] = []
-        for psi_chunk, start_idx, end_idx, stream in pending_results:
-            if stream is not None:
-                stream.synchronize()
-            results.append(psi_chunk.to(device=result_device, non_blocking=False))
+        for psi_chunk, start_idx in pending_results:
+            results.append(psi_chunk)
 
         if len(results) == 0:
             return torch.empty(0, dtype=torch.complex64, device=result_device)
