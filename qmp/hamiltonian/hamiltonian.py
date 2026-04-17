@@ -9,6 +9,23 @@ import torch
 import torch.utils.cpp_extension
 
 
+# Cache for CUDA streams per device
+_stream_cache: dict[str, torch.cuda.Stream] = {}
+
+
+def _get_stream(device: torch.device) -> torch.cuda.Stream | None:
+    """
+    Get or create a CUDA stream for the given device.
+    Returns None for CPU devices.
+    """
+    if device.type != "cuda":
+        return None
+    device_key = str(device)
+    if device_key not in _stream_cache:
+        _stream_cache[device_key] = torch.cuda.Stream(device=device)
+    return _stream_cache[device_key]
+
+
 class Hamiltonian:
     """
     The Hamiltonian type, which stores the Hamiltonian and processes iteration over each term in the Hamiltonian for given configurations.
@@ -190,46 +207,67 @@ class Hamiltonian:
             )
             return psi_j
 
-        # Multi-device case: split configs_i across devices and accumulate results
+        # Multi-device case: parallel execution using CUDA streams
         n_devices = len(devices)
         batch_size_i = configs_i.size(0)
         chunk_size = batch_size_i // n_devices
         remainder = batch_size_i % n_devices
 
-        results: list[torch.Tensor] = []
+        # Pre-prepare Hamiltonian data for all devices (this can be done in parallel too)
+        for device in devices:
+            self._prepare_data_for_device(device)
+
+        # Launch all computations in parallel using streams
+        pending_results: list[tuple[torch.Tensor, torch.device, torch.cuda.Stream | None]] = []
+        result_device = devices[0]
+
         for idx, device in enumerate(devices):
-            # Calculate chunk indices
             start_idx = idx * chunk_size + min(idx, remainder)
             end_idx = start_idx + chunk_size + (1 if idx < remainder else 0)
 
-            # Skip empty chunks
             if start_idx >= end_idx:
                 continue
 
-            # Prepare data for this device
             site, kind, coef = self._prepare_data_for_device(device)
+            stream = _get_stream(device)
 
-            # Move chunk to device
-            configs_i_chunk = configs_i[start_idx:end_idx].to(device=device)
-            psi_i_chunk = psi_i[start_idx:end_idx].to(device=device)
-            configs_j_dev = configs_j.to(device=device)
+            if stream is not None:
+                # CUDA device: use stream for parallel execution
+                with torch.cuda.stream(stream):
+                    configs_i_chunk = configs_i[start_idx:end_idx].to(device=device, non_blocking=True)
+                    psi_i_chunk = psi_i[start_idx:end_idx].to(device=device, non_blocking=True)
+                    configs_j_dev = configs_j.to(device=device, non_blocking=True)
 
-            # Execute on device
-            _apply_within = getattr(
-                self._load_module(device.type, configs_i_chunk.size(1), self.particle_cut),
-                "apply_within",
-            )
-            psi_j_chunk = torch.view_as_complex(
-                _apply_within(configs_i_chunk, torch.view_as_real(psi_i_chunk), configs_j_dev, site, kind, coef)
-            )
-            results.append(psi_j_chunk)
+                    _apply_within = getattr(
+                        self._load_module(device.type, configs_i_chunk.size(1), self.particle_cut),
+                        "apply_within",
+                    )
+                    psi_j_chunk = torch.view_as_complex(
+                        _apply_within(configs_i_chunk, torch.view_as_real(psi_i_chunk), configs_j_dev, site, kind, coef)
+                    )
+                    pending_results.append((psi_j_chunk, device, stream))
+            else:
+                # CPU device: execute directly (no stream support)
+                configs_i_chunk = configs_i[start_idx:end_idx].to(device=device)
+                psi_i_chunk = psi_i[start_idx:end_idx].to(device=device)
+                configs_j_dev = configs_j.to(device=device)
 
-        # Accumulate results from all devices
-        # All results are tensors of shape [batch_size_j], we sum them
-        result_device = devices[0]
+                _apply_within = getattr(
+                    self._load_module(device.type, configs_i_chunk.size(1), self.particle_cut),
+                    "apply_within",
+                )
+                psi_j_chunk = torch.view_as_complex(
+                    _apply_within(configs_i_chunk, torch.view_as_real(psi_i_chunk), configs_j_dev, site, kind, coef)
+                )
+                pending_results.append((psi_j_chunk, device, None))
+
+        # Synchronize and accumulate results
         final_result = torch.zeros(configs_j.size(0), dtype=torch.complex64, device=result_device)
-        for r in results:
-            final_result = final_result + r.to(device=result_device)
+        for psi_j_chunk, device, stream in pending_results:
+            if stream is not None:
+                stream.synchronize()
+            final_result = final_result + psi_j_chunk.to(device=result_device, non_blocking=False)
+
         return final_result
 
     def find_relative(
@@ -266,7 +304,6 @@ class Hamiltonian:
             configs_exclude = configs_i
 
         if devices is None or len(devices) <= 1:
-            # Single device case: use original implementation
             device = devices[0] if devices else configs_i.device
             site, kind, coef = self._prepare_data_for_device(device)
             configs_i_dev = configs_i.to(device=device)
@@ -281,66 +318,79 @@ class Hamiltonian:
             )
             return configs_j
 
-        # Multi-device case: split configs_i across devices and merge results
+        # Multi-device case: parallel execution using CUDA streams
         n_devices = len(devices)
         batch_size_i = configs_i.size(0)
         chunk_size = batch_size_i // n_devices
         remainder = batch_size_i % n_devices
 
-        results: list[torch.Tensor] = []
+        # Pre-prepare Hamiltonian data for all devices
+        for device in devices:
+            self._prepare_data_for_device(device)
+
+        result_device = devices[0]
+
+        # Launch all computations in parallel
+        pending_results: list[tuple[torch.Tensor, torch.cuda.Stream | None]] = []
+
         for idx, device in enumerate(devices):
-            # Calculate chunk indices
             start_idx = idx * chunk_size + min(idx, remainder)
             end_idx = start_idx + chunk_size + (1 if idx < remainder else 0)
 
-            # Skip empty chunks
             if start_idx >= end_idx:
                 continue
 
-            # Prepare data for this device
             site, kind, coef = self._prepare_data_for_device(device)
+            stream = _get_stream(device)
 
-            # Move chunk to device
-            configs_i_chunk = configs_i[start_idx:end_idx].to(device=device)
-            psi_i_chunk = psi_i[start_idx:end_idx].to(device=device)
-            configs_exclude_dev = configs_exclude.to(device=device)
+            if stream is not None:
+                with torch.cuda.stream(stream):
+                    configs_i_chunk = configs_i[start_idx:end_idx].to(device=device, non_blocking=True)
+                    psi_i_chunk = psi_i[start_idx:end_idx].to(device=device, non_blocking=True)
+                    configs_exclude_dev = configs_exclude.to(device=device, non_blocking=True)
 
-            # Execute on device
-            _find_relative = getattr(
-                self._load_module(device.type, configs_i_chunk.size(1), self.particle_cut),
-                "find_relative",
-            )
-            # Request count_selected per device, we'll merge and select top later
-            configs_j_chunk = _find_relative(
-                configs_i_chunk, torch.view_as_real(psi_i_chunk), count_selected, site, kind, coef, configs_exclude_dev
-            )
-            results.append(configs_j_chunk.to(device=devices[0]))
+                    _find_relative = getattr(
+                        self._load_module(device.type, configs_i_chunk.size(1), self.particle_cut),
+                        "find_relative",
+                    )
+                    configs_j_chunk = _find_relative(
+                        configs_i_chunk, torch.view_as_real(psi_i_chunk), count_selected, site, kind, coef, configs_exclude_dev
+                    )
+                    pending_results.append((configs_j_chunk, stream))
+            else:
+                configs_i_chunk = configs_i[start_idx:end_idx].to(device=device)
+                psi_i_chunk = psi_i[start_idx:end_idx].to(device=device)
+                configs_exclude_dev = configs_exclude.to(device=device)
 
-        # Merge results while preserving order (importance ranking from each GPU)
-        # Handle empty results case
-        result_device = devices[0]
+                _find_relative = getattr(
+                    self._load_module(device.type, configs_i_chunk.size(1), self.particle_cut),
+                    "find_relative",
+                )
+                configs_j_chunk = _find_relative(
+                    configs_i_chunk, torch.view_as_real(psi_i_chunk), count_selected, site, kind, coef, configs_exclude_dev
+                )
+                pending_results.append((configs_j_chunk, None))
+
+        # Synchronize and collect results
+        results: list[torch.Tensor] = []
+        for configs_j_chunk, stream in pending_results:
+            if stream is not None:
+                stream.synchronize()
+            results.append(configs_j_chunk.to(device=result_device, non_blocking=False))
+
+        # Handle empty results
         if len(results) == 0:
-            # Return empty tensor with correct shape
             return torch.empty(0, configs_i.size(1), dtype=configs_i.dtype, device=result_device)
 
-        # torch.unique with sorted=True returns unique in order of first occurrence
-        # This preserves the relative importance ordering from each GPU
+        # Merge with sorted=True to preserve importance ordering
         all_configs = torch.cat(results, dim=0)
         unique_configs = torch.unique(all_configs, sorted=True, dim=0)
 
         # Exclude configs that appear in configs_exclude
-        # Build a mask to filter out excluded configurations
         configs_exclude_dev = configs_exclude.to(device=result_device)
-
-        # Check if each unique_config is in configs_exclude
-        # Use broadcasting to compare: unique_configs vs configs_exclude
-        # Shape: [n_unique, 1, n_qubytes] vs [1, n_exclude, n_qubytes]
-        # Result: [n_unique, n_exclude] boolean matrix, then check if any match
         exclude_mask = (unique_configs.unsqueeze(1) == configs_exclude_dev.unsqueeze(0)).all(dim=-1).any(dim=-1)
-        # Keep configurations that are NOT in configs_exclude
         filtered_configs = unique_configs[~exclude_mask]
 
-        # Return up to count_selected
         if filtered_configs.size(0) > count_selected:
             filtered_configs = filtered_configs[:count_selected]
         return filtered_configs
@@ -376,7 +426,6 @@ class Hamiltonian:
             configs_exclude = configs_i
 
         if devices is None or len(devices) <= 1:
-            # Single device case: use original implementation
             device = devices[0] if devices else configs_i.device
             site, kind, coef = self._prepare_data_for_device(device)
             configs_i_dev = configs_i.to(device=device)
@@ -391,65 +440,87 @@ class Hamiltonian:
             )
             return configs_j, torch.view_as_complex(psi_j_real)
 
-        # Multi-device case: split configs_i across devices and merge results
+        # Multi-device case: parallel execution using CUDA streams
         n_devices = len(devices)
         batch_size_i = configs_i.size(0)
         chunk_size = batch_size_i // n_devices
         remainder = batch_size_i % n_devices
 
-        results_configs: list[torch.Tensor] = []
-        results_psi: list[torch.Tensor] = []
+        # Pre-prepare Hamiltonian data for all devices
+        for device in devices:
+            self._prepare_data_for_device(device)
+
+        result_device = devices[0]
+
+        # Launch all computations in parallel
+        pending_results: list[tuple[torch.Tensor, torch.Tensor, torch.cuda.Stream | None]] = []
+
         for idx, device in enumerate(devices):
-            # Calculate chunk indices
             start_idx = idx * chunk_size + min(idx, remainder)
             end_idx = start_idx + chunk_size + (1 if idx < remainder else 0)
 
-            # Skip empty chunks
             if start_idx >= end_idx:
                 continue
 
-            # Prepare data for this device
             site, kind, coef = self._prepare_data_for_device(device)
+            stream = _get_stream(device)
 
-            # Move chunk to device
-            configs_i_chunk = configs_i[start_idx:end_idx].to(device=device)
-            psi_i_chunk = psi_i[start_idx:end_idx].to(device=device)
-            configs_exclude_dev = configs_exclude.to(device=device)
+            if stream is not None:
+                with torch.cuda.stream(stream):
+                    configs_i_chunk = configs_i[start_idx:end_idx].to(device=device, non_blocking=True)
+                    psi_i_chunk = psi_i[start_idx:end_idx].to(device=device, non_blocking=True)
+                    configs_exclude_dev = configs_exclude.to(device=device, non_blocking=True)
 
-            # Execute on device
-            _list_relative = getattr(
-                self._load_module(device.type, configs_i_chunk.size(1), self.particle_cut),
-                "list_relative",
-            )
-            configs_j_chunk, psi_j_chunk_real = _list_relative(
-                configs_i_chunk, torch.view_as_real(psi_i_chunk), site, kind, coef, configs_exclude_dev
-            )
-            psi_j_chunk = torch.view_as_complex(psi_j_chunk_real)
-            results_configs.append(configs_j_chunk.to(device=devices[0]))
-            results_psi.append(psi_j_chunk.to(device=devices[0]))
+                    _list_relative = getattr(
+                        self._load_module(device.type, configs_i_chunk.size(1), self.particle_cut),
+                        "list_relative",
+                    )
+                    configs_j_chunk, psi_j_chunk_real = _list_relative(
+                        configs_i_chunk, torch.view_as_real(psi_i_chunk), site, kind, coef, configs_exclude_dev
+                    )
+                    psi_j_chunk = torch.view_as_complex(psi_j_chunk_real)
+                    pending_results.append((configs_j_chunk, psi_j_chunk, stream))
+            else:
+                configs_i_chunk = configs_i[start_idx:end_idx].to(device=device)
+                psi_i_chunk = psi_i[start_idx:end_idx].to(device=device)
+                configs_exclude_dev = configs_exclude.to(device=device)
 
-        # Merge results: concatenate and deduplicate with amplitude accumulation
-        result_device = devices[0]
+                _list_relative = getattr(
+                    self._load_module(device.type, configs_i_chunk.size(1), self.particle_cut),
+                    "list_relative",
+                )
+                configs_j_chunk, psi_j_chunk_real = _list_relative(
+                    configs_i_chunk, torch.view_as_real(psi_i_chunk), site, kind, coef, configs_exclude_dev
+                )
+                psi_j_chunk = torch.view_as_complex(psi_j_chunk_real)
+                pending_results.append((configs_j_chunk, psi_j_chunk, None))
 
-        # Handle empty results case
+        # Synchronize and collect results
+        results_configs: list[torch.Tensor] = []
+        results_psi: list[torch.Tensor] = []
+
+        for configs_j_chunk, psi_j_chunk, stream in pending_results:
+            if stream is not None:
+                stream.synchronize()
+            results_configs.append(configs_j_chunk.to(device=result_device, non_blocking=False))
+            results_psi.append(psi_j_chunk.to(device=result_device, non_blocking=False))
+
+        # Handle empty results
         if len(results_configs) == 0:
             return torch.empty(0, configs_i.size(1), dtype=configs_i.dtype, device=result_device), \
                    torch.empty(0, dtype=psi_i.dtype, device=result_device)
 
+        # Merge and deduplicate
         all_configs = torch.cat(results_configs, dim=0)
         all_psi = torch.cat(results_psi, dim=0)
 
-        # Deduplicate and sum amplitudes
         unique_configs, inverse_indices = torch.unique(all_configs, return_inverse=True, dim=0)
-        # Sum amplitudes for each unique configuration
         unique_psi = torch.zeros(unique_configs.size(0), dtype=all_psi.dtype, device=result_device)
         unique_psi.scatter_add_(0, inverse_indices, all_psi)
 
         # Exclude configs that appear in configs_exclude
         configs_exclude_dev = configs_exclude.to(device=result_device)
-        # Check if each unique_config is in configs_exclude
         exclude_mask = (unique_configs.unsqueeze(1) == configs_exclude_dev.unsqueeze(0)).all(dim=-1).any(dim=-1)
-        # Keep configurations that are NOT in configs_exclude
         filtered_configs = unique_configs[~exclude_mask]
         filtered_psi = unique_psi[~exclude_mask]
 
@@ -472,7 +543,6 @@ class Hamiltonian:
             A complex64 tensor of shape [batch_size] representing the diagonal term of the Hamiltonian for the given configurations.
         """
         if devices is None or len(devices) <= 1:
-            # Single device case: use original implementation
             device = devices[0] if devices else configs.device
             site, kind, coef = self._prepare_data_for_device(device)
             configs_dev = configs.to(device=device)
@@ -483,38 +553,62 @@ class Hamiltonian:
             psi_result = torch.view_as_complex(_diagonal_term(configs_dev, site, kind, coef))
             return psi_result
 
-        # Multi-device case: split configs across devices and concatenate results
+        # Multi-device case: parallel execution using CUDA streams
         n_devices = len(devices)
         batch_size = configs.size(0)
         chunk_size = batch_size // n_devices
         remainder = batch_size % n_devices
 
-        results: list[torch.Tensor] = []
+        # Pre-prepare Hamiltonian data for all devices
+        for device in devices:
+            self._prepare_data_for_device(device)
+
+        result_device = devices[0]
+
+        # Launch all computations in parallel
+        pending_results: list[tuple[torch.Tensor, int, int, torch.cuda.Stream | None]] = []
+
         for idx, device in enumerate(devices):
-            # Calculate chunk indices
             start_idx = idx * chunk_size + min(idx, remainder)
             end_idx = start_idx + chunk_size + (1 if idx < remainder else 0)
 
-            # Skip empty chunks
             if start_idx >= end_idx:
                 continue
 
-            # Prepare data for this device
             site, kind, coef = self._prepare_data_for_device(device)
+            stream = _get_stream(device)
 
-            # Move chunk to device
-            configs_chunk = configs[start_idx:end_idx].to(device=device)
+            if stream is not None:
+                with torch.cuda.stream(stream):
+                    configs_chunk = configs[start_idx:end_idx].to(device=device, non_blocking=True)
 
-            # Execute on device
-            _diagonal_term = getattr(
-                self._load_module(device.type, configs_chunk.size(1), self.particle_cut),
-                "diagonal_term",
-            )
-            psi_chunk = torch.view_as_complex(_diagonal_term(configs_chunk, site, kind, coef))
-            results.append(psi_chunk)
+                    _diagonal_term = getattr(
+                        self._load_module(device.type, configs_chunk.size(1), self.particle_cut),
+                        "diagonal_term",
+                    )
+                    psi_chunk = torch.view_as_complex(_diagonal_term(configs_chunk, site, kind, coef))
+                    pending_results.append((psi_chunk, start_idx, end_idx, stream))
+            else:
+                configs_chunk = configs[start_idx:end_idx].to(device=device)
 
-        # Concatenate results
-        result_device = devices[0]
+                _diagonal_term = getattr(
+                    self._load_module(device.type, configs_chunk.size(1), self.particle_cut),
+                    "diagonal_term",
+                )
+                psi_chunk = torch.view_as_complex(_diagonal_term(configs_chunk, site, kind, coef))
+                pending_results.append((psi_chunk, start_idx, end_idx, None))
+
+        # Synchronize and collect results in order
+        # Sort by start_idx to maintain order
+        pending_results.sort(key=lambda x: x[1])
+
+        results: list[torch.Tensor] = []
+        for psi_chunk, start_idx, end_idx, stream in pending_results:
+            if stream is not None:
+                stream.synchronize()
+            results.append(psi_chunk.to(device=result_device, non_blocking=False))
+
         if len(results) == 0:
             return torch.empty(0, dtype=torch.complex64, device=result_device)
-        return torch.cat(results, dim=0).to(device=result_device)
+
+        return torch.cat(results, dim=0)
