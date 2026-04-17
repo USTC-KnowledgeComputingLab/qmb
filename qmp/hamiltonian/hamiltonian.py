@@ -174,7 +174,7 @@ class Hamiltonian:
         torch.Tensor
             A tensor of shape [batch_size_j] representing the output amplitudes on the given configurations.
         """
-        if devices is None or len(devices) == 1:
+        if devices is None or len(devices) <= 1:
             # Single device case: use original implementation
             device = devices[0] if devices else configs_i.device
             site, kind, coef = self._prepare_data_for_device(device)
@@ -265,7 +265,7 @@ class Hamiltonian:
         if configs_exclude is None:
             configs_exclude = configs_i
 
-        if devices is None or len(devices) == 1:
+        if devices is None or len(devices) <= 1:
             # Single device case: use original implementation
             device = devices[0] if devices else configs_i.device
             site, kind, coef = self._prepare_data_for_device(device)
@@ -317,6 +317,12 @@ class Hamiltonian:
             results.append(configs_j_chunk.to(device=devices[0]))
 
         # Merge results while preserving order (importance ranking from each GPU)
+        # Handle empty results case
+        result_device = devices[0]
+        if len(results) == 0:
+            # Return empty tensor with correct shape
+            return torch.empty(0, configs_i.size(1), dtype=configs_i.dtype, device=result_device)
+
         # torch.unique with sorted=True returns unique in order of first occurrence
         # This preserves the relative importance ordering from each GPU
         all_configs = torch.cat(results, dim=0)
@@ -324,7 +330,6 @@ class Hamiltonian:
 
         # Exclude configs that appear in configs_exclude
         # Build a mask to filter out excluded configurations
-        result_device = devices[0]
         configs_exclude_dev = configs_exclude.to(device=result_device)
 
         # Check if each unique_config is in configs_exclude
@@ -370,7 +375,7 @@ class Hamiltonian:
         if configs_exclude is None:
             configs_exclude = configs_i
 
-        if devices is None or len(devices) == 1:
+        if devices is None or len(devices) <= 1:
             # Single device case: use original implementation
             device = devices[0] if devices else configs_i.device
             site, kind, coef = self._prepare_data_for_device(device)
@@ -424,11 +429,17 @@ class Hamiltonian:
             results_psi.append(psi_j_chunk.to(device=devices[0]))
 
         # Merge results: concatenate and deduplicate with amplitude accumulation
+        result_device = devices[0]
+
+        # Handle empty results case
+        if len(results_configs) == 0:
+            return torch.empty(0, configs_i.size(1), dtype=configs_i.dtype, device=result_device), \
+                   torch.empty(0, dtype=psi_i.dtype, device=result_device)
+
         all_configs = torch.cat(results_configs, dim=0)
         all_psi = torch.cat(results_psi, dim=0)
 
         # Deduplicate and sum amplitudes
-        result_device = devices[0]
         unique_configs, inverse_indices = torch.unique(all_configs, return_inverse=True, dim=0)
         # Sum amplitudes for each unique configuration
         unique_psi = torch.zeros(unique_configs.size(0), dtype=all_psi.dtype, device=result_device)
@@ -460,7 +471,7 @@ class Hamiltonian:
         torch.Tensor
             A complex64 tensor of shape [batch_size] representing the diagonal term of the Hamiltonian for the given configurations.
         """
-        if devices is None or len(devices) == 1:
+        if devices is None or len(devices) <= 1:
             # Single device case: use original implementation
             device = devices[0] if devices else configs.device
             site, kind, coef = self._prepare_data_for_device(device)
@@ -503,4 +514,7 @@ class Hamiltonian:
             results.append(psi_chunk)
 
         # Concatenate results
-        return torch.cat(results, dim=0).to(device=devices[0])
+        result_device = devices[0]
+        if len(results) == 0:
+            return torch.empty(0, dtype=torch.complex64, device=result_device)
+        return torch.cat(results, dim=0).to(device=result_device)
