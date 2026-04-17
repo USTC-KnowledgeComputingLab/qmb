@@ -58,8 +58,14 @@ class Model(ModelProto[ModelConfig]):
         )
         logging.info("Internal Hamiltonian representation successfully created.")
 
-    def apply_within(self, configs_i: torch.Tensor, psi_i: torch.Tensor, configs_j: torch.Tensor) -> torch.Tensor:
-        return self.hamiltonian.apply_within(configs_i, psi_i, configs_j)
+    def apply_within(
+        self,
+        configs_i: torch.Tensor,
+        psi_i: torch.Tensor,
+        configs_j: torch.Tensor,
+        devices: list[torch.device] | None = None,
+    ) -> torch.Tensor:
+        return self.hamiltonian.apply_within(configs_i, psi_i, configs_j, devices)
 
     def find_relative(
         self,
@@ -67,19 +73,21 @@ class Model(ModelProto[ModelConfig]):
         psi_i: torch.Tensor,
         count_selected: int,
         configs_exclude: torch.Tensor | None = None,
+        devices: list[torch.device] | None = None,
     ) -> torch.Tensor:
-        return self.hamiltonian.find_relative(configs_i, psi_i, count_selected, configs_exclude)
+        return self.hamiltonian.find_relative(configs_i, psi_i, count_selected, configs_exclude, devices)
 
     def list_relative(
         self,
         configs_i: torch.Tensor,
         psi_i: torch.Tensor,
         configs_exclude: torch.Tensor | None = None,
+        devices: list[torch.device] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.hamiltonian.list_relative(configs_i, psi_i, configs_exclude)
+        return self.hamiltonian.list_relative(configs_i, psi_i, configs_exclude, devices)
 
-    def diagonal_term(self, configs: torch.Tensor) -> torch.Tensor:
-        return self.hamiltonian.diagonal_term(configs)
+    def diagonal_term(self, configs: torch.Tensor, devices: list[torch.device] | None = None) -> torch.Tensor:
+        return self.hamiltonian.diagonal_term(configs, devices)
 
     def show_config(self, config: torch.Tensor) -> str:
         string = "".join(f"{i:08b}"[::-1] for i in config.cpu().numpy())

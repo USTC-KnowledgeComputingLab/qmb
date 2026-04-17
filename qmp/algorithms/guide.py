@@ -12,6 +12,14 @@ from ..utility.context import RuntimeContext
 from ..utility.action_dict import action_dict
 
 
+def _get_devices_from_context(context: RuntimeContext) -> list[torch.device]:
+    """
+    Get the devices list from the runtime context.
+    """
+    assert context.devices is not None
+    return context.devices
+
+
 @dataclasses.dataclass
 class GuideConfig:
     """
@@ -49,6 +57,9 @@ class GuideConfig:
         sampling = context.create_network(runtime_config.sampling, model, checkpoint_data.get("sampling"))
 
         data = checkpoint_data
+
+        # Get devices for multi-GPU computation
+        devices = _get_devices_from_context(context)
 
         # Create Optimizers
         # We use the same optimizer configuration for both network and sampling
@@ -96,7 +107,7 @@ class GuideConfig:
                     [
                         configs_src_network,
                         model.find_relative(
-                            configs_src_network, psi_src_network, self.relative_count - len(configs_src_network)
+                            configs_src_network, psi_src_network, self.relative_count - len(configs_src_network), devices=devices
                         ),
                     ]
                 )
@@ -107,7 +118,7 @@ class GuideConfig:
                     [
                         configs_src_sampling,
                         model.find_relative(
-                            configs_src_sampling, psi_src_sampling, self.relative_count - len(configs_src_sampling)
+                            configs_src_sampling, psi_src_sampling, self.relative_count - len(configs_src_sampling), devices=devices
                         ),
                     ]
                 )
@@ -118,7 +129,7 @@ class GuideConfig:
                 psi_src = network(configs_src)
                 with torch.no_grad():
                     psi_dst = network(configs_dst)
-                    hamiltonian_psi_dst = model.apply_within(configs_dst, psi_dst, configs_src)
+                    hamiltonian_psi_dst = model.apply_within(configs_dst, psi_dst, configs_src, devices)
                 psi_src_reweight = psi_src.conj() * reweight_sampling
                 num = psi_src_reweight @ hamiltonian_psi_dst
                 den = psi_src_reweight @ psi_src.detach()
@@ -132,7 +143,7 @@ class GuideConfig:
                     configs_dst = configs_dst_network
                     psi_src = network(configs_src)
                     psi_dst = network(configs_dst)
-                    hamiltonian_psi_dst = model.apply_within(configs_dst, psi_dst, configs_src)
+                    hamiltonian_psi_dst = model.apply_within(configs_dst, psi_dst, configs_src, devices)
                     psi_src_reweight = psi_src.conj() * reweight_network
                     num = psi_src_reweight @ hamiltonian_psi_dst
                     den = psi_src_reweight @ psi_src.detach()
@@ -145,7 +156,7 @@ class GuideConfig:
                 with torch.no_grad():
                     psi_src = network(configs_src)
                     psi_dst = network(configs_dst)
-                    hamiltonian_psi_dst = model.apply_within(configs_dst, psi_dst, configs_src)
+                    hamiltonian_psi_dst = model.apply_within(configs_dst, psi_dst, configs_src, devices)
                     psi_src_reweight = psi_src.conj() * reweight_sampling
                     num = psi_src_reweight @ hamiltonian_psi_dst
                     den = psi_src_reweight @ psi_src

@@ -18,6 +18,14 @@ from ..utility.model_dict import ModelProto
 from ..utility.optimizer import scale_learning_rate
 
 
+def _get_devices_from_context(context: RuntimeContext) -> list[torch.device]:
+    """
+    Get the devices list from the runtime context.
+    """
+    assert context.devices is not None
+    return context.devices
+
+
 @dataclasses.dataclass
 class _DynamicLanczos:
     """
@@ -35,6 +43,7 @@ class _DynamicLanczos:
     first_extend: bool
     eigen_count: int = 1
     period: int = 256
+    devices: list[torch.device] | None = None
 
     def _extend(self, psi: torch.Tensor, basic_configs: torch.Tensor | None = None) -> None:
         if basic_configs is None:
@@ -45,7 +54,7 @@ class _DynamicLanczos:
         logging.info("Number of core configurations: %d", count_core)
 
         self.configs = torch.cat(
-            [self.configs, self.model.find_relative(basic_configs, psi, self.count_extend, self.configs)]
+            [self.configs, self.model.find_relative(basic_configs, psi, self.count_extend, self.configs, self.devices)]
         )
         count_selected = len(self.configs)
         self.psi = torch.nn.functional.pad(self.psi, (0, count_selected - count_core))
@@ -80,7 +89,7 @@ class _DynamicLanczos:
                 selected = (psi.conj() * psi).real.argsort(descending=True)[: self.count_extend]
                 configs = self.configs
                 self._extend(psi[selected], self.configs[selected])
-                psi = self.model.apply_within(configs, psi, self.configs)
+                psi = self._apply_within(configs, psi, self.configs)
             for _, [alpha, beta, v] in zip(range(1 + self.step), self._run()):
                 yield package(self._eigh_tridiagonal(alpha, beta, v))
         elif self.single_extend:
@@ -181,6 +190,7 @@ class _DynamicLanczos:
                 configs_i[start_index:end_index],
                 psi_i[start_index:end_index],
                 configs_j,
+                self.devices,
             )
             if result is None:
                 result = local_result
@@ -429,6 +439,7 @@ class HaarConfig:
             target_energy: torch.Tensor
             lanczos_results: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
 
+            devices = _get_devices_from_context(context)
             for lanczos_results in _DynamicLanczos(
                 model=model,
                 configs=configs,
@@ -441,6 +452,7 @@ class HaarConfig:
                 first_extend=self.krylov_extend_first,
                 eigen_count=self.krylov_eigen_count,
                 period=self.krylov_period,
+                devices=devices,
             ).run():
                 target_energy, configs, original_psi = lanczos_results[0]
                 logging.info(
@@ -546,7 +558,7 @@ class HaarConfig:
 
             loss = typing.cast(torch.Tensor, torch.enable_grad(closure)())  # type: ignore[no-untyped-call,call-arg]
             psi: torch.Tensor = loss.psi  # type: ignore[attr-defined]
-            final_energy = ((psi.conj() @ model.apply_within(configs, psi, configs)) / (psi.conj() @ psi)).real
+            final_energy = ((psi.conj() @ model.apply_within(configs, psi, configs, devices)) / (psi.conj() @ psi)).real
             logging.info(
                 "Loss during local optimization: %.10f, Final energy: %.10f, Target energy: %.10f, Reference energy: %.10f, Final error: %.10f",
                 loss.item(),

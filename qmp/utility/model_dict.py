@@ -125,7 +125,13 @@ class ModelProto(typing.Protocol[ModelConfig]):
             The config of model.
         """
 
-    def apply_within(self, configs_i: torch.Tensor, psi_i: torch.Tensor, configs_j: torch.Tensor) -> torch.Tensor:
+    def apply_within(
+        self,
+        configs_i: torch.Tensor,
+        psi_i: torch.Tensor,
+        configs_j: torch.Tensor,
+        devices: list[torch.device] | None = None,
+    ) -> torch.Tensor:
         """
         Applies the Hamiltonian to the given vector.
 
@@ -137,6 +143,8 @@ class ModelProto(typing.Protocol[ModelConfig]):
             The amplitudes of the configurations.
         configs_j : torch.Tensor
             The configurations subspace for the result of the Hamiltonian application.
+        devices : list[torch.device] | None
+            A list of devices to use for computation. If None, uses the default device.
 
         Returns
         -------
@@ -150,6 +158,7 @@ class ModelProto(typing.Protocol[ModelConfig]):
         psi_i: torch.Tensor,
         count_selected: int,
         configs_exclude: torch.Tensor | None = None,
+        devices: list[torch.device] | None = None,
     ) -> torch.Tensor:
         """
         Find relative configurations to the given configurations.
@@ -164,6 +173,8 @@ class ModelProto(typing.Protocol[ModelConfig]):
             The number of relative configurations to find.
         configs_exclude : torch.Tensor, optional
             The configurations to exclude from the result.
+        devices : list[torch.device] | None
+            A list of devices to use for computation. If None, uses the default device.
 
         Returns
         -------
@@ -176,6 +187,7 @@ class ModelProto(typing.Protocol[ModelConfig]):
         configs_i: torch.Tensor,
         psi_i: torch.Tensor,
         configs_exclude: torch.Tensor | None = None,
+        devices: list[torch.device] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         List all unique relative configurations and their accumulated amplitudes.
@@ -188,6 +200,8 @@ class ModelProto(typing.Protocol[ModelConfig]):
             Input amplitudes (complex64).
         configs_exclude : torch.Tensor, optional
             Configurations to exclude from the result. Defaults to configs_i.
+        devices : list[torch.device] | None
+            A list of devices to use for computation. If None, uses the default device.
 
         Returns
         -------
@@ -196,7 +210,7 @@ class ModelProto(typing.Protocol[ModelConfig]):
             and psi_j are their summed amplitudes from all connected paths.
         """
 
-    def diagonal_term(self, configs: torch.Tensor) -> torch.Tensor:
+    def diagonal_term(self, configs: torch.Tensor, devices: list[torch.device] | None = None) -> torch.Tensor:
         """
         Calculate the diagonal term for the given configurations.
 
@@ -204,6 +218,8 @@ class ModelProto(typing.Protocol[ModelConfig]):
         ----------
         configs : torch.Tensor
             The configurations to calculate the diagonal term for.
+        devices : list[torch.device] | None
+            A list of devices to use for computation. If None, uses the default device.
 
         Returns
         -------
