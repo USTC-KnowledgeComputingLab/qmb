@@ -3,6 +3,7 @@ This file contains the Hamiltonian class, which is used to store the Hamiltonian
 """
 
 import os
+import time
 import logging
 import platformdirs
 import typing
@@ -184,18 +185,12 @@ class Hamiltonian:
         start_idx = rank * chunk_size + min(rank, remainder)
         end_idx = start_idx + chunk_size + (1 if rank < remainder else 0)
 
-        if start_idx >= end_idx:
-            # Empty chunk for this rank
-            local_result = torch.zeros(configs_j.size(0), dtype=torch.complex64, device=device)
-        else:
-            configs_i_chunk = configs_i[start_idx:end_idx]
-            psi_i_chunk = psi_i[start_idx:end_idx]
-            local_result = self._apply_within_local(configs_i_chunk, psi_i_chunk, configs_j, device)
-
         # Gather results from all ranks to rank 0
         if rank == 0:
+            t_start = time.time()
 
             # Send RPC requests to all other ranks FIRST (asynchronous)
+            t_rpc_send_start = time.time()
             rpc_refs = []
             for target_rank in range(1, world_size):
                 rpc_ref = rpc.remote(
@@ -212,30 +207,50 @@ class Hamiltonian:
                     ),
                 )
                 rpc_refs.append(rpc_ref)
-
+            t_rpc_send_end = time.time()
 
             # Now compute local chunk while RPC is running remotely
+            t_local_compute_start = time.time()
             if start_idx >= end_idx:
                 local_result = torch.zeros(configs_j.size(0), dtype=torch.complex64, device=device)
             else:
                 configs_i_chunk = configs_i[start_idx:end_idx]
                 psi_i_chunk = psi_i[start_idx:end_idx]
                 local_result = self._apply_within_local(configs_i_chunk, psi_i_chunk, configs_j, device)
-
+            t_local_compute_end = time.time()
 
             # Collect results from all RPC calls
+            t_rpc_collect_start = time.time()
             results = [local_result]
             for rpc_ref in rpc_refs:
                 results.append(rpc_ref.to_here().to(device))
+            t_rpc_collect_end = time.time()
 
             # Sum all results
+            t_sum_start = time.time()
             final_result = torch.zeros(configs_j.size(0), dtype=torch.complex64, device=device)
             for r in results:
                 final_result = final_result + r
+            t_sum_end = time.time()
+
+            t_total = time.time() - t_start
+
+            logging.info("apply_within: batch_size=%d, rpc_send=%.3fs, local_compute=%.3fs, rpc_collect=%.3fs, sum=%.3fs, total=%.3fs",
+                        batch_size_i,
+                        t_rpc_send_end - t_rpc_send_start,
+                        t_local_compute_end - t_local_compute_start,
+                        t_rpc_collect_end - t_rpc_collect_start,
+                        t_sum_end - t_sum_start,
+                        t_total)
             return final_result
         else:
-            # Non-rank-0 workers just return local result (rank 0 will collect)
-            return local_result
+            # Non-rank-0 workers compute their local chunk (for RPC)
+            if start_idx >= end_idx:
+                return torch.zeros(configs_j.size(0), dtype=torch.complex64, device=device)
+            else:
+                configs_i_chunk = configs_i[start_idx:end_idx]
+                psi_i_chunk = psi_i[start_idx:end_idx]
+                return self._apply_within_local(configs_i_chunk, psi_i_chunk, configs_j, device)
 
     def _apply_within_local(
         self,
@@ -306,15 +321,11 @@ class Hamiltonian:
         start_idx = rank * chunk_size + min(rank, remainder)
         end_idx = start_idx + chunk_size + (1 if rank < remainder else 0)
 
-        if start_idx >= end_idx:
-            local_configs = torch.empty(0, configs_i.size(1), dtype=configs_i.dtype, device=device)
-        else:
-            configs_i_chunk = configs_i[start_idx:end_idx]
-            psi_i_chunk = psi_i[start_idx:end_idx]
-            local_configs = self._find_relative_local(configs_i_chunk, psi_i_chunk, count_selected, configs_exclude, device)
-
         if rank == 0:
+            t_start = time.time()
+
             # Send RPC requests to all other ranks FIRST (asynchronous)
+            t_rpc_send_start = time.time()
             rpc_refs = []
             for target_rank in range(1, world_size):
                 rpc_ref = rpc.remote(
@@ -332,37 +343,74 @@ class Hamiltonian:
                     ),
                 )
                 rpc_refs.append(rpc_ref)
+            t_rpc_send_end = time.time()
 
             # Now compute local chunk while RPC is running remotely
+            t_local_compute_start = time.time()
             if start_idx >= end_idx:
                 local_configs = torch.empty(0, configs_i.size(1), dtype=configs_i.dtype, device=device)
             else:
                 configs_i_chunk = configs_i[start_idx:end_idx]
                 psi_i_chunk = psi_i[start_idx:end_idx]
                 local_configs = self._find_relative_local(configs_i_chunk, psi_i_chunk, count_selected, configs_exclude, device)
+            t_local_compute_end = time.time()
 
             # Collect results from all RPC calls
+            t_rpc_collect_start = time.time()
             results = [local_configs]
             for rpc_ref in rpc_refs:
                 results.append(rpc_ref.to_here().to(device))
+            t_rpc_collect_end = time.time()
 
             # Merge and deduplicate
             if len(results) == 0 or all(r.size(0) == 0 for r in results):
+                logging.info("find_relative: rpc_send=%.3fs, local_compute=%.3fs, rpc_collect=%.3fs",
+                            t_rpc_send_end - t_rpc_send_start,
+                            t_local_compute_end - t_local_compute_start,
+                            t_rpc_collect_end - t_rpc_collect_start)
                 return torch.empty(0, configs_i.size(1), dtype=configs_i.dtype, device=device)
 
+            t_merge_start = time.time()
             all_configs = torch.cat([r for r in results if r.size(0) > 0], dim=0)
+            t_merge_end = time.time()
+
+            t_unique_start = time.time()
             unique_configs = torch.unique(all_configs, sorted=True, dim=0)
+            t_unique_end = time.time()
 
             # Exclude configs_exclude
+            t_exclude_start = time.time()
             configs_exclude_dev = configs_exclude.to(device)
             exclude_mask = (unique_configs.unsqueeze(1) == configs_exclude_dev.unsqueeze(0)).all(dim=-1).any(dim=-1)
             filtered_configs = unique_configs[~exclude_mask]
+            t_exclude_end = time.time()
 
+            t_slice_start = time.time()
             if filtered_configs.size(0) > count_selected:
                 filtered_configs = filtered_configs[:count_selected]
+            t_slice_end = time.time()
+
+            t_total = time.time() - t_start
+
+            logging.info("find_relative: batch_size=%d, rpc_send=%.3fs, local_compute=%.3fs, rpc_collect=%.3fs, merge=%.3fs, unique=%.3fs, exclude=%.3fs, slice=%.3fs, total=%.3fs",
+                        batch_size_i,
+                        t_rpc_send_end - t_rpc_send_start,
+                        t_local_compute_end - t_local_compute_start,
+                        t_rpc_collect_end - t_rpc_collect_start,
+                        t_merge_end - t_merge_start,
+                        t_unique_end - t_unique_start,
+                        t_exclude_end - t_exclude_start,
+                        t_slice_end - t_slice_start,
+                        t_total)
             return filtered_configs
         else:
-            return local_configs
+            # Non-rank-0 workers just return their local result (for RPC)
+            if start_idx >= end_idx:
+                return torch.empty(0, configs_i.size(1), dtype=configs_i.dtype, device=device)
+            else:
+                configs_i_chunk = configs_i[start_idx:end_idx]
+                psi_i_chunk = psi_i[start_idx:end_idx]
+                return self._find_relative_local(configs_i_chunk, psi_i_chunk, count_selected, configs_exclude, device)
 
     def _find_relative_local(
         self,
