@@ -5,6 +5,7 @@ Main entry point for the qmp command-line interface.
 import logging
 import pathlib
 import importlib
+import datetime
 import dacite
 import hydra
 import omegaconf
@@ -18,7 +19,14 @@ from .utility.distributed import (
     get_local_node_addr,
     init_rpc_worker,
     shutdown_rpc,
+    get_rank,
 )
+
+
+def _timestamp_log(rank: int, msg: str) -> None:
+    """Print a timestamped log message for debugging parallel execution."""
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+    logging.info("[DEBUG] Rank %d | %s | %s", rank, ts, msg)
 
 
 def run_main(runtime_config: omegaconf.DictConfig) -> None:
@@ -75,9 +83,13 @@ def worker_main(
     """
     global_rank, node_addr, device = local_devices[local_rank]
 
+    _timestamp_log(global_rank, "worker_main START")
+
     init_rpc_worker(global_rank, world_size, device, master_addr, master_port)
-    logging.info("Rank %d (worker) waiting for RPC calls", global_rank)
+    _timestamp_log(global_rank, "RPC initialized, waiting for calls")
+
     shutdown_rpc()
+    _timestamp_log(global_rank, "worker_main END")
 
 
 @hydra.main(version_base=None, config_path=str(pathlib.Path().resolve()), config_name="config")
@@ -137,15 +149,20 @@ def main(runtime_config: omegaconf.DictConfig) -> None:
     # Main process handles the first local device
     main_rank, main_node, main_device = local_devices[0]
 
+    _timestamp_log(main_rank, "main process START")
+
     init_rpc_worker(main_rank, world_size, main_device, master_addr, master_port)
+    _timestamp_log(main_rank, "RPC initialized")
 
     if main_rank == 0:
-        logging.info("Rank 0 (orchestrator) starting main algorithm")
+        _timestamp_log(main_rank, "run_main START")
         run_main(runtime_config)
+        _timestamp_log(main_rank, "run_main END")
     else:
-        logging.info("Rank %d (worker) waiting for RPC calls", main_rank)
+        _timestamp_log(main_rank, "waiting for RPC calls")
 
     shutdown_rpc()
+    _timestamp_log(main_rank, "main process END")
 
     # Wait for spawned workers to finish
     if spawn_context is not None:
