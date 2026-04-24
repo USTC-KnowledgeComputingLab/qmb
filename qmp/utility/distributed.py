@@ -216,7 +216,7 @@ def set_timing_file(path: str) -> None:
     # Write CSV header if file doesn't exist
     if not os.path.exists(path):
         with open(path, "w") as f:
-            f.write("timestamp,operation,batch_size,world_size,rpc_send,local_compute,rpc_collect,merge,unique,exclude,slice,sum,total\n")
+            f.write("timestamp,operation,batch_size,world_size,rpc_send,local_compute,rpc_collect,merge,unique,slice,sum,total\n")
 
 
 def log_timing(
@@ -227,7 +227,6 @@ def log_timing(
     rpc_collect: float,
     merge: float = 0.0,
     unique: float = 0.0,
-    exclude: float = 0.0,
     slice_time: float = 0.0,
     sum_time: float = 0.0,
     total: float = 0.0,
@@ -238,7 +237,7 @@ def log_timing(
     world_size = get_world_size()
     timestamp = time.time()
     with open(_TIMING_FILE, "a") as f:
-        f.write(f"{timestamp},{operation},{batch_size},{world_size},{rpc_send:.6f},{local_compute:.6f},{rpc_collect:.6f},{merge:.6f},{unique:.6f},{exclude:.6f},{slice_time:.6f},{sum_time:.6f},{total:.6f}\n")
+        f.write(f"{timestamp},{operation},{batch_size},{world_size},{rpc_send:.6f},{local_compute:.6f},{rpc_collect:.6f},{merge:.6f},{unique:.6f},{slice_time:.6f},{sum_time:.6f},{total:.6f}\n")
 
 
 def _set_global_state(rank: int, world_size: int, device: torch.device) -> None:

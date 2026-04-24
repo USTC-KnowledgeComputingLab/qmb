@@ -384,16 +384,10 @@ class Hamiltonian:
             unique_configs = torch.unique(all_configs, sorted=True, dim=0)
             t_unique_end = time.time()
 
-            # Exclude configs_exclude
-            t_exclude_start = time.time()
-            configs_exclude_dev = configs_exclude.to(device)
-            exclude_mask = (unique_configs.unsqueeze(1) == configs_exclude_dev.unsqueeze(0)).all(dim=-1).any(dim=-1)
-            filtered_configs = unique_configs[~exclude_mask]
-            t_exclude_end = time.time()
-
+            # Slice to count_selected (exclude is already done in CUDA kernel)
             t_slice_start = time.time()
-            if filtered_configs.size(0) > count_selected:
-                filtered_configs = filtered_configs[:count_selected]
+            if unique_configs.size(0) > count_selected:
+                unique_configs = unique_configs[:count_selected]
             t_slice_end = time.time()
 
             t_total = time.time() - t_start
@@ -406,11 +400,10 @@ class Hamiltonian:
                 rpc_collect=t_rpc_collect_end - t_rpc_collect_start,
                 merge=t_merge_end - t_merge_start,
                 unique=t_unique_end - t_unique_start,
-                exclude=t_exclude_end - t_exclude_start,
                 slice_time=t_slice_end - t_slice_start,
                 total=t_total,
             )
-            return filtered_configs
+            return unique_configs
         else:
             # Non-rank-0 workers just return their local result (for RPC)
             if start_idx >= end_idx:
