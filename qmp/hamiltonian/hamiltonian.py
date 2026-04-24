@@ -212,10 +212,11 @@ class Hamiltonian:
         # Gather results from all ranks to rank 0
         if rank == 0:
             _debug_log(rank, "apply_within: local done, calling RPC to other ranks")
-            results = [local_result]
+
+            # Send RPC requests to all other ranks in parallel
+            rpc_refs = []
             for target_rank in range(1, world_size):
-                # Send configs_i_chunk and psi_i_chunk to remote worker
-                remote_result = rpc.rpc_sync(
+                rpc_ref = rpc.remote(
                     f"rank_{target_rank}",
                     _remote_apply_within,
                     args=(
@@ -228,7 +229,12 @@ class Hamiltonian:
                         world_size,
                     ),
                 )
-                results.append(remote_result.to(device))
+                rpc_refs.append(rpc_ref)
+
+            # Collect results from all RPC calls
+            results = [local_result]
+            for rpc_ref in rpc_refs:
+                results.append(rpc_ref.to_here().to(device))
 
             # Sum all results
             final_result = torch.zeros(configs_j.size(0), dtype=torch.complex64, device=device)
@@ -317,9 +323,10 @@ class Hamiltonian:
             local_configs = self._find_relative_local(configs_i_chunk, psi_i_chunk, count_selected, configs_exclude, device)
 
         if rank == 0:
-            results = [local_configs]
+            # Send RPC requests to all other ranks in parallel
+            rpc_refs = []
             for target_rank in range(1, world_size):
-                remote_configs = rpc.rpc_sync(
+                rpc_ref = rpc.remote(
                     f"rank_{target_rank}",
                     _remote_find_relative,
                     args=(
@@ -333,7 +340,12 @@ class Hamiltonian:
                         count_selected,
                     ),
                 )
-                results.append(remote_configs.to(device))
+                rpc_refs.append(rpc_ref)
+
+            # Collect results from all RPC calls
+            results = [local_configs]
+            for rpc_ref in rpc_refs:
+                results.append(rpc_ref.to_here().to(device))
 
             # Merge and deduplicate
             if len(results) == 0 or all(r.size(0) == 0 for r in results):
@@ -429,10 +441,10 @@ class Hamiltonian:
             local_configs, local_psi = self._list_relative_local(configs_i_chunk, psi_i_chunk, configs_exclude, device)
 
         if rank == 0:
-            results_configs = [local_configs]
-            results_psi = [local_psi]
+            # Send RPC requests to all other ranks in parallel
+            rpc_refs = []
             for target_rank in range(1, world_size):
-                remote_configs, remote_psi = rpc.rpc_sync(
+                rpc_ref = rpc.remote(
                     f"rank_{target_rank}",
                     _remote_list_relative,
                     args=(
@@ -445,6 +457,13 @@ class Hamiltonian:
                         world_size,
                     ),
                 )
+                rpc_refs.append(rpc_ref)
+
+            # Collect results from all RPC calls
+            results_configs = [local_configs]
+            results_psi = [local_psi]
+            for rpc_ref in rpc_refs:
+                remote_configs, remote_psi = rpc_ref.to_here()
                 results_configs.append(remote_configs.to(device))
                 results_psi.append(remote_psi.to(device))
 
@@ -531,9 +550,10 @@ class Hamiltonian:
             local_psi = self._diagonal_term_local(configs_chunk, device)
 
         if rank == 0:
-            results = [(local_psi, start_idx)]
+            # Send RPC requests to all other ranks in parallel
+            rpc_refs = []
             for target_rank in range(1, world_size):
-                remote_psi, remote_start_idx = rpc.rpc_sync(
+                rpc_ref = rpc.remote(
                     f"rank_{target_rank}",
                     _remote_diagonal_term,
                     args=(
@@ -544,6 +564,12 @@ class Hamiltonian:
                         world_size,
                     ),
                 )
+                rpc_refs.append(rpc_ref)
+
+            # Collect results from all RPC calls
+            results = [(local_psi, start_idx)]
+            for rpc_ref in rpc_refs:
+                remote_psi, remote_start_idx = rpc_ref.to_here()
                 results.append((remote_psi.to(device), remote_start_idx))
 
             # Sort by start_idx and concatenate
