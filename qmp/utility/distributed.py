@@ -237,10 +237,11 @@ def init_rpc_worker(rank: int, world_size: int, device: torch.device, master_add
     if device.type == "cuda":
         torch.cuda.set_device(device)
 
-    # Initialize RPC
+    # Initialize RPC with only UV transport (TCP), disable IBV
     options = rpc.TensorPipeRpcBackendOptions(
         num_worker_threads=8,
         init_method=f"tcp://{master_addr}:{master_port}",
+        _transports=["uv"],  # Use UV (TCP) transport only, disable IBV
     )
 
     rpc.init_rpc(
