@@ -5,8 +5,6 @@ Main entry point for the qmp command-line interface.
 import logging
 import pathlib
 import importlib
-import datetime
-import os
 import dacite
 import hydra
 import omegaconf
@@ -20,22 +18,7 @@ from .utility.distributed import (
     get_local_node_addr,
     init_rpc_worker,
     shutdown_rpc,
-    get_rank,
 )
-
-
-# Global debug log file path (set in main())
-_DEBUG_LOG_FILE: pathlib.Path | None = None
-
-
-def _debug_log(rank: int, msg: str) -> None:
-    """Write a timestamped log message to debug file."""
-    if _DEBUG_LOG_FILE is None:
-        return
-    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-    pid = os.getpid()
-    with open(_DEBUG_LOG_FILE, "a") as f:
-        f.write(f"[Rank {rank}] [PID {pid}] {ts} | {msg}\n")
 
 
 def run_main(runtime_config: omegaconf.DictConfig) -> None:
@@ -92,13 +75,8 @@ def worker_main(
     """
     global_rank, node_addr, device = local_devices[local_rank]
 
-    _debug_log(global_rank, "worker_main START")
-
     init_rpc_worker(global_rank, world_size, device, master_addr, master_port)
-    _debug_log(global_rank, "RPC initialized, waiting for calls")
-
     shutdown_rpc()
-    _debug_log(global_rank, "worker_main END")
 
 
 @hydra.main(version_base=None, config_path=str(pathlib.Path().resolve()), config_name="config")
@@ -111,13 +89,6 @@ def main(runtime_config: omegaconf.DictConfig) -> None:
     - If this node does NOT contain rank 0: main process also runs as RPC worker,
       spawns (local_devices - 1) workers, total local_devices processes for RPC.
     """
-    # Set debug log file path (in current working directory)
-    global _DEBUG_LOG_FILE
-    _DEBUG_LOG_FILE = pathlib.Path.cwd() / "qmp_debug.log"
-    # Clear previous log
-    if _DEBUG_LOG_FILE.exists():
-        _DEBUG_LOG_FILE.unlink()
-
     config_dict = omegaconf.OmegaConf.to_container(runtime_config.common, resolve=True)
 
     devices = config_dict.get("devices", ["cuda:0"])
@@ -145,9 +116,6 @@ def main(runtime_config: omegaconf.DictConfig) -> None:
                  world_size, master_addr, master_port)
     logging.info("Local node: %s, local devices: %d, rank_0_on_this_node: %s",
                  get_local_node_addr(), len(local_devices), rank_0_on_this_node)
-    logging.info("Debug log file: %s", _DEBUG_LOG_FILE)
-
-    _debug_log(-1, f"main() START, world_size={world_size}, local_devices={len(local_devices)}")
 
     # Spawn workers (excluding the rank that main process will handle)
     spawn_count = len(local_devices) - 1
@@ -164,30 +132,23 @@ def main(runtime_config: omegaconf.DictConfig) -> None:
         )
         logging.info("Spawned %d worker processes for ranks: %s",
                      spawn_count, [rank for rank, _, _ in spawn_devices])
-        _debug_log(-1, f"spawned {spawn_count} workers for ranks {[rank for rank, _, _ in spawn_devices]}")
 
     # Main process handles the first local device
     main_rank, main_node, main_device = local_devices[0]
 
-    _debug_log(main_rank, "main process START (will handle this rank)")
-
     init_rpc_worker(main_rank, world_size, main_device, master_addr, master_port)
-    _debug_log(main_rank, "RPC initialized")
 
     if main_rank == 0:
-        _debug_log(main_rank, "run_main START")
+        logging.info("Rank 0 (orchestrator) starting main algorithm")
         run_main(runtime_config)
-        _debug_log(main_rank, "run_main END")
     else:
-        _debug_log(main_rank, "waiting for RPC calls")
+        logging.info("Rank %d (worker) waiting for RPC calls", main_rank)
 
     shutdown_rpc()
-    _debug_log(main_rank, "main process END")
 
     # Wait for spawned workers to finish
     if spawn_context is not None:
         spawn_context.join()
-    _debug_log(-1, "main() END, all workers finished")
 
 
 if __name__ == "__main__":
