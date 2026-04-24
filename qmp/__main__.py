@@ -54,43 +54,29 @@ def worker_main(
     local_rank: int,
     local_devices: list[tuple[int, str, torch.device]],
     world_size: int,
-    runtime_config: omegaconf.DictConfig,
     master_addr: str,
     master_port: int,
 ) -> None:
     """
-    Worker process entry point.
+    Worker process entry point for RPC workers.
 
     Parameters
     ----------
     local_rank : int
-        Local rank within this node (0 to len(local_devices)-1).
+        Local rank within this node.
     local_devices : list[tuple[int, str, torch.device]]
         List of (global_rank, node_addr, device) for devices on this node.
     world_size : int
         Total number of processes across all nodes.
-    runtime_config : omegaconf.DictConfig
-        Runtime configuration.
     master_addr : str
         Master node address.
     master_port : int
         Master port.
     """
-    # Get global rank and device from local_devices
     global_rank, node_addr, device = local_devices[local_rank]
 
-    # Initialize RPC
     init_rpc_worker(global_rank, world_size, device, master_addr, master_port)
-
-    if global_rank == 0:
-        # Rank 0 runs the main algorithm
-        logging.info("Rank 0 (orchestrator) starting main algorithm")
-        run_main(runtime_config)
-    else:
-        # Other ranks wait for RPC calls
-        logging.info("Rank %d (worker) waiting for RPC calls", global_rank)
-
-    # Shutdown RPC
+    logging.info("Rank %d (worker) waiting for RPC calls", global_rank)
     shutdown_rpc()
 
 
@@ -99,16 +85,16 @@ def main(runtime_config: omegaconf.DictConfig) -> None:
     """
     Main entry point for qmp.
 
-    Each node spawns only the worker processes for its local devices.
-    Only rank 0 executes the main algorithm, other ranks serve as RPC workers.
+    - If this node contains rank 0: main process runs as rank 0 (orchestrator),
+      spawns (local_devices - 1) workers for RPC.
+    - If this node does NOT contain rank 0: main process also runs as RPC worker,
+      spawns (local_devices - 1) workers, total local_devices processes for RPC.
     """
     config_dict = omegaconf.OmegaConf.to_container(runtime_config.common, resolve=True)
 
-    # Get devices and master_port directly from common
     devices = config_dict.get("devices", ["cuda:0"])
     master_port = config_dict.get("master_port", 29500)
 
-    # Convert to DistributedConfig
     dist_config = DistributedConfig(
         devices=devices,
         master_port=master_port,
@@ -117,7 +103,6 @@ def main(runtime_config: omegaconf.DictConfig) -> None:
     world_size = len(devices)
     master_addr = dist_config.master_addr
 
-    # Get devices that belong to this node
     local_devices = get_local_devices(dist_config)
 
     if len(local_devices) == 0:
@@ -125,19 +110,46 @@ def main(runtime_config: omegaconf.DictConfig) -> None:
                         get_local_node_addr(), devices)
         return
 
+    # Check if rank 0 is on this node
+    rank_0_on_this_node = any(rank == 0 for rank, _, _ in local_devices)
+
     logging.info("Distributed configuration: world_size=%d, master_addr=%s, master_port=%d",
                  world_size, master_addr, master_port)
-    logging.info("Local node: %s, spawning %d worker(s) for ranks: %s",
-                 get_local_node_addr(), len(local_devices),
-                 [rank for rank, _, _ in local_devices])
+    logging.info("Local node: %s, local devices: %d, rank_0_on_this_node: %s",
+                 get_local_node_addr(), len(local_devices), rank_0_on_this_node)
 
-    # Spawn only local worker processes
-    torch.multiprocessing.spawn(
-        worker_main,
-        args=(local_devices, world_size, runtime_config, master_addr, master_port),
-        nprocs=len(local_devices),
-        join=True,
-    )
+    # Spawn workers (excluding the rank that main process will handle)
+    spawn_count = len(local_devices) - 1
+    spawn_context = None
+
+    if spawn_count > 0:
+        # Devices for spawned workers: skip the first one (handled by main process)
+        spawn_devices = local_devices[1:]
+        spawn_context = torch.multiprocessing.spawn(
+            worker_main,
+            args=(spawn_devices, world_size, master_addr, master_port),
+            nprocs=spawn_count,
+            join=False,
+        )
+        logging.info("Spawned %d worker processes for ranks: %s",
+                     spawn_count, [rank for rank, _, _ in spawn_devices])
+
+    # Main process handles the first local device
+    main_rank, main_node, main_device = local_devices[0]
+
+    init_rpc_worker(main_rank, world_size, main_device, master_addr, master_port)
+
+    if main_rank == 0:
+        logging.info("Rank 0 (orchestrator) starting main algorithm")
+        run_main(runtime_config)
+    else:
+        logging.info("Rank %d (worker) waiting for RPC calls", main_rank)
+
+    shutdown_rpc()
+
+    # Wait for spawned workers to finish
+    if spawn_context is not None:
+        spawn_context.join()
 
 
 if __name__ == "__main__":
