@@ -211,9 +211,9 @@ class Hamiltonian:
 
         # Gather results from all ranks to rank 0
         if rank == 0:
-            _debug_log(rank, "apply_within: local done, calling RPC to other ranks")
+            _debug_log(rank, "apply_within: sending RPC to other ranks first")
 
-            # Send RPC requests to all other ranks in parallel
+            # Send RPC requests to all other ranks FIRST (asynchronous)
             rpc_refs = []
             for target_rank in range(1, world_size):
                 rpc_ref = rpc.remote(
@@ -230,6 +230,18 @@ class Hamiltonian:
                     ),
                 )
                 rpc_refs.append(rpc_ref)
+
+            _debug_log(rank, "apply_within: RPC sent, computing local chunk")
+
+            # Now compute local chunk while RPC is running remotely
+            if start_idx >= end_idx:
+                local_result = torch.zeros(configs_j.size(0), dtype=torch.complex64, device=device)
+            else:
+                configs_i_chunk = configs_i[start_idx:end_idx]
+                psi_i_chunk = psi_i[start_idx:end_idx]
+                local_result = self._apply_within_local(configs_i_chunk, psi_i_chunk, configs_j, device)
+
+            _debug_log(rank, "apply_within: local done, collecting RPC results")
 
             # Collect results from all RPC calls
             results = [local_result]
@@ -323,7 +335,7 @@ class Hamiltonian:
             local_configs = self._find_relative_local(configs_i_chunk, psi_i_chunk, count_selected, configs_exclude, device)
 
         if rank == 0:
-            # Send RPC requests to all other ranks in parallel
+            # Send RPC requests to all other ranks FIRST (asynchronous)
             rpc_refs = []
             for target_rank in range(1, world_size):
                 rpc_ref = rpc.remote(
@@ -341,6 +353,14 @@ class Hamiltonian:
                     ),
                 )
                 rpc_refs.append(rpc_ref)
+
+            # Now compute local chunk while RPC is running remotely
+            if start_idx >= end_idx:
+                local_configs = torch.empty(0, configs_i.size(1), dtype=configs_i.dtype, device=device)
+            else:
+                configs_i_chunk = configs_i[start_idx:end_idx]
+                psi_i_chunk = psi_i[start_idx:end_idx]
+                local_configs = self._find_relative_local(configs_i_chunk, psi_i_chunk, count_selected, configs_exclude, device)
 
             # Collect results from all RPC calls
             results = [local_configs]
@@ -441,7 +461,7 @@ class Hamiltonian:
             local_configs, local_psi = self._list_relative_local(configs_i_chunk, psi_i_chunk, configs_exclude, device)
 
         if rank == 0:
-            # Send RPC requests to all other ranks in parallel
+            # Send RPC requests to all other ranks FIRST (asynchronous)
             rpc_refs = []
             for target_rank in range(1, world_size):
                 rpc_ref = rpc.remote(
@@ -458,6 +478,15 @@ class Hamiltonian:
                     ),
                 )
                 rpc_refs.append(rpc_ref)
+
+            # Now compute local chunk while RPC is running remotely
+            if start_idx >= end_idx:
+                local_configs = torch.empty(0, configs_i.size(1), dtype=configs_i.dtype, device=device)
+                local_psi = torch.empty(0, dtype=psi_i.dtype, device=device)
+            else:
+                configs_i_chunk = configs_i[start_idx:end_idx]
+                psi_i_chunk = psi_i[start_idx:end_idx]
+                local_configs, local_psi = self._list_relative_local(configs_i_chunk, psi_i_chunk, configs_exclude, device)
 
             # Collect results from all RPC calls
             results_configs = [local_configs]
@@ -550,7 +579,7 @@ class Hamiltonian:
             local_psi = self._diagonal_term_local(configs_chunk, device)
 
         if rank == 0:
-            # Send RPC requests to all other ranks in parallel
+            # Send RPC requests to all other ranks FIRST (asynchronous)
             rpc_refs = []
             for target_rank in range(1, world_size):
                 rpc_ref = rpc.remote(
@@ -565,6 +594,13 @@ class Hamiltonian:
                     ),
                 )
                 rpc_refs.append(rpc_ref)
+
+            # Now compute local chunk while RPC is running remotely
+            if start_idx >= end_idx:
+                local_psi = torch.empty(0, dtype=torch.complex64, device=device)
+            else:
+                configs_chunk = configs[start_idx:end_idx]
+                local_psi = self._diagonal_term_local(configs_chunk, device)
 
             # Collect results from all RPC calls
             results = [(local_psi, start_idx)]
