@@ -25,10 +25,14 @@ class DistributedConfig:
     - "10.0.0.1:cuda:0"
     - "localhost:cuda:1"
 
+    Short form "device_type:index" is also supported and defaults to localhost:
+    - "cuda:0" -> "localhost:cuda:0"
+    - "cuda:2" -> "localhost:cuda:2"
+
     The first device in the list is the orchestrator (rank 0).
     """
 
-    devices: list[str] = dataclasses.field(default_factory=lambda: ["localhost:cuda:0"])
+    devices: list[str] = dataclasses.field(default_factory=lambda: ["cuda:0"])
     master_port: int = 29500
 
     @property
@@ -49,8 +53,10 @@ def parse_device_addr(addr: str) -> tuple[str, torch.device]:
     Parameters
     ----------
     addr : str
-        Device address in format "node_addr:device_type:index"
-        e.g., "10.0.0.1:cuda:0" or "localhost:cuda:2"
+        Device address in one of two formats:
+        - Short form: "device_type:index", e.g., "cuda:0", "cuda:2"
+          (defaults to localhost)
+        - Full form: "node_addr:device_type:index", e.g., "10.0.0.1:cuda:0"
 
     Returns
     -------
@@ -58,10 +64,16 @@ def parse_device_addr(addr: str) -> tuple[str, torch.device]:
         (node_address, torch_device)
     """
     parts = addr.split(":")
-    if len(parts) != 3:
-        raise ValueError(f"Invalid device address format: {addr}. Expected 'node:device_type:index'")
-    node_addr = parts[0]
-    device = torch.device(f"{parts[1]}:{parts[2]}")
+    if len(parts) == 2:
+        # Short form: "cuda:0" -> defaults to localhost
+        node_addr = "localhost"
+        device = torch.device(f"{parts[0]}:{parts[1]}")
+    elif len(parts) == 3:
+        # Full form: "10.0.0.1:cuda:0"
+        node_addr = parts[0]
+        device = torch.device(f"{parts[1]}:{parts[2]}")
+    else:
+        raise ValueError(f"Invalid device address format: {addr}. Expected 'device:index' or 'node:device:index'")
     return node_addr, device
 
 
