@@ -6,7 +6,6 @@ Each node spawns worker processes that bind to local GPUs. Only rank 0 (orchestr
 runs the main algorithm loop, while other ranks serve as RPC workers.
 """
 
-import os
 import socket
 import logging
 import dataclasses
@@ -110,14 +109,46 @@ def get_local_devices(config: DistributedConfig) -> list[tuple[int, str, torch.d
     -------
     list[tuple[int, str, torch.device]]
         List of (global_rank, node_addr, device) for local devices.
+
+    Raises
+    ------
+    ValueError
+        If the configuration mixes short-form and full-form device addresses.
     """
     local_node = get_local_node_addr()
+    local_node_ip = hostname_to_ip(local_node)
     local_devices = []
+
+    # Check for mixed short-form and full-form addresses
+    has_short_form = False
+    has_full_form = False
+    for addr in config.devices:
+        parts = addr.split(":")
+        if len(parts) == 2:
+            has_short_form = True
+        elif len(parts) == 3:
+            has_full_form = True
+
+    if has_short_form and has_full_form:
+        raise ValueError(
+            "Mixed device address formats detected. "
+            "Use either all short-form ('cuda:0', 'cuda:1') for single-node, "
+            "or all full-form ('10.0.0.1:cuda:0', '10.0.0.2:cuda:0') for multi-node. "
+            f"Current config: {config.devices}"
+        )
 
     for rank, addr in enumerate(config.devices):
         node_addr, device = parse_device_addr(addr)
-        # Match by IP or hostname
-        if node_addr == local_node or node_addr == "localhost" or node_addr == hostname_to_ip(local_node):
+        node_ip = hostname_to_ip(node_addr)
+
+        # Match logic:
+        # - For short-form (all localhost): all devices belong to this node (single-node)
+        # - For full-form: match by IP
+        if has_short_form:
+            # Single-node scenario: all devices belong to this node
+            local_devices.append((rank, node_addr, device))
+        elif node_ip == local_node_ip or node_addr == local_node:
+            # Multi-node: match by IP or hostname
             local_devices.append((rank, node_addr, device))
 
     return local_devices
