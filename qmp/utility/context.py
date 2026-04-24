@@ -14,7 +14,7 @@ from hydra.core.hydra_config import HydraConfig
 from .model_dict import model_dict, ModelProto, NetworkProto
 from .random_engine import dump_random_engine_state, load_random_engine_state
 from .optimizer import migrate_optimizer
-from .distributed import get_rank, get_world_size, get_local_device
+from .distributed import get_rank, get_world_size, get_local_device, set_timing_file
 
 
 DACITE_CAST = [pathlib.Path, torch.device, tuple]
@@ -86,6 +86,9 @@ class RuntimeContext:
         """
         logging.info("Log directory: %s", self.folder())
         self.folder().mkdir(parents=True, exist_ok=True)
+
+        # Set timing file for distributed operations
+        set_timing_file(str(self.folder() / "timing.csv"))
 
         logging.info("Disabling PyTorch's default gradient computation")
         torch.set_grad_enabled(False)

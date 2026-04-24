@@ -12,7 +12,7 @@ import torch
 import torch.utils.cpp_extension
 import torch.distributed.rpc as rpc
 
-from ..utility.distributed import get_rank, get_world_size, get_local_device, is_rank_zero
+from ..utility.distributed import get_rank, get_world_size, get_local_device, is_rank_zero, log_timing
 
 
 class Hamiltonian:
@@ -235,13 +235,15 @@ class Hamiltonian:
 
             t_total = time.time() - t_start
 
-            logging.info("apply_within: batch_size=%d, rpc_send=%.3fs, local_compute=%.3fs, rpc_collect=%.3fs, sum=%.3fs, total=%.3fs",
-                        batch_size_i,
-                        t_rpc_send_end - t_rpc_send_start,
-                        t_local_compute_end - t_local_compute_start,
-                        t_rpc_collect_end - t_rpc_collect_start,
-                        t_sum_end - t_sum_start,
-                        t_total)
+            log_timing(
+                operation="apply_within",
+                batch_size=batch_size_i,
+                rpc_send=t_rpc_send_end - t_rpc_send_start,
+                local_compute=t_local_compute_end - t_local_compute_start,
+                rpc_collect=t_rpc_collect_end - t_rpc_collect_start,
+                sum_time=t_sum_end - t_sum_start,
+                total=t_total,
+            )
             return final_result
         else:
             # Non-rank-0 workers compute their local chunk (for RPC)
@@ -364,10 +366,14 @@ class Hamiltonian:
 
             # Merge and deduplicate
             if len(results) == 0 or all(r.size(0) == 0 for r in results):
-                logging.info("find_relative: rpc_send=%.3fs, local_compute=%.3fs, rpc_collect=%.3fs",
-                            t_rpc_send_end - t_rpc_send_start,
-                            t_local_compute_end - t_local_compute_start,
-                            t_rpc_collect_end - t_rpc_collect_start)
+                log_timing(
+                    operation="find_relative",
+                    batch_size=batch_size_i,
+                    rpc_send=t_rpc_send_end - t_rpc_send_start,
+                    local_compute=t_local_compute_end - t_local_compute_start,
+                    rpc_collect=t_rpc_collect_end - t_rpc_collect_start,
+                    total=time.time() - t_start,
+                )
                 return torch.empty(0, configs_i.size(1), dtype=configs_i.dtype, device=device)
 
             t_merge_start = time.time()
@@ -392,16 +398,18 @@ class Hamiltonian:
 
             t_total = time.time() - t_start
 
-            logging.info("find_relative: batch_size=%d, rpc_send=%.3fs, local_compute=%.3fs, rpc_collect=%.3fs, merge=%.3fs, unique=%.3fs, exclude=%.3fs, slice=%.3fs, total=%.3fs",
-                        batch_size_i,
-                        t_rpc_send_end - t_rpc_send_start,
-                        t_local_compute_end - t_local_compute_start,
-                        t_rpc_collect_end - t_rpc_collect_start,
-                        t_merge_end - t_merge_start,
-                        t_unique_end - t_unique_start,
-                        t_exclude_end - t_exclude_start,
-                        t_slice_end - t_slice_start,
-                        t_total)
+            log_timing(
+                operation="find_relative",
+                batch_size=batch_size_i,
+                rpc_send=t_rpc_send_end - t_rpc_send_start,
+                local_compute=t_local_compute_end - t_local_compute_start,
+                rpc_collect=t_rpc_collect_end - t_rpc_collect_start,
+                merge=t_merge_end - t_merge_start,
+                unique=t_unique_end - t_unique_start,
+                exclude=t_exclude_end - t_exclude_start,
+                slice_time=t_slice_end - t_slice_start,
+                total=t_total,
+            )
             return filtered_configs
         else:
             # Non-rank-0 workers just return their local result (for RPC)

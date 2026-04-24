@@ -6,6 +6,8 @@ Each node spawns worker processes that bind to local GPUs. Only rank 0 (orchestr
 runs the main algorithm loop, while other ranks serve as RPC workers.
 """
 
+import os
+import time
 import socket
 import logging
 import dataclasses
@@ -204,6 +206,39 @@ def get_local_device() -> torch.device:
 _CURRENT_RANK: int = 0
 _WORLD_SIZE: int = 1
 _LOCAL_DEVICE: torch.device = torch.device("cuda:0")
+_TIMING_FILE: str | None = None
+
+
+def set_timing_file(path: str) -> None:
+    """Set the timing log file path."""
+    global _TIMING_FILE
+    _TIMING_FILE = path
+    # Write CSV header if file doesn't exist
+    if not os.path.exists(path):
+        with open(path, "w") as f:
+            f.write("timestamp,operation,batch_size,world_size,rpc_send,local_compute,rpc_collect,merge,unique,exclude,slice,sum,total\n")
+
+
+def log_timing(
+    operation: str,
+    batch_size: int,
+    rpc_send: float,
+    local_compute: float,
+    rpc_collect: float,
+    merge: float = 0.0,
+    unique: float = 0.0,
+    exclude: float = 0.0,
+    slice_time: float = 0.0,
+    sum_time: float = 0.0,
+    total: float = 0.0,
+) -> None:
+    """Log timing information to CSV file."""
+    if _TIMING_FILE is None:
+        return
+    world_size = get_world_size()
+    timestamp = time.time()
+    with open(_TIMING_FILE, "a") as f:
+        f.write(f"{timestamp},{operation},{batch_size},{world_size},{rpc_send:.6f},{local_compute:.6f},{rpc_collect:.6f},{merge:.6f},{unique:.6f},{exclude:.6f},{slice_time:.6f},{sum_time:.6f},{total:.6f}\n")
 
 
 def _set_global_state(rank: int, world_size: int, device: torch.device) -> None:

@@ -1,0 +1,141 @@
+[2026-04-24 13:27:26,477][root][INFO] - Distributed configuration: world_size=4, master_addr=localhost, master_port=23342
+[2026-04-24 13:27:26,478][root][INFO] - Local node: 192.168.0.6, local devices: 4, rank_0_on_this_node: True
+[2026-04-24 13:27:26,490][root][INFO] - Spawned 3 worker processes for ranks: [1, 2, 3]
+[2026-04-24 13:27:30,985][root][INFO] - RPC initialized: rank=0, world_size=4, device=cuda:3
+[2026-04-24 13:27:33,838][root][INFO] - Log directory: /public/home/hzhangxyz/multigpu/4/outputs/2026-04-24/13-27-26
+[2026-04-24 13:27:33,839][root][INFO] - Disabling PyTorch's default gradient computation
+[2026-04-24 13:27:33,839][root][INFO] - Attempting to load checkpoint
+[2026-04-24 13:27:33,839][root][INFO] - Checkpoint not found at: /public/home/hzhangxyz/multigpu/4/outputs/2026-04-24/13-27-26/data.pth, start from scratch
+[2026-04-24 13:27:33,839][root][INFO] - Setting random seed to: 2333
+[2026-04-24 13:27:33,844][root][INFO] - The checkpoints will be saved every 5 steps
+[2026-04-24 13:27:33,845][root][INFO] - Loading the model: fcidump
+[2026-04-24 13:27:33,846][root][INFO] - Loading FCIDUMP metadata from file: /home/hzhangxyz/qmp-models/Fe2S2_30_40.FCIDUMP.gz
+[2026-04-24 13:27:33,847][root][INFO] - FCIDUMP metadata successfully loaded
+[2026-04-24 13:27:33,847][root][INFO] - Loading FCIDUMP Hamiltonian from cache
+[2026-04-24 13:27:33,854][root][INFO] - FCIDUMP Hamiltonian successfully loaded
+[2026-04-24 13:27:33,854][root][INFO] - Converting OpenFermion Hamiltonian to internal Hamiltonian representation
+[2026-04-24 13:27:33,854][root][INFO] - Internal Hamiltonian representation has been successfully created
+[2026-04-24 13:27:33,854][root][INFO] - Identified 40 qubits, 30 electrons and 0 spin
+[2026-04-24 13:27:33,854][root][INFO] - Reference energy for model is 0.0000000000
+[2026-04-24 13:27:33,854][root][INFO] - Physical model loaded successfully
+[2026-04-24 13:27:33,854][root][INFO] - Initializing the network: mlp/u1u1
+[2026-04-24 13:27:33,855][root][INFO] - Hidden layer widths: (512, 512)
+[2026-04-24 13:27:33,890][root][INFO] - Network initialized successfully
+[2026-04-24 13:27:33,890][root][INFO] - Skipping loading state dict of the network
+[2026-04-24 13:27:33,890][root][INFO] - Moving network to device: cuda:3
+[2026-04-24 13:27:33,912][root][INFO] - Compiling the network
+[2026-04-24 13:27:34,198][root][INFO] - Initializing the optimizer
+[2026-04-24 13:27:35,378][root][INFO] - Skipping loading state dict of the optimizer
+[2026-04-24 13:27:35,378][root][INFO] - Arguments Summary: Sampling Count From neural network: 102400, Sampling Count From Last iteration: 102400, Krylov Extend Count: 10240, Krylov Extend First: Yes, Krylov Single Extend: No, Krylov Iteration: 32, Krylov Threshold: 0.0000000100, Krylov Period: 32, Krylov Eigen Count: 1, Loss Function: sum_filtered_angle_scaled_log, Local Steps: 10000, Local Loss Threshold: 0.0000000100, Logging Psi: 30, Local Batch Count For Generation: 1, Local Batch Count For Apply Within: 1, Local Batch Count For Loss Function: 1
+[2026-04-24 13:27:35,385][root][INFO] - Starting a new optimization cycle
+[2026-04-24 13:27:35,386][root][INFO] - Sampling configurations from neural network
+[2026-04-24 13:27:36,056][root][INFO] - Sampling configurations from last iteration
+[2026-04-24 13:27:36,057][root][INFO] - Merging configurations from neural network and last iteration
+[2026-04-24 13:27:36,057][root][INFO] - Sampling completed, unique configurations count: 102383
+[2026-04-24 13:27:36,057][root][INFO] - Computing the target for local optimization
+[2026-04-24 13:27:36,059][root][INFO] - Extending basis
+[2026-04-24 13:27:36,059][root][INFO] - Number of core configurations: 102383
+[2026-04-24 13:27:54,925][root][INFO] - Basis extended from 102383 to 112623
+[2026-04-24 13:27:55,428][root][INFO] - Extending basis
+[2026-04-24 13:27:55,429][root][INFO] - Number of core configurations: 112623
+[2026-04-24 13:28:10,678][root][INFO] - Basis extended from 112623 to 122863
+[2026-04-24 13:28:11,222][root][INFO] - Extending basis
+[2026-04-24 13:28:11,222][root][INFO] - Number of core configurations: 122863
+[2026-04-24 13:28:23,569][root][INFO] - Basis extended from 122863 to 133103
+[2026-04-24 13:28:24,163][root][INFO] - Extending basis
+[2026-04-24 13:28:24,163][root][INFO] - Number of core configurations: 133103
+[2026-04-24 13:28:36,456][root][INFO] - Basis extended from 133103 to 143343
+[2026-04-24 13:28:37,096][root][INFO] - Extending basis
+[2026-04-24 13:28:37,097][root][INFO] - Number of core configurations: 143343
+[2026-04-24 13:28:48,374][root][INFO] - Basis extended from 143343 to 153583
+[2026-04-24 13:28:49,067][root][INFO] - Extending basis
+[2026-04-24 13:28:49,068][root][INFO] - Number of core configurations: 153583
+[2026-04-24 13:28:59,442][root][INFO] - Basis extended from 153583 to 163823
+[2026-04-24 13:29:00,182][root][INFO] - Extending basis
+[2026-04-24 13:29:00,182][root][INFO] - Number of core configurations: 163823
+[2026-04-24 13:29:10,260][root][INFO] - Basis extended from 163823 to 174063
+[2026-04-24 13:29:11,046][root][INFO] - Extending basis
+[2026-04-24 13:29:11,046][root][INFO] - Number of core configurations: 174063
+[2026-04-24 13:29:20,282][root][INFO] - Basis extended from 174063 to 184303
+[2026-04-24 13:29:21,130][root][INFO] - Extending basis
+[2026-04-24 13:29:21,130][root][INFO] - Number of core configurations: 184303
+[2026-04-24 13:29:29,140][root][INFO] - Basis extended from 184303 to 194543
+[2026-04-24 13:29:30,029][root][INFO] - Extending basis
+[2026-04-24 13:29:30,029][root][INFO] - Number of core configurations: 194543
+[2026-04-24 13:29:38,226][root][INFO] - Basis extended from 194543 to 204783
+[2026-04-24 13:29:39,174][root][INFO] - Extending basis
+[2026-04-24 13:29:39,174][root][INFO] - Number of core configurations: 204783
+[2026-04-24 13:29:45,835][root][INFO] - Basis extended from 204783 to 215023
+[2026-04-24 13:29:46,822][root][INFO] - Extending basis
+[2026-04-24 13:29:46,822][root][INFO] - Number of core configurations: 215023
+[2026-04-24 13:29:54,573][root][INFO] - Basis extended from 215023 to 225263
+[2026-04-24 13:29:55,597][root][INFO] - Extending basis
+[2026-04-24 13:29:55,597][root][INFO] - Number of core configurations: 225263
+[2026-04-24 13:30:02,321][root][INFO] - Basis extended from 225263 to 235503
+[2026-04-24 13:30:03,398][root][INFO] - Extending basis
+[2026-04-24 13:30:03,398][root][INFO] - Number of core configurations: 235503
+[2026-04-24 13:30:09,734][root][INFO] - Basis extended from 235503 to 245743
+[2026-04-24 13:30:10,870][root][INFO] - Extending basis
+[2026-04-24 13:30:10,871][root][INFO] - Number of core configurations: 245743
+[2026-04-24 13:30:16,789][root][INFO] - Basis extended from 245743 to 255983
+[2026-04-24 13:30:17,965][root][INFO] - Extending basis
+[2026-04-24 13:30:17,965][root][INFO] - Number of core configurations: 255983
+[2026-04-24 13:30:24,483][root][INFO] - Basis extended from 255983 to 266223
+[2026-04-24 13:30:25,706][root][INFO] - Extending basis
+[2026-04-24 13:30:25,706][root][INFO] - Number of core configurations: 266223
+[2026-04-24 13:30:31,203][root][INFO] - Basis extended from 266223 to 276463
+[2026-04-24 13:30:32,482][root][INFO] - Extending basis
+[2026-04-24 13:30:32,482][root][INFO] - Number of core configurations: 276463
+[2026-04-24 13:30:38,605][root][INFO] - Basis extended from 276463 to 286703
+[2026-04-24 13:30:39,935][root][INFO] - Extending basis
+[2026-04-24 13:30:39,936][root][INFO] - Number of core configurations: 286703
+[2026-04-24 13:30:45,170][root][INFO] - Basis extended from 286703 to 296943
+[2026-04-24 13:30:46,553][root][INFO] - Extending basis
+[2026-04-24 13:30:46,554][root][INFO] - Number of core configurations: 296943
+[2026-04-24 13:30:51,322][root][INFO] - Basis extended from 296943 to 307183
+[2026-04-24 13:30:52,759][root][INFO] - Extending basis
+[2026-04-24 13:30:52,759][root][INFO] - Number of core configurations: 307183
+[2026-04-24 13:30:57,136][root][INFO] - Basis extended from 307183 to 317423
+[2026-04-24 13:30:58,629][root][INFO] - Extending basis
+[2026-04-24 13:30:58,629][root][INFO] - Number of core configurations: 317423
+[2026-04-24 13:31:02,953][root][INFO] - Basis extended from 317423 to 327663
+[2026-04-24 13:31:04,500][root][INFO] - Extending basis
+[2026-04-24 13:31:04,500][root][INFO] - Number of core configurations: 327663
+[2026-04-24 13:31:08,715][root][INFO] - Basis extended from 327663 to 337903
+[2026-04-24 13:31:10,311][root][INFO] - Extending basis
+[2026-04-24 13:31:10,311][root][INFO] - Number of core configurations: 337903
+[2026-04-24 13:31:14,218][root][INFO] - Basis extended from 337903 to 348143
+[2026-04-24 13:31:15,862][root][INFO] - Extending basis
+[2026-04-24 13:31:15,862][root][INFO] - Number of core configurations: 348143
+[2026-04-24 13:31:19,813][root][INFO] - Basis extended from 348143 to 358383
+[2026-04-24 13:31:21,506][root][INFO] - Extending basis
+[2026-04-24 13:31:21,507][root][INFO] - Number of core configurations: 358383
+[2026-04-24 13:31:25,279][root][INFO] - Basis extended from 358383 to 368623
+[2026-04-24 13:31:27,024][root][INFO] - Extending basis
+[2026-04-24 13:31:27,024][root][INFO] - Number of core configurations: 368623
+[2026-04-24 13:31:30,700][root][INFO] - Basis extended from 368623 to 378863
+[2026-04-24 13:31:32,498][root][INFO] - Extending basis
+[2026-04-24 13:31:32,498][root][INFO] - Number of core configurations: 378863
+[2026-04-24 13:31:36,140][root][INFO] - Basis extended from 378863 to 389103
+[2026-04-24 13:31:37,985][root][INFO] - Extending basis
+[2026-04-24 13:31:37,986][root][INFO] - Number of core configurations: 389103
+[2026-04-24 13:31:40,659][root][INFO] - Basis extended from 389103 to 399343
+[2026-04-24 13:31:42,557][root][INFO] - Extending basis
+[2026-04-24 13:31:42,557][root][INFO] - Number of core configurations: 399343
+[2026-04-24 13:31:45,762][root][INFO] - Basis extended from 399343 to 409583
+[2026-04-24 13:31:47,712][root][INFO] - Extending basis
+[2026-04-24 13:31:47,713][root][INFO] - Number of core configurations: 409583
+[2026-04-24 13:31:50,668][root][INFO] - Basis extended from 409583 to 419823
+[2026-04-24 13:31:52,670][root][INFO] - Extending basis
+[2026-04-24 13:31:52,670][root][INFO] - Number of core configurations: 419823
+[2026-04-24 13:31:56,153][root][INFO] - Basis extended from 419823 to 430063
+[2026-04-24 13:32:00,283][root][INFO] - The current energy is -108.3802921370 where the sampling count is 430063
+[2026-04-24 13:32:02,361][root][INFO] - The current energy is -109.6391655233 where the sampling count is 430063
+[2026-04-24 13:32:04,433][root][INFO] - The current energy is -111.1025808358 where the sampling count is 430063
+[2026-04-24 13:32:06,512][root][INFO] - The current energy is -112.7171789039 where the sampling count is 430063
+[2026-04-24 13:32:08,591][root][INFO] - The current energy is -113.6251214832 where the sampling count is 430063
+[2026-04-24 13:32:10,672][root][INFO] - The current energy is -114.2082665450 where the sampling count is 430063
+[2026-04-24 13:32:12,756][root][INFO] - The current energy is -114.6653713170 where the sampling count is 430063
+[2026-04-24 13:32:14,845][root][INFO] - The current energy is -114.9539006794 where the sampling count is 430063
+[2026-04-24 13:32:16,928][root][INFO] - The current energy is -115.1956054601 where the sampling count is 430063
+[2026-04-24 13:32:19,012][root][INFO] - The current energy is -115.3603308640 where the sampling count is 430063

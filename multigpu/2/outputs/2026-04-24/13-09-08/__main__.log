@@ -1,0 +1,37 @@
+[2026-04-24 13:09:08,075][root][INFO] - Distributed configuration: world_size=2, master_addr=localhost, master_port=23341
+[2026-04-24 13:09:08,076][root][INFO] - Local node: 192.168.0.6, local devices: 2, rank_0_on_this_node: True
+[2026-04-24 13:09:08,084][root][INFO] - Spawned 1 worker processes for ranks: [1]
+[2026-04-24 13:09:12,027][root][INFO] - RPC initialized: rank=0, world_size=2, device=cuda:1
+[2026-04-24 13:09:41,365][root][INFO] - Log directory: /public/home/hzhangxyz/multigpu/2/outputs/2026-04-24/13-09-08
+[2026-04-24 13:09:41,366][root][INFO] - Disabling PyTorch's default gradient computation
+[2026-04-24 13:09:41,366][root][INFO] - Attempting to load checkpoint
+[2026-04-24 13:09:41,367][root][INFO] - Checkpoint not found at: /public/home/hzhangxyz/multigpu/2/outputs/2026-04-24/13-09-08/data.pth, start from scratch
+[2026-04-24 13:09:41,367][root][INFO] - Setting random seed to: 2333
+[2026-04-24 13:09:41,382][root][INFO] - The checkpoints will be saved every 5 steps
+[2026-04-24 13:09:41,383][root][INFO] - Loading the model: fcidump
+[2026-04-24 13:09:41,385][root][INFO] - Loading FCIDUMP metadata from file: /home/hzhangxyz/qmp-models/Fe2S2_30_40.FCIDUMP.gz
+[2026-04-24 13:09:41,386][root][INFO] - FCIDUMP metadata successfully loaded
+[2026-04-24 13:09:41,386][root][INFO] - Loading FCIDUMP Hamiltonian from cache
+[2026-04-24 13:09:41,409][root][INFO] - FCIDUMP Hamiltonian successfully loaded
+[2026-04-24 13:09:41,409][root][INFO] - Converting OpenFermion Hamiltonian to internal Hamiltonian representation
+[2026-04-24 13:09:41,409][root][INFO] - Internal Hamiltonian representation has been successfully created
+[2026-04-24 13:09:41,409][root][INFO] - Identified 40 qubits, 30 electrons and 0 spin
+[2026-04-24 13:09:41,409][root][INFO] - Reference energy for model is 0.0000000000
+[2026-04-24 13:09:41,409][root][INFO] - Physical model loaded successfully
+[2026-04-24 13:09:41,409][root][INFO] - Initializing the network: mlp/u1u1
+[2026-04-24 13:09:41,410][root][INFO] - Hidden layer widths: (512, 512)
+[2026-04-24 13:09:41,462][root][INFO] - Network initialized successfully
+[2026-04-24 13:09:41,462][root][INFO] - Skipping loading state dict of the network
+[2026-04-24 13:09:41,462][root][INFO] - Moving network to device: cuda:1
+[2026-04-24 13:09:41,706][root][INFO] - Compiling the network
+[2026-04-24 13:09:42,015][root][INFO] - Initializing the optimizer
+[2026-04-24 13:09:47,611][root][INFO] - Skipping loading state dict of the optimizer
+[2026-04-24 13:09:47,611][root][INFO] - Arguments Summary: Sampling Count From neural network: 102400, Sampling Count From Last iteration: 102400, Krylov Extend Count: 10240, Krylov Extend First: Yes, Krylov Single Extend: No, Krylov Iteration: 32, Krylov Threshold: 0.0000000100, Krylov Period: 32, Krylov Eigen Count: 1, Loss Function: sum_filtered_angle_scaled_log, Local Steps: 10000, Local Loss Threshold: 0.0000000100, Logging Psi: 30, Local Batch Count For Generation: 1, Local Batch Count For Apply Within: 1, Local Batch Count For Loss Function: 1
+[2026-04-24 13:09:47,617][root][INFO] - Starting a new optimization cycle
+[2026-04-24 13:09:47,617][root][INFO] - Sampling configurations from neural network
+[2026-04-24 13:09:49,376][root][INFO] - Sampling configurations from last iteration
+[2026-04-24 13:09:49,376][root][INFO] - Merging configurations from neural network and last iteration
+[2026-04-24 13:09:49,376][root][INFO] - Sampling completed, unique configurations count: 102383
+[2026-04-24 13:09:49,376][root][INFO] - Computing the target for local optimization
+[2026-04-24 13:09:49,391][root][INFO] - Extending basis
+[2026-04-24 13:09:49,391][root][INFO] - Number of core configurations: 102383
