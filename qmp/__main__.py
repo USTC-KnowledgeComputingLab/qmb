@@ -139,10 +139,7 @@ def main(runtime_config: omegaconf.DictConfig) -> None:
     init_rpc_worker(main_rank, world_size, main_device, master_addr, master_port)
 
     if main_rank == 0:
-        logging.info("Rank 0 (orchestrator) starting main algorithm")
         run_main(runtime_config)
-    else:
-        logging.info("Rank %d (worker) waiting for RPC calls", main_rank)
 
     shutdown_rpc()
 
