@@ -242,6 +242,7 @@ def init_rpc_worker(rank: int, world_size: int, device: torch.device, master_add
         num_worker_threads=8,
         init_method=f"tcp://{master_addr}:{master_port}",
         _transports=["uv"],  # Use UV (TCP) transport only, disable IBV
+        rpc_timeout=300,  # 5 minutes timeout for long-running operations
     )
 
     rpc.init_rpc(
