@@ -5,6 +5,7 @@ This file contains the Hamiltonian class, which is used to store the Hamiltonian
 import os
 import logging
 import datetime
+import pathlib
 import platformdirs
 import typing
 import dataclasses
@@ -15,10 +16,18 @@ import torch.distributed.rpc as rpc
 from ..utility.distributed import get_rank, get_world_size, get_local_device, is_rank_zero
 
 
-def _timestamp_log(rank: int, msg: str) -> None:
-    """Print a timestamped log message for debugging parallel execution."""
+# Debug log file path (same as in __main__.py)
+_DEBUG_LOG_FILE: pathlib.Path | None = pathlib.Path.cwd() / "qmp_debug.log"
+
+
+def _debug_log(rank: int, msg: str) -> None:
+    """Write a timestamped log message to debug file."""
+    if _DEBUG_LOG_FILE is None:
+        return
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-    logging.info("[DEBUG] Rank %d | %s | %s", rank, ts, msg)
+    pid = os.getpid()
+    with open(_DEBUG_LOG_FILE, "a") as f:
+        f.write(f"[Rank {rank}] [PID {pid}] {ts} | {msg}\n")
 
 
 class Hamiltonian:
@@ -181,7 +190,7 @@ class Hamiltonian:
             # Single process: compute locally
             return self._apply_within_local(configs_i, psi_i, configs_j, device)
 
-        _timestamp_log(rank, "apply_within START (distributed)")
+        _debug_log(rank, "apply_within START (distributed)")
 
         # Distributed: split and compute across ranks
         batch_size_i = configs_i.size(0)
@@ -202,7 +211,7 @@ class Hamiltonian:
 
         # Gather results from all ranks to rank 0
         if rank == 0:
-            _timestamp_log(rank, "apply_within: local done, calling RPC to other ranks")
+            _debug_log(rank, "apply_within: local done, calling RPC to other ranks")
             results = [local_result]
             for target_rank in range(1, world_size):
                 # Send configs_i_chunk and psi_i_chunk to remote worker
@@ -225,7 +234,7 @@ class Hamiltonian:
             final_result = torch.zeros(configs_j.size(0), dtype=torch.complex64, device=device)
             for r in results:
                 final_result = final_result + r
-            _timestamp_log(rank, "apply_within END (distributed)")
+            _debug_log(rank, "apply_within END (distributed)")
             return final_result
         else:
             # Non-rank-0 workers just return local result (rank 0 will collect)
@@ -589,7 +598,7 @@ def _remote_apply_within(
     Remote apply_within computation on a worker.
     """
     rank = get_rank()
-    _timestamp_log(rank, "_remote_apply_within START")
+    _debug_log(rank, "_remote_apply_within START")
 
     device = get_local_device()
     hamiltonian = _create_hamiltonian_from_data(data_tuple)
@@ -600,7 +609,7 @@ def _remote_apply_within(
     end_idx = start_idx + chunk_size + (1 if target_rank < remainder else 0)
 
     if start_idx >= end_idx:
-        _timestamp_log(rank, "_remote_apply_within END (empty chunk)")
+        _debug_log(rank, "_remote_apply_within END (empty chunk)")
         return torch.zeros(configs_j.size(0), dtype=torch.complex64, device="cpu")
 
     configs_i_chunk = configs_i[start_idx:end_idx].to(device)
@@ -608,7 +617,7 @@ def _remote_apply_within(
     configs_j_dev = configs_j.to(device)
 
     result = hamiltonian._apply_within_local(configs_i_chunk, psi_i_chunk, configs_j_dev, device)
-    _timestamp_log(rank, "_remote_apply_within END")
+    _debug_log(rank, "_remote_apply_within END")
     return result.to("cpu")
 
 
