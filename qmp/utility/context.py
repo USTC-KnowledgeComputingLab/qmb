@@ -14,6 +14,7 @@ from hydra.core.hydra_config import HydraConfig
 from .model_dict import model_dict, ModelProto, NetworkProto
 from .random_engine import dump_random_engine_state, load_random_engine_state
 from .optimizer import migrate_optimizer
+from .distributed import DistributedConfig, get_rank, get_world_size, get_local_device
 
 
 DACITE_CAST = [pathlib.Path, torch.device, tuple]
@@ -31,8 +32,8 @@ class RuntimeContext:
     random_seed: int | None = None
     # The interval to save the checkpoint
     checkpoint_interval: int = 5
-    # The device to run on
-    device: torch.device = torch.device(type="cuda", index=0)
+    # Distributed configuration - devices list and master port
+    distributed: DistributedConfig = dataclasses.field(default_factory=lambda: DistributedConfig())
     # The dtype of the network, leave empty to skip modifying the dtype
     dtype: str | torch.dtype | None = None
     # The maximum absolute step for the process, leave empty to loop forever
@@ -55,6 +56,21 @@ class RuntimeContext:
                     raise ValueError(f"Unsupported dtype: {self.dtype}")
         if self.max_absolute_step is not None and self.max_relative_step is not None:
             raise ValueError("Both max_absolute_step and max_relative_step are set, please set only one of them.")
+
+    @property
+    def device(self) -> torch.device:
+        """Get the local device for the current process."""
+        return get_local_device()
+
+    @property
+    def world_size(self) -> int:
+        """Get the total number of processes."""
+        return get_world_size()
+
+    @property
+    def rank(self) -> int:
+        """Get the current process rank."""
+        return get_rank()
 
     def folder(self) -> pathlib.Path:
         """
