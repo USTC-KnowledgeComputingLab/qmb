@@ -104,19 +104,18 @@ def main(runtime_config: omegaconf.DictConfig) -> None:
     """
     config_dict = omegaconf.OmegaConf.to_container(runtime_config.common, resolve=True)
 
-    # Get distributed configuration
-    distributed = config_dict.get("distributed", {})
-    devices = distributed.get("devices", ["cuda:0"])
+    # Get devices and master_port directly from common
+    devices = config_dict.get("devices", ["cuda:0"])
+    master_port = config_dict.get("master_port", 29500)
 
     # Convert to DistributedConfig
     dist_config = DistributedConfig(
         devices=devices,
-        master_port=distributed.get("master_port", 29500),
+        master_port=master_port,
     )
 
     world_size = len(devices)
     master_addr = dist_config.master_addr
-    master_port = dist_config.master_port
 
     # Get devices that belong to this node
     local_devices = get_local_devices(dist_config)

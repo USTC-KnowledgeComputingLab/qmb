@@ -14,7 +14,7 @@ from hydra.core.hydra_config import HydraConfig
 from .model_dict import model_dict, ModelProto, NetworkProto
 from .random_engine import dump_random_engine_state, load_random_engine_state
 from .optimizer import migrate_optimizer
-from .distributed import DistributedConfig, get_rank, get_world_size, get_local_device
+from .distributed import get_rank, get_world_size, get_local_device
 
 
 DACITE_CAST = [pathlib.Path, torch.device, tuple]
@@ -32,8 +32,10 @@ class RuntimeContext:
     random_seed: int | None = None
     # The interval to save the checkpoint
     checkpoint_interval: int = 5
-    # Distributed configuration - devices list and master port
-    distributed: DistributedConfig = dataclasses.field(default_factory=lambda: DistributedConfig())
+    # Device list for distributed computing, e.g., ["cuda:0", "cuda:1"] or ["10.0.0.1:cuda:0", "10.0.0.2:cuda:0"]
+    devices: list[str] = dataclasses.field(default_factory=lambda: ["cuda:0"])
+    # Master port for RPC communication
+    master_port: int = 29500
     # The dtype of the network, leave empty to skip modifying the dtype
     dtype: str | torch.dtype | None = None
     # The maximum absolute step for the process, leave empty to loop forever
