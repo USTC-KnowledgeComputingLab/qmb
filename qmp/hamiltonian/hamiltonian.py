@@ -2,6 +2,7 @@
 This file contains the Hamiltonian class, which is used to store the Hamiltonian and process iteration over each term in the Hamiltonian for given configurations.
 """
 
+import math
 import os
 import time
 import platformdirs
@@ -328,6 +329,8 @@ class Hamiltonian:
             return self._find_relative_local(configs_i, psi_i, count_selected, configs_exclude, device)
 
         # Distributed: split terms across ranks, each rank computes with full configs
+        local_count_selected = int(count_selected / math.sqrt(world_size))
+
         if rank == 0:
             t_start = time.time()
 
@@ -347,7 +350,7 @@ class Hamiltonian:
                         configs_i.to("cpu"),
                         psi_i.to("cpu"),
                         configs_exclude.to("cpu"),
-                        count_selected,
+                        local_count_selected,
                     ),
                 )
                 rpc_refs.append(rpc_ref)
@@ -360,7 +363,7 @@ class Hamiltonian:
                 local_configs = torch.empty(0, configs_i.size(1), dtype=configs_i.dtype, device=device)
             else:
                 local_configs = self._find_relative_local(
-                    configs_i, psi_i, count_selected, configs_exclude, device,
+                    configs_i, psi_i, local_count_selected, configs_exclude, device,
                     site=site_chunk, kind=kind_chunk, coef=coef_chunk,
                 )
             t_local_compute_end = time.time()
