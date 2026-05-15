@@ -4,10 +4,7 @@ This file contains the Hamiltonian class, which is used to store the Hamiltonian
 
 import os
 import time
-import logging
 import platformdirs
-import typing
-import dataclasses
 import torch
 import torch.utils.cpp_extension
 import torch.distributed.rpc as rpc
@@ -144,6 +141,22 @@ class Hamiltonian:
         """
         return (self.site.cpu(), self.kind.cpu(), self.coef.cpu(), self.particle_cut)
 
+    def _get_term_chunk(self, rank: int, world_size: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Get the term (site, kind, coef) chunk for the given rank.
+
+        Terms are split across ranks for distributed computation.
+        """
+        term_number = self.site.size(0)
+        chunk_size = term_number // world_size
+        remainder = term_number % world_size
+        start_idx = rank * chunk_size + min(rank, remainder)
+        end_idx = start_idx + chunk_size + (1 if rank < remainder else 0)
+
+        if start_idx >= end_idx:
+            return self.site[:0], self.kind[:0], self.coef[:0]
+        return self.site[start_idx:end_idx], self.kind[start_idx:end_idx], self.coef[start_idx:end_idx]
+
     def apply_within(
         self,
         configs_i: torch.Tensor,
@@ -172,20 +185,9 @@ class Hamiltonian:
         device = get_local_device()
 
         if world_size == 1:
-            # Single process: compute locally
             return self._apply_within_local(configs_i, psi_i, configs_j, device)
 
-
-        # Distributed: split and compute across ranks
-        batch_size_i = configs_i.size(0)
-        chunk_size = batch_size_i // world_size
-        remainder = batch_size_i % world_size
-
-        # Compute chunk indices for this rank
-        start_idx = rank * chunk_size + min(rank, remainder)
-        end_idx = start_idx + chunk_size + (1 if rank < remainder else 0)
-
-        # Gather results from all ranks to rank 0
+        # Distributed: split terms across ranks, each rank computes with full configs
         if rank == 0:
             t_start = time.time()
 
@@ -193,17 +195,18 @@ class Hamiltonian:
             t_rpc_send_start = time.time()
             rpc_refs = []
             for target_rank in range(1, world_size):
+                site_chunk, kind_chunk, coef_chunk = self._get_term_chunk(target_rank, world_size)
                 rpc_ref = rpc.remote(
                     f"rank_{target_rank}",
                     _remote_apply_within,
                     args=(
                         self._get_data_tuple(),
+                        site_chunk.cpu(),
+                        kind_chunk.cpu(),
+                        coef_chunk.cpu(),
                         configs_i.to("cpu"),
                         psi_i.to("cpu"),
                         configs_j.to("cpu"),
-                        target_rank,
-                        batch_size_i,
-                        world_size,
                     ),
                 )
                 rpc_refs.append(rpc_ref)
@@ -211,12 +214,11 @@ class Hamiltonian:
 
             # Now compute local chunk while RPC is running remotely
             t_local_compute_start = time.time()
-            if start_idx >= end_idx:
+            site_chunk, kind_chunk, coef_chunk = self._get_term_chunk(0, world_size)
+            if site_chunk.size(0) == 0:
                 local_result = torch.zeros(configs_j.size(0), dtype=torch.complex64, device=device)
             else:
-                configs_i_chunk = configs_i[start_idx:end_idx]
-                psi_i_chunk = psi_i[start_idx:end_idx]
-                local_result = self._apply_within_local(configs_i_chunk, psi_i_chunk, configs_j, device)
+                local_result = self._apply_within_local(configs_i, psi_i, configs_j, device, site_chunk, kind_chunk, coef_chunk)
             t_local_compute_end = time.time()
 
             # Collect results from all RPC calls
@@ -237,7 +239,7 @@ class Hamiltonian:
 
             log_timing(
                 operation="apply_within",
-                batch_size=batch_size_i,
+                batch_size=configs_i.size(0),
                 rpc_send=t_rpc_send_end - t_rpc_send_start,
                 local_compute=t_local_compute_end - t_local_compute_start,
                 rpc_collect=t_rpc_collect_end - t_rpc_collect_start,
@@ -246,13 +248,8 @@ class Hamiltonian:
             )
             return final_result
         else:
-            # Non-rank-0 workers compute their local chunk (for RPC)
-            if start_idx >= end_idx:
-                return torch.zeros(configs_j.size(0), dtype=torch.complex64, device=device)
-            else:
-                configs_i_chunk = configs_i[start_idx:end_idx]
-                psi_i_chunk = psi_i[start_idx:end_idx]
-                return self._apply_within_local(configs_i_chunk, psi_i_chunk, configs_j, device)
+            # Non-rank-0 workers just wait for RPC calls (handled by _remote_apply_within)
+            pass
 
     def _apply_within_local(
         self,
@@ -260,21 +257,36 @@ class Hamiltonian:
         psi_i: torch.Tensor,
         configs_j: torch.Tensor,
         device: torch.device,
+        site: torch.Tensor | None = None,
+        kind: torch.Tensor | None = None,
+        coef: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Local apply_within computation on a specific device.
+
+        If site/kind/coef are provided, use those instead of self.site/self.kind/self.coef.
+        This allows computing with a subset of Hamiltonian terms.
         """
         configs_i = configs_i.to(device=device)
         psi_i = psi_i.to(device=device)
         configs_j = configs_j.to(device=device)
-        self._prepare_data(device)
+
+        if site is not None:
+            site = site.to(device=device).contiguous()
+            kind = kind.to(device=device).contiguous()
+            coef = coef.to(device=device).contiguous()
+        else:
+            self._prepare_data(device)
+            site = self.site
+            kind = self.kind
+            coef = self.coef
 
         _apply_within = getattr(
             self._load_module(device.type, configs_i.size(1), self.particle_cut),
             "apply_within",
         )
         psi_j = torch.view_as_complex(
-            _apply_within(configs_i, torch.view_as_real(psi_i), configs_j, self.site, self.kind, self.coef)
+            _apply_within(configs_i, torch.view_as_real(psi_i), configs_j, site, kind, coef)
         )
         return psi_j
 
@@ -315,14 +327,7 @@ class Hamiltonian:
         if world_size == 1:
             return self._find_relative_local(configs_i, psi_i, count_selected, configs_exclude, device)
 
-        # Distributed computation
-        batch_size_i = configs_i.size(0)
-        chunk_size = batch_size_i // world_size
-        remainder = batch_size_i % world_size
-
-        start_idx = rank * chunk_size + min(rank, remainder)
-        end_idx = start_idx + chunk_size + (1 if rank < remainder else 0)
-
+        # Distributed: split terms across ranks, each rank computes with full configs
         if rank == 0:
             t_start = time.time()
 
@@ -330,17 +335,18 @@ class Hamiltonian:
             t_rpc_send_start = time.time()
             rpc_refs = []
             for target_rank in range(1, world_size):
+                site_chunk, kind_chunk, coef_chunk = self._get_term_chunk(target_rank, world_size)
                 rpc_ref = rpc.remote(
                     f"rank_{target_rank}",
                     _remote_find_relative,
                     args=(
                         self._get_data_tuple(),
+                        site_chunk.cpu(),
+                        kind_chunk.cpu(),
+                        coef_chunk.cpu(),
                         configs_i.to("cpu"),
                         psi_i.to("cpu"),
                         configs_exclude.to("cpu"),
-                        target_rank,
-                        batch_size_i,
-                        world_size,
                         count_selected,
                     ),
                 )
@@ -349,12 +355,14 @@ class Hamiltonian:
 
             # Now compute local chunk while RPC is running remotely
             t_local_compute_start = time.time()
-            if start_idx >= end_idx:
+            site_chunk, kind_chunk, coef_chunk = self._get_term_chunk(0, world_size)
+            if site_chunk.size(0) == 0:
                 local_configs = torch.empty(0, configs_i.size(1), dtype=configs_i.dtype, device=device)
             else:
-                configs_i_chunk = configs_i[start_idx:end_idx]
-                psi_i_chunk = psi_i[start_idx:end_idx]
-                local_configs = self._find_relative_local(configs_i_chunk, psi_i_chunk, count_selected, configs_exclude, device)
+                local_configs = self._find_relative_local(
+                    configs_i, psi_i, count_selected, configs_exclude, device,
+                    site=site_chunk, kind=kind_chunk, coef=coef_chunk,
+                )
             t_local_compute_end = time.time()
 
             # Collect results from all RPC calls
@@ -368,7 +376,7 @@ class Hamiltonian:
             if len(results) == 0 or all(r.size(0) == 0 for r in results):
                 log_timing(
                     operation="find_relative",
-                    batch_size=batch_size_i,
+                    batch_size=configs_i.size(0),
                     rpc_send=t_rpc_send_end - t_rpc_send_start,
                     local_compute=t_local_compute_end - t_local_compute_start,
                     rpc_collect=t_rpc_collect_end - t_rpc_collect_start,
@@ -394,7 +402,7 @@ class Hamiltonian:
 
             log_timing(
                 operation="find_relative",
-                batch_size=batch_size_i,
+                batch_size=configs_i.size(0),
                 rpc_send=t_rpc_send_end - t_rpc_send_start,
                 local_compute=t_local_compute_end - t_local_compute_start,
                 rpc_collect=t_rpc_collect_end - t_rpc_collect_start,
@@ -405,13 +413,8 @@ class Hamiltonian:
             )
             return unique_configs
         else:
-            # Non-rank-0 workers just return their local result (for RPC)
-            if start_idx >= end_idx:
-                return torch.empty(0, configs_i.size(1), dtype=configs_i.dtype, device=device)
-            else:
-                configs_i_chunk = configs_i[start_idx:end_idx]
-                psi_i_chunk = psi_i[start_idx:end_idx]
-                return self._find_relative_local(configs_i_chunk, psi_i_chunk, count_selected, configs_exclude, device)
+            # Non-rank-0 workers just wait for RPC calls (handled by _remote_find_relative)
+            pass
 
     def _find_relative_local(
         self,
@@ -420,21 +423,36 @@ class Hamiltonian:
         count_selected: int,
         configs_exclude: torch.Tensor,
         device: torch.device,
+        site: torch.Tensor | None = None,
+        kind: torch.Tensor | None = None,
+        coef: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Local find_relative computation on a specific device.
+
+        If site/kind/coef are provided, use those instead of self.site/self.kind/self.coef.
+        This allows computing with a subset of Hamiltonian terms.
         """
         configs_i = configs_i.to(device=device)
         psi_i = psi_i.to(device=device)
         configs_exclude = configs_exclude.to(device=device)
-        self._prepare_data(device)
+
+        if site is not None:
+            site = site.to(device=device).contiguous()
+            kind = kind.to(device=device).contiguous()
+            coef = coef.to(device=device).contiguous()
+        else:
+            self._prepare_data(device)
+            site = self.site
+            kind = self.kind
+            coef = self.coef
 
         _find_relative = getattr(
             self._load_module(device.type, configs_i.size(1), self.particle_cut),
             "find_relative",
         )
         configs_j = _find_relative(
-            configs_i, torch.view_as_real(psi_i), count_selected, self.site, self.kind, self.coef, configs_exclude
+            configs_i, torch.view_as_real(psi_i), count_selected, site, kind, coef, configs_exclude
         )
         return configs_j
 
@@ -472,49 +490,37 @@ class Hamiltonian:
         if world_size == 1:
             return self._list_relative_local(configs_i, psi_i, configs_exclude, device)
 
-        # Distributed computation
-        batch_size_i = configs_i.size(0)
-        chunk_size = batch_size_i // world_size
-        remainder = batch_size_i % world_size
-
-        start_idx = rank * chunk_size + min(rank, remainder)
-        end_idx = start_idx + chunk_size + (1 if rank < remainder else 0)
-
-        if start_idx >= end_idx:
-            local_configs = torch.empty(0, configs_i.size(1), dtype=configs_i.dtype, device=device)
-            local_psi = torch.empty(0, dtype=psi_i.dtype, device=device)
-        else:
-            configs_i_chunk = configs_i[start_idx:end_idx]
-            psi_i_chunk = psi_i[start_idx:end_idx]
-            local_configs, local_psi = self._list_relative_local(configs_i_chunk, psi_i_chunk, configs_exclude, device)
-
+        # Distributed: split terms across ranks, each rank computes with full configs
         if rank == 0:
             # Send RPC requests to all other ranks FIRST (asynchronous)
             rpc_refs = []
             for target_rank in range(1, world_size):
+                site_chunk, kind_chunk, coef_chunk = self._get_term_chunk(target_rank, world_size)
                 rpc_ref = rpc.remote(
                     f"rank_{target_rank}",
                     _remote_list_relative,
                     args=(
                         self._get_data_tuple(),
+                        site_chunk.cpu(),
+                        kind_chunk.cpu(),
+                        coef_chunk.cpu(),
                         configs_i.to("cpu"),
                         psi_i.to("cpu"),
                         configs_exclude.to("cpu"),
-                        target_rank,
-                        batch_size_i,
-                        world_size,
                     ),
                 )
                 rpc_refs.append(rpc_ref)
 
             # Now compute local chunk while RPC is running remotely
-            if start_idx >= end_idx:
+            site_chunk, kind_chunk, coef_chunk = self._get_term_chunk(0, world_size)
+            if site_chunk.size(0) == 0:
                 local_configs = torch.empty(0, configs_i.size(1), dtype=configs_i.dtype, device=device)
                 local_psi = torch.empty(0, dtype=psi_i.dtype, device=device)
             else:
-                configs_i_chunk = configs_i[start_idx:end_idx]
-                psi_i_chunk = psi_i[start_idx:end_idx]
-                local_configs, local_psi = self._list_relative_local(configs_i_chunk, psi_i_chunk, configs_exclude, device)
+                local_configs, local_psi = self._list_relative_local(
+                    configs_i, psi_i, configs_exclude, device,
+                    site=site_chunk, kind=kind_chunk, coef=coef_chunk,
+                )
 
             # Collect results from all RPC calls
             results_configs = [local_configs]
@@ -537,15 +543,10 @@ class Hamiltonian:
             unique_psi = torch.zeros(unique_configs.size(0), dtype=all_psi.dtype, device=device)
             unique_psi.scatter_add_(0, inverse_indices, all_psi)
 
-            # Exclude configs_exclude
-            configs_exclude_dev = configs_exclude.to(device)
-            exclude_mask = (unique_configs.unsqueeze(1) == configs_exclude_dev.unsqueeze(0)).all(dim=-1).any(dim=-1)
-            filtered_configs = unique_configs[~exclude_mask]
-            filtered_psi = unique_psi[~exclude_mask]
-
-            return filtered_configs, filtered_psi
+            return unique_configs, unique_psi
         else:
-            return local_configs, local_psi
+            # Non-rank-0 workers just wait for RPC calls (handled by _remote_list_relative)
+            pass
 
     def _list_relative_local(
         self,
@@ -553,21 +554,36 @@ class Hamiltonian:
         psi_i: torch.Tensor,
         configs_exclude: torch.Tensor,
         device: torch.device,
+        site: torch.Tensor | None = None,
+        kind: torch.Tensor | None = None,
+        coef: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Local list_relative computation on a specific device.
+
+        If site/kind/coef are provided, use those instead of self.site/self.kind/self.coef.
+        This allows computing with a subset of Hamiltonian terms.
         """
         configs_i = configs_i.to(device=device)
         psi_i = psi_i.to(device=device)
         configs_exclude = configs_exclude.to(device=device)
-        self._prepare_data(device)
+
+        if site is not None:
+            site = site.to(device=device).contiguous()
+            kind = kind.to(device=device).contiguous()
+            coef = coef.to(device=device).contiguous()
+        else:
+            self._prepare_data(device)
+            site = self.site
+            kind = self.kind
+            coef = self.coef
 
         _list_relative = getattr(
             self._load_module(device.type, configs_i.size(1), self.particle_cut),
             "list_relative",
         )
         configs_j, psi_j_real = _list_relative(
-            configs_i, torch.view_as_real(psi_i), self.site, self.kind, self.coef, configs_exclude
+            configs_i, torch.view_as_real(psi_i), site, kind, coef, configs_exclude
         )
         return configs_j, torch.view_as_complex(psi_j_real)
 
@@ -592,73 +608,76 @@ class Hamiltonian:
         if world_size == 1:
             return self._diagonal_term_local(configs, device)
 
-        # Distributed computation
-        batch_size = configs.size(0)
-        chunk_size = batch_size // world_size
-        remainder = batch_size % world_size
-
-        start_idx = rank * chunk_size + min(rank, remainder)
-        end_idx = start_idx + chunk_size + (1 if rank < remainder else 0)
-
-        if start_idx >= end_idx:
-            local_psi = torch.empty(0, dtype=torch.complex64, device=device)
-        else:
-            configs_chunk = configs[start_idx:end_idx]
-            local_psi = self._diagonal_term_local(configs_chunk, device)
-
+        # Distributed: split terms across ranks, each rank computes with full configs, then sum results
         if rank == 0:
             # Send RPC requests to all other ranks FIRST (asynchronous)
             rpc_refs = []
             for target_rank in range(1, world_size):
+                site_chunk, kind_chunk, coef_chunk = self._get_term_chunk(target_rank, world_size)
                 rpc_ref = rpc.remote(
                     f"rank_{target_rank}",
                     _remote_diagonal_term,
                     args=(
                         self._get_data_tuple(),
+                        site_chunk.cpu(),
+                        kind_chunk.cpu(),
+                        coef_chunk.cpu(),
                         configs.to("cpu"),
-                        target_rank,
-                        batch_size,
-                        world_size,
                     ),
                 )
                 rpc_refs.append(rpc_ref)
 
             # Now compute local chunk while RPC is running remotely
-            if start_idx >= end_idx:
-                local_psi = torch.empty(0, dtype=torch.complex64, device=device)
+            site_chunk, kind_chunk, coef_chunk = self._get_term_chunk(0, world_size)
+            if site_chunk.size(0) == 0:
+                local_psi = torch.zeros(configs.size(0), dtype=torch.complex64, device=device)
             else:
-                configs_chunk = configs[start_idx:end_idx]
-                local_psi = self._diagonal_term_local(configs_chunk, device)
+                local_psi = self._diagonal_term_local(configs, device, site=site_chunk, kind=kind_chunk, coef=coef_chunk)
 
-            # Collect results from all RPC calls
-            results = [(local_psi, start_idx)]
+            # Collect results from all RPC calls and sum
+            results = [local_psi]
             for rpc_ref in rpc_refs:
-                remote_psi, remote_start_idx = rpc_ref.to_here()
-                results.append((remote_psi.to(device), remote_start_idx))
+                results.append(rpc_ref.to_here().to(device))
 
-            # Sort by start_idx and concatenate
-            results.sort(key=lambda x: x[1])
-            final_psi = torch.cat([r[0] for r in results if r[0].size(0) > 0], dim=0)
-            return final_psi
+            final_result = torch.zeros(configs.size(0), dtype=torch.complex64, device=device)
+            for r in results:
+                final_result = final_result + r
+            return final_result
         else:
-            return local_psi
+            # Non-rank-0 workers just wait for RPC calls (handled by _remote_diagonal_term)
+            pass
 
     def _diagonal_term_local(
         self,
         configs: torch.Tensor,
         device: torch.device,
+        site: torch.Tensor | None = None,
+        kind: torch.Tensor | None = None,
+        coef: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Local diagonal_term computation on a specific device.
+
+        If site/kind/coef are provided, use those instead of self.site/self.kind/self.coef.
+        This allows computing with a subset of Hamiltonian terms.
         """
         configs = configs.to(device=device)
-        self._prepare_data(device)
+
+        if site is not None:
+            site = site.to(device=device).contiguous()
+            kind = kind.to(device=device).contiguous()
+            coef = coef.to(device=device).contiguous()
+        else:
+            self._prepare_data(device)
+            site = self.site
+            kind = self.kind
+            coef = self.coef
 
         _diagonal_term = getattr(
             self._load_module(device.type, configs.size(1), self.particle_cut),
             "diagonal_term",
         )
-        psi_result = torch.view_as_complex(_diagonal_term(configs, self.site, self.kind, self.coef))
+        psi_result = torch.view_as_complex(_diagonal_term(configs, site, kind, coef))
         return psi_result
 
 
@@ -669,6 +688,7 @@ class Hamiltonian:
 def _create_hamiltonian_from_data(data_tuple: tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]) -> Hamiltonian:
     """
     Create a Hamiltonian instance from serialized data tuple.
+    Used by RPC workers to reconstruct the Hamiltonian for computation.
     """
     site, kind, coef, particle_cut = data_tuple
     hamiltonian = Hamiltonian((site, kind, coef), kind="fermi" if particle_cut == 1 else "bose2")
@@ -677,121 +697,105 @@ def _create_hamiltonian_from_data(data_tuple: tuple[torch.Tensor, torch.Tensor, 
 
 def _remote_apply_within(
     data_tuple: tuple[torch.Tensor, torch.Tensor, torch.Tensor, int],
+    site_chunk: torch.Tensor,
+    kind_chunk: torch.Tensor,
+    coef_chunk: torch.Tensor,
     configs_i: torch.Tensor,
     psi_i: torch.Tensor,
     configs_j: torch.Tensor,
-    target_rank: int,
-    batch_size_i: int,
-    world_size: int,
 ) -> torch.Tensor:
     """
-    Remote apply_within computation on a worker.
+    Remote apply_within computation on a worker using term-based splitting.
+    Receives a term chunk and full configs, computes partial result.
     """
-    rank = get_rank()
-
     device = get_local_device()
     hamiltonian = _create_hamiltonian_from_data(data_tuple)
 
-    chunk_size = batch_size_i // world_size
-    remainder = batch_size_i % world_size
-    start_idx = target_rank * chunk_size + min(target_rank, remainder)
-    end_idx = start_idx + chunk_size + (1 if target_rank < remainder else 0)
-
-    if start_idx >= end_idx:
+    if site_chunk.size(0) == 0:
         return torch.zeros(configs_j.size(0), dtype=torch.complex64, device="cpu")
 
-    configs_i_chunk = configs_i[start_idx:end_idx].to(device)
-    psi_i_chunk = psi_i[start_idx:end_idx].to(device)
-    configs_j_dev = configs_j.to(device)
-
-    result = hamiltonian._apply_within_local(configs_i_chunk, psi_i_chunk, configs_j_dev, device)
+    result = hamiltonian._apply_within_local(
+        configs_i.to(device), psi_i.to(device), configs_j.to(device), device,
+        site=site_chunk, kind=kind_chunk, coef=coef_chunk,
+    )
     return result.to("cpu")
 
 
 def _remote_find_relative(
     data_tuple: tuple[torch.Tensor, torch.Tensor, torch.Tensor, int],
+    site_chunk: torch.Tensor,
+    kind_chunk: torch.Tensor,
+    coef_chunk: torch.Tensor,
     configs_i: torch.Tensor,
     psi_i: torch.Tensor,
     configs_exclude: torch.Tensor,
-    target_rank: int,
-    batch_size_i: int,
-    world_size: int,
     count_selected: int,
 ) -> torch.Tensor:
     """
-    Remote find_relative computation on a worker.
+    Remote find_relative computation on a worker using term-based splitting.
+    Receives a term chunk and full configs, finds relative configs for those terms.
     """
     device = get_local_device()
     hamiltonian = _create_hamiltonian_from_data(data_tuple)
 
-    chunk_size = batch_size_i // world_size
-    remainder = batch_size_i % world_size
-    start_idx = target_rank * chunk_size + min(target_rank, remainder)
-    end_idx = start_idx + chunk_size + (1 if target_rank < remainder else 0)
-
-    if start_idx >= end_idx:
+    if site_chunk.size(0) == 0:
         return torch.empty(0, configs_i.size(1), dtype=torch.uint8, device="cpu")
 
-    configs_i_chunk = configs_i[start_idx:end_idx].to(device)
-    psi_i_chunk = psi_i[start_idx:end_idx].to(device)
-    configs_exclude_dev = configs_exclude.to(device)
-
-    result = hamiltonian._find_relative_local(configs_i_chunk, psi_i_chunk, count_selected, configs_exclude_dev, device)
+    result = hamiltonian._find_relative_local(
+        configs_i.to(device), psi_i.to(device), count_selected, configs_exclude.to(device), device,
+        site=site_chunk, kind=kind_chunk, coef=coef_chunk,
+    )
     return result.to("cpu")
 
 
 def _remote_list_relative(
     data_tuple: tuple[torch.Tensor, torch.Tensor, torch.Tensor, int],
+    site_chunk: torch.Tensor,
+    kind_chunk: torch.Tensor,
+    coef_chunk: torch.Tensor,
     configs_i: torch.Tensor,
     psi_i: torch.Tensor,
     configs_exclude: torch.Tensor,
-    target_rank: int,
-    batch_size_i: int,
-    world_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Remote list_relative computation on a worker.
+    Remote list_relative computation on a worker using term-based splitting.
+    Receives a term chunk and full configs, lists relative configs for those terms.
     """
     device = get_local_device()
     hamiltonian = _create_hamiltonian_from_data(data_tuple)
 
-    chunk_size = batch_size_i // world_size
-    remainder = batch_size_i % world_size
-    start_idx = target_rank * chunk_size + min(target_rank, remainder)
-    end_idx = start_idx + chunk_size + (1 if target_rank < remainder else 0)
+    if site_chunk.size(0) == 0:
+        return (
+            torch.empty(0, configs_i.size(1), dtype=torch.uint8, device="cpu"),
+            torch.empty(0, dtype=torch.complex64, device="cpu"),
+        )
 
-    if start_idx >= end_idx:
-        return torch.empty(0, configs_i.size(1), dtype=torch.uint8, device="cpu"), torch.empty(0, dtype=torch.complex64, device="cpu")
-
-    configs_i_chunk = configs_i[start_idx:end_idx].to(device)
-    psi_i_chunk = psi_i[start_idx:end_idx].to(device)
-    configs_exclude_dev = configs_exclude.to(device)
-
-    configs_result, psi_result = hamiltonian._list_relative_local(configs_i_chunk, psi_i_chunk, configs_exclude_dev, device)
-    return configs_result.to("cpu"), psi_result.to("cpu")
+    configs, psi = hamiltonian._list_relative_local(
+        configs_i.to(device), psi_i.to(device), configs_exclude.to(device), device,
+        site=site_chunk, kind=kind_chunk, coef=coef_chunk,
+    )
+    return configs.to("cpu"), psi.to("cpu")
 
 
 def _remote_diagonal_term(
     data_tuple: tuple[torch.Tensor, torch.Tensor, torch.Tensor, int],
+    site_chunk: torch.Tensor,
+    kind_chunk: torch.Tensor,
+    coef_chunk: torch.Tensor,
     configs: torch.Tensor,
-    target_rank: int,
-    batch_size: int,
-    world_size: int,
-) -> tuple[torch.Tensor, int]:
+) -> torch.Tensor:
     """
-    Remote diagonal_term computation on a worker.
+    Remote diagonal_term computation on a worker using term-based splitting.
+    Receives a term chunk and full configs, computes partial diagonal result.
     """
     device = get_local_device()
     hamiltonian = _create_hamiltonian_from_data(data_tuple)
 
-    chunk_size = batch_size // world_size
-    remainder = batch_size % world_size
-    start_idx = target_rank * chunk_size + min(target_rank, remainder)
-    end_idx = start_idx + chunk_size + (1 if target_rank < remainder else 0)
+    if site_chunk.size(0) == 0:
+        return torch.zeros(configs.size(0), dtype=torch.complex64, device="cpu")
 
-    if start_idx >= end_idx:
-        return torch.empty(0, dtype=torch.complex64, device="cpu"), start_idx
-
-    configs_chunk = configs[start_idx:end_idx].to(device)
-    result = hamiltonian._diagonal_term_local(configs_chunk, device)
-    return result.to("cpu"), start_idx
+    result = hamiltonian._diagonal_term_local(
+        configs.to(device), device,
+        site=site_chunk, kind=kind_chunk, coef=coef_chunk,
+    )
+    return result.to("cpu")
