@@ -16,7 +16,7 @@ from .random_engine import dump_random_engine_state, load_random_engine_state
 from .optimizer import migrate_optimizer
 
 
-DACITE_CAST = [pathlib.Path, torch.device, tuple]
+DACITE_CAST = [pathlib.Path, torch.device, tuple, list]
 
 
 @dataclasses.dataclass
@@ -31,8 +31,11 @@ class RuntimeContext:
     random_seed: int | None = None
     # The interval to save the checkpoint
     checkpoint_interval: int = 5
-    # The device to run on
+    # The device to run on (for network and checkpoint storage)
     device: torch.device = torch.device(type="cuda", index=0)
+    # The devices to use for Hamiltonian computation (multi-GPU support)
+    # If None, defaults to [device]
+    devices: list[torch.device] | None = None
     # The dtype of the network, leave empty to skip modifying the dtype
     dtype: str | torch.dtype | None = None
     # The maximum absolute step for the process, leave empty to loop forever
@@ -55,6 +58,9 @@ class RuntimeContext:
                     raise ValueError(f"Unsupported dtype: {self.dtype}")
         if self.max_absolute_step is not None and self.max_relative_step is not None:
             raise ValueError("Both max_absolute_step and max_relative_step are set, please set only one of them.")
+        # Initialize devices to default if not provided
+        if self.devices is None:
+            self.devices = [self.device]
 
     def folder(self) -> pathlib.Path:
         """

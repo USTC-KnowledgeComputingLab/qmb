@@ -6,9 +6,18 @@ import logging
 import typing
 import dataclasses
 import omegaconf
+import torch
 import torch.utils.tensorboard
 from ..utility.context import RuntimeContext
 from ..utility.action_dict import action_dict
+
+
+def _get_devices_from_context(context: RuntimeContext) -> list[torch.device]:
+    """
+    Get the devices list from the runtime context.
+    """
+    assert context.devices is not None
+    return context.devices
 
 
 @dataclasses.dataclass
@@ -35,6 +44,9 @@ class ChopImagConfig:
         model = context.create_model(runtime_config.model)
         data = checkpoint_data
 
+        # Get devices for multi-GPU computation
+        devices = _get_devices_from_context(context)
+
         logging.info(
             "Arguments Summary: Chop Size: %d, Second Order Magnitude: %.10f",
             self.chop_size,
@@ -59,7 +71,7 @@ class ChopImagConfig:
             logging.info("The number of configurations: %d", num_configs)
             writer.add_scalar("chop_imag/num_configs", num_configs, i)  # type: ignore[no-untyped-call]
             psi = psi / psi.norm()
-            hamiltonian_psi = model.apply_within(configs, psi, configs)
+            hamiltonian_psi = model.apply_within(configs, psi, configs, devices)
             psi_hamiltonian_psi = (psi.conj() @ hamiltonian_psi).real
             energy = psi_hamiltonian_psi
             logging.info(

@@ -23,6 +23,7 @@ from .haar import (
     _DynamicLanczos,
     _sampling_from_last_iteration,
     _merge_pool_from_neural_network_and_pool_from_last_iteration,
+    _get_devices_from_context,
 )
 from .orbit import NaturalOrbitCalculator, _read_fcidump_tensors
 from ..models.optimized_basis import Model as OptimizedModel, ModelConfig as OptimizedModelConfig
@@ -281,6 +282,8 @@ class HaarWithOrbitConfig:
             target_energy: torch.Tensor
             lanczos_results: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
 
+            # Get devices for multi-GPU computation
+            devices = _get_devices_from_context(context)
             for lanczos_results in _DynamicLanczos(
                 model=model,
                 configs=configs,
@@ -293,6 +296,7 @@ class HaarWithOrbitConfig:
                 first_extend=self.krylov_extend_first,
                 eigen_count=self.krylov_eigen_count,
                 period=self.krylov_period,
+                devices=devices,
             ).run():
                 target_energy, configs, original_psi = lanczos_results[0]
                 logging.info("Current energy: %.10f, samples: %d", target_energy.item(), len(configs))
@@ -393,7 +397,7 @@ class HaarWithOrbitConfig:
 
             loss = typing.cast(torch.Tensor, torch.enable_grad(closure)())  # type: ignore[no-untyped-call,call-arg]
             psi: torch.Tensor = loss.psi  # type: ignore[attr-defined]
-            final_energy = ((psi.conj() @ model.apply_within(configs, psi, configs)) / (psi.conj() @ psi)).real
+            final_energy = ((psi.conj() @ model.apply_within(configs, psi, configs, devices)) / (psi.conj() @ psi)).real
             logging.info(
                 "Loss: %.10f, Final energy: %.10f, Target energy: %.10f, Reference energy: %.10f, Final error: %.10f",
                 loss.item(),
