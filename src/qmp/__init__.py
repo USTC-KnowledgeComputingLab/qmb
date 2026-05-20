@@ -1,0 +1,1 @@
+from qmp.version import __version__

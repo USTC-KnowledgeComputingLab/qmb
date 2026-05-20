@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "qmp-kit"
+dynamic = ["version"]
+requires-python = ">=3.12"
+authors = [{ name = "Hao Zhang", email = "hzhangxyz@outlook.com" }]
+description = "Quantum Manybody Problem"
+license = "AGPL-3.0-only"
+keywords = ["quantum", "manybody", "quantum-chemistry", "quantum-simulation"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/USTC-KnowledgeComputingLab/qmp-kit"
+Repository = "https://github.com/USTC-KnowledgeComputingLab/qmp-kit.git"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.version.raw-options]
+version_scheme = "no-guess-dev"
+local_scheme = "no-local-version"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/qmp/_version.py"
