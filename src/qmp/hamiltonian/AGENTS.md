@@ -31,7 +31,7 @@ CPU 和 CUDA 后端各自是独立的自包含文件（`_hamiltonian_cpu.cpp` / 
 | 线程模型 | 串行 `for term × for batch` | `__global__` 2D kernel，每线程一个 (term, config) 对 |
 | 排序 | `std::sort` + 索引数组 + `array_less` | `thrust::sort_by_key` on device |
 | 结果累加 | 直接 `+=` | `atomicAdd`（两个 double 各一次） |
-| 奇偶校验 | 预计算 `constexpr` 256 字节查表 | `__popc(byte) & 1` 硬件指令 |
+| 奇偶校验 | `std::popcount(byte) & 1`（C++20 `<bit>`） | `__popc(byte) & 1` 硬件指令 |
 | 内存 | host memory | device memory，全部指针为 device 侧 |
 | 同步 | 无需 | `cudaDeviceSynchronize()` |
 | 核心逻辑 | 完全一致 | 完全一致（仅标注和累加方式不同） |

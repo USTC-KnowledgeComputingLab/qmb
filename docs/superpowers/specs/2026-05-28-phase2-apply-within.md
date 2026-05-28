@@ -19,7 +19,7 @@ Implement the Hamiltonian subsystem's `apply_within_subspace_in_double_side` ope
 | Direction modes | `forward` (term×config_i→config_j), `backward` (term×config_j→config_i) |
 | Devices | Required param, currently `["localhost:cuda:0"]` or `["localhost:cpu:0"]` |
 | kind type | `Literal["fermi", "bose2"]` |
-| JW sign precompute | 256-byte constexpr parity table, O(s/8) per operator |
+| JW sign precompute | `std::popcount` (C++20 `<bit>`) hardware instruction |
 | Sorting hints | `configs_i_sorted`, `configs_j_sorted` — skip redundant sort when true |
 | Forward/Backward | Template parameter (compile-time dispatch) |
 | CPU backend | Reference implementation, serial correctness baseline |
@@ -54,7 +54,7 @@ class Hamiltonian:
 
 ## JW Sign Precomputation
 
-256-byte `kParityTable[256]` — constexpr popcount parity per byte value. The `jw_parity<n_qubytes>` function computes parity for bits left of a site in O(n_qubytes) by iterating complete bytes (one table lookup each) plus one masked partial byte. Replaces the old O(site_index) per-bit loop.
+`std::popcount` (C++20 `<bit>`) computes the popcount parity in a single instruction: `std::popcount(byte) & 1`. Replaces the old O(site_index) per-bit loop with an O(n_qubytes) per-byte scan. The CUDA equivalent is `__popc`。
 
 ## Two Direction Modes
 
@@ -116,4 +116,3 @@ tests/
 - find_relative, list_relative, diagonal_term (future phases)
 - Multi-device/multi-GPU execution (raises NotImplementedError)
 - OpenMP parallelism in CPU backend
-- CUDA backend (stub only in this phase)

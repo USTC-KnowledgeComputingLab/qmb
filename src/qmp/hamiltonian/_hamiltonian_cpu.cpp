@@ -1,23 +1,13 @@
 #include <torch/extension.h>
-#include <array>
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cstdint>
-#include <utility>
 
 namespace {
 
-constexpr auto kParityTable = []() constexpr {
-    std::array<std::uint8_t, 256> t{};
-    for (int i = 0; i < 256; ++i) {
-        std::uint8_t p = 0;
-        for (int b = 0; b < 8; ++b) p ^= (i >> b) & 1;
-        t[i] = p;
-    }
-    return t;
-}();
-
 inline std::uint8_t popcount_parity(std::uint8_t byte) {
-    return kParityTable[byte];
+    return std::popcount(static_cast<unsigned int>(byte)) & 1;
 }
 
 template <std::int64_t size>

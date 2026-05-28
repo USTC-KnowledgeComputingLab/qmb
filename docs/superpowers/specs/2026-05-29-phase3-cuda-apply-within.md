@@ -18,7 +18,7 @@ Port the `apply_within_subspace_in_double_side` operator to CUDA GPU, reusing th
 | Result accumulation | `atomicAdd` (two double per complex) |
 | Binary search | Same lexicographic comparator as CPU, in device memory |
 | Forward/Backward | `bool` template parameter, `if constexpr` dispatch |
-| Tools | All utilities (bit ops, jw_parity, array_less) embedded in `.cu`. Parity uses `__popc` intrinsic instead of lookup table. |
+| JW parity | `std::popcount` (CPU) / `__popc` (CUDA) hardware instruction |
 
 ## Architecture
 
