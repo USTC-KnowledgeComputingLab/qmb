@@ -124,9 +124,14 @@ class Model(ModelProto[ModelConfig]):
         eri_full = _restore_eri(numpy.asarray(args.eri, dtype=numpy.float64), n_orbit)
         energy_2: torch.Tensor = torch.as_tensor(eri_full, dtype=torch.float64)
 
-        # Apply the same permutation used in fcidump.py to convert from
-        # chemist's (ij|kl) notation to the form expected by OpenFermion.
-        energy_2 = energy_2.permute(0, 2, 3, 1).contiguous() / 2
+        # PySCF eri[i,j,k,l] = (ij|kl) in chemist notation
+        # Following fcidump.py approach:
+        # 1. Permute to (i,k,l,j) indexing and divide by 2
+        # 2. Assign to spin-orbital blocks: aaaa, abba, baab, bbbb
+        #    (NO abab/baba blocks - only abba/baab for opposite-spin interactions)
+
+        # Permute: energy_2[i,k,l,j] = eri[i,j,k,l] = (ij|kl)
+        energy_2_permuted = energy_2.permute(0, 2, 3, 1).contiguous() / 2
 
         # -- Build spin-orbital integrals -----------------------------------------
         energy_1_b: torch.Tensor = torch.zeros([n_orbit * 2, n_orbit * 2], dtype=torch.float64)
@@ -135,15 +140,23 @@ class Model(ModelProto[ModelConfig]):
         )
         energy_1_b[0::2, 0::2] = energy_1
         energy_1_b[1::2, 1::2] = energy_1
-        energy_2_b[0::2, 0::2, 0::2, 0::2] = energy_2
-        energy_2_b[0::2, 1::2, 1::2, 0::2] = energy_2
-        energy_2_b[1::2, 0::2, 0::2, 1::2] = energy_2
-        energy_2_b[1::2, 1::2, 1::2, 1::2] = energy_2
+
+        # aaaa block: V[2i, 2j, 2k, 2l]
+        energy_2_b[0::2, 0::2, 0::2, 0::2] = energy_2_permuted
+
+        # abba block: V[2i, 2j+1, 2k+1, 2l]
+        energy_2_b[0::2, 1::2, 1::2, 0::2] = energy_2_permuted
+
+        # baab block: V[2i+1, 2j, 2k, 2l+1]
+        energy_2_b[1::2, 0::2, 0::2, 1::2] = energy_2_permuted
+
+        # bbbb block: V[2i+1, 2j+1, 2k+1, 2l+1]
+        energy_2_b[1::2, 1::2, 1::2, 1::2] = energy_2_permuted
 
         # -- Convert to FermionOperator via OpenFermion ---------------------------
         logging.info("Converting integrals to internal Hamiltonian representation")
         interaction_operator: openfermion.InteractionOperator = openfermion.InteractionOperator(
-            args.nuclear_repulsion, energy_1_b.numpy(), energy_2_b.numpy()
+            0.0, energy_1_b.numpy(), energy_2_b.numpy()
         )  # type: ignore[no-untyped-call]
         fermion_operator: openfermion.FermionOperator = openfermion.get_fermion_operator(interaction_operator)  # type: ignore[no-untyped-call]
         openfermion_hamiltonian_dict = {
@@ -156,12 +169,14 @@ class Model(ModelProto[ModelConfig]):
         self.n_qubits: int = n_orbit * 2
         self.n_electrons: int = n_electron
         self.n_spins: int = n_spin
+        self.nuclear_repulsion: float = args.nuclear_repulsion
         self.ref_energy: float = args.ref_energy
         logging.info(
-            "Identified %d qubits, %d electrons, spin=%d, ref_energy=%.10f",
+            "Identified %d qubits, %d electrons, spin=%d, nuclear_repulsion=%.10f, ref_energy=%.10f",
             self.n_qubits,
             self.n_electrons,
             self.n_spins,
+            self.nuclear_repulsion,
             self.ref_energy,
         )
 
