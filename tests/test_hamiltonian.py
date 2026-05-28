@@ -54,7 +54,7 @@ def _build_hubbard_2x2():
     return Hamiltonian(ham, kind="fermi", max_op_number=4, devices=["localhost:cpu:0"])
 
 
-class TestBasicFermion:
+class TestCpuBasicFermion:
     def test_single_hopping_forward(self):
         """H|c†₀|vac⟩ = -|c†₁|vac⟩"""
         h = _build_two_site_fermion()
@@ -121,7 +121,7 @@ class TestBasicFermion:
         assert torch.allclose(pj, torch.tensor([0.0 + 1.0j], dtype=torch.complex64))
 
 
-class TestBoson:
+class TestCpuBoson:
     def test_no_jw_sign(self):
         h = _build_two_site_boson()
         ci = torch.tensor([[1]], dtype=torch.uint8)
@@ -131,7 +131,7 @@ class TestBoson:
         assert torch.allclose(pj, torch.tensor([-1.0 + 0.0j], dtype=torch.complex64))
 
 
-class TestDirection:
+class TestCpuDirection:
     def test_forward_matches_backward(self):
         h = _build_two_site_fermion()
         ci = torch.tensor([[1], [2]], dtype=torch.uint8)
@@ -151,7 +151,7 @@ class TestDirection:
         assert torch.allclose(fwd, bwd)
 
 
-class TestDeprecation:
+class TestCpuDeprecation:
     def test_apply_within_warns(self):
         h = _build_two_site_fermion()
         ci = torch.tensor([[1]], dtype=torch.uint8)
@@ -163,7 +163,7 @@ class TestDeprecation:
         assert torch.allclose(result, expected)
 
 
-class TestDevices:
+class TestCpuDevices:
     def test_multi_device_raises_on_init(self):
         with pytest.raises(NotImplementedError):
             Hamiltonian(
@@ -174,7 +174,7 @@ class TestDevices:
             )
 
 
-class TestSorted:
+class TestCpuSorted:
     def test_sorted_params_no_crash(self):
         h = _build_two_site_fermion()
         ci = torch.tensor([[1]], dtype=torch.uint8)
@@ -186,7 +186,7 @@ class TestSorted:
         assert torch.allclose(pj, torch.tensor([-1.0 + 0.0j], dtype=torch.complex64))
 
 
-class TestHubbard:
+class TestCpuHubbard:
     def test_diagonal_u_term(self):
         """U term on doubly occupied site gives +U."""
         h = _build_hubbard_2x2()
@@ -206,7 +206,7 @@ class TestHubbard:
         assert torch.allclose(pj, torch.tensor([-1.0 + 0.0j, -1.0 + 0.0j], dtype=torch.complex64))
 
 
-class TestEdgeCases:
+class TestCpuEdgeCases:
     def test_identity_configs(self):
         """configs_i == configs_j with no diagonal → zero."""
         h = _build_two_site_fermion()
@@ -338,7 +338,7 @@ class TestEdgeCases:
         assert torch.allclose(pj, torch.tensor([-1.0 + 0.0j, -0.5 + 0.0j, 0.0 + 0.0j], dtype=torch.complex64))
 
 
-class TestBose2EdgeCases:
+class TestCpuBose2EdgeCases:
     def test_bose2_diagonal(self):
         """Bose2 diagonal number operators."""
         h = Hamiltonian(
@@ -368,7 +368,7 @@ class TestBose2EdgeCases:
         assert torch.allclose(pj, torch.tensor([-2.0 + 0.0j], dtype=torch.complex64))
 
 
-class TestInvalidInput:
+class TestCpuInvalidInput:
     def test_invalid_device_string(self):
         with pytest.raises(ValueError, match="Invalid device string"):
             Hamiltonian(
@@ -386,3 +386,141 @@ class TestInvalidInput:
                 max_op_number=4,
                 devices=["remote:cuda:0"],
             )
+
+
+class TestCUDA:
+    _fermi_hopping = {((1, 1), (0, 0)): -1.0, ((0, 1), (1, 0)): -1.0}
+
+    @staticmethod
+    def _cpu(ham_dict, *, kind="fermi", max_op_number=4):
+        return Hamiltonian(ham_dict, kind=kind, max_op_number=max_op_number, devices=["localhost:cpu:0"])
+
+    @staticmethod
+    def _cuda(ham_dict, *, kind="fermi", max_op_number=4):
+        return Hamiltonian(ham_dict, kind=kind, max_op_number=max_op_number, devices=["localhost:cuda:0"])
+
+    @staticmethod
+    def _assert_allclose(a, b, **kwargs):
+        assert torch.allclose(a.cpu(), b.cpu(), **kwargs)
+
+    def test_same_as_cpu(self):
+        h_cpu = self._cpu(self._fermi_hopping)
+        h_cuda = self._cuda(self._fermi_hopping)
+        ci = torch.tensor([[1], [2]], dtype=torch.uint8)
+        pi = torch.tensor([1.0 + 0.0j, 0.5 + 0.0j], dtype=torch.complex64)
+        cj = torch.tensor([[1], [2]], dtype=torch.uint8)
+        self._assert_allclose(
+            h_cpu.apply_within_subspace_in_double_side(ci, pi, cj),
+            h_cuda.apply_within_subspace_in_double_side(ci, pi, cj),
+            atol=1e-6,
+        )
+
+    def test_forward_backward(self):
+        h_cuda = self._cuda(self._fermi_hopping)
+        ci = torch.tensor([[1], [2]], dtype=torch.uint8)
+        pi = torch.tensor([1.0 + 0.0j, 0.5 + 0.0j], dtype=torch.complex64)
+        cj = torch.tensor([[1], [2]], dtype=torch.uint8)
+        fwd = h_cuda.apply_within_subspace_in_double_side(ci, pi, cj, direction="forward")
+        bwd = h_cuda.apply_within_subspace_in_double_side(ci, pi, cj, direction="backward")
+        self._assert_allclose(fwd, bwd, atol=1e-6)
+
+    def test_boson(self):
+        ham = {((1, 1), (0, 0)): -1.0, ((0, 1), (1, 0)): -1.0}
+        h_cpu = self._cpu(ham, kind="bose2")
+        h_cuda = self._cuda(ham, kind="bose2")
+        ci = torch.tensor([[1]], dtype=torch.uint8)
+        pi = torch.tensor([1.0 + 0.0j], dtype=torch.complex64)
+        cj = torch.tensor([[2]], dtype=torch.uint8)
+        self._assert_allclose(
+            h_cpu.apply_within_subspace_in_double_side(ci, pi, cj),
+            h_cuda.apply_within_subspace_in_double_side(ci, pi, cj),
+        )
+
+    def test_complex_coefficient(self):
+        ham = {((1, 1), (0, 0)): 0.0 + 1.0j}
+        h_cpu = self._cpu(ham)
+        h_cuda = self._cuda(ham)
+        ci = torch.tensor([[1]], dtype=torch.uint8)
+        pi = torch.tensor([1.0 + 0.0j], dtype=torch.complex64)
+        cj = torch.tensor([[2]], dtype=torch.uint8)
+        self._assert_allclose(
+            h_cpu.apply_within_subspace_in_double_side(ci, pi, cj),
+            h_cuda.apply_within_subspace_in_double_side(ci, pi, cj),
+            atol=1e-6,
+        )
+
+    def test_pauli_exclusion(self):
+        h_cuda = self._cuda(self._fermi_hopping)
+        ci = torch.tensor([[3]], dtype=torch.uint8)
+        pi = torch.tensor([1.0 + 0.0j], dtype=torch.complex64)
+        cj = torch.tensor([[3]], dtype=torch.uint8)
+        pj = h_cuda.apply_within_subspace_in_double_side(ci, pi, cj)
+        assert torch.allclose(pj.cpu(), torch.tensor([0.0 + 0.0j], dtype=torch.complex64))
+
+    def test_diagonal_only(self):
+        ham = {((0, 1), (0, 0)): 1.0, ((1, 1), (1, 0)): 2.0}
+        h_cpu = self._cpu(ham)
+        h_cuda = self._cuda(ham)
+        ci = torch.tensor([[1], [2]], dtype=torch.uint8)
+        pi = torch.tensor([1.0 + 0.0j, 1.0 + 0.0j], dtype=torch.complex64)
+        cj = torch.tensor([[1], [2]], dtype=torch.uint8)
+        self._assert_allclose(
+            h_cpu.apply_within_subspace_in_double_side(ci, pi, cj),
+            h_cuda.apply_within_subspace_in_double_side(ci, pi, cj),
+            atol=1e-6,
+        )
+
+    def test_empty_batches(self):
+        h_cuda = self._cuda(self._fermi_hopping)
+        ci = torch.tensor([[1]], dtype=torch.uint8)
+        pi = torch.tensor([1.0 + 0.0j], dtype=torch.complex64)
+        cj = torch.empty((0, 1), dtype=torch.uint8)
+        pj = h_cuda.apply_within_subspace_in_double_side(ci, pi, cj)
+        assert pj.numel() == 0
+
+    def test_unsorted_configs(self):
+        h_cuda = self._cuda(self._fermi_hopping)
+        ci = torch.tensor([[1], [2]], dtype=torch.uint8)
+        pi = torch.tensor([1.0 + 0.0j, 0.5 + 0.0j], dtype=torch.complex64)
+        cj = torch.tensor([[2], [1], [0]], dtype=torch.uint8)
+        pj = h_cuda.apply_within_subspace_in_double_side(ci, pi, cj)
+        expected = torch.tensor([-1.0 + 0.0j, -0.5 + 0.0j, 0.0 + 0.0j], dtype=torch.complex64)
+        assert torch.allclose(pj.cpu(), expected)
+
+    def test_superset_configs_j(self):
+        h_cuda = self._cuda(self._fermi_hopping)
+        ci = torch.tensor([[1]], dtype=torch.uint8)
+        pi = torch.tensor([1.0 + 0.0j], dtype=torch.complex64)
+        cj = torch.tensor([[0], [1], [2]], dtype=torch.uint8)
+        pj = h_cuda.apply_within_subspace_in_double_side(ci, pi, cj)
+        expected = torch.tensor([0.0 + 0.0j, 0.0 + 0.0j, -1.0 + 0.0j], dtype=torch.complex64)
+        assert torch.allclose(pj.cpu(), expected)
+
+    def test_hubbard_hopping(self):
+        ham = {
+            ((2, 1), (0, 0)): -1.0, ((0, 1), (2, 0)): -1.0,
+            ((3, 1), (1, 0)): -1.0, ((1, 1), (3, 0)): -1.0,
+        }
+        h_cpu = self._cpu(ham)
+        h_cuda = self._cuda(ham)
+        ci = torch.tensor([[0b00000001]], dtype=torch.uint8)
+        pi = torch.tensor([1.0 + 0.0j], dtype=torch.complex64)
+        cj = torch.tensor([[0b00000100]], dtype=torch.uint8)
+        self._assert_allclose(
+            h_cpu.apply_within_subspace_in_double_side(ci, pi, cj),
+            h_cuda.apply_within_subspace_in_double_side(ci, pi, cj),
+            atol=1e-6,
+        )
+
+    def test_hubbard_u_term(self):
+        ham = {((0, 1), (0, 0), (1, 1), (1, 0)): 4.0}
+        h_cpu = self._cpu(ham)
+        h_cuda = self._cuda(ham)
+        ci = torch.tensor([[0b00000011]], dtype=torch.uint8)
+        pi = torch.tensor([1.0 + 0.0j], dtype=torch.complex64)
+        cj = torch.tensor([[0b00000011]], dtype=torch.uint8)
+        self._assert_allclose(
+            h_cpu.apply_within_subspace_in_double_side(ci, pi, cj),
+            h_cuda.apply_within_subspace_in_double_side(ci, pi, cj),
+            atol=1e-6,
+        )

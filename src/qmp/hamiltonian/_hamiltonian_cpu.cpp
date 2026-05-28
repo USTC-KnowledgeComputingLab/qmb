@@ -260,13 +260,6 @@ auto apply_within_subspace_in_double_side_interface(
 #define QMP_LIBRARY_HELPER(nq, pc, mo) qmp_hamiltonian_##nq##_##pc##_##mo
 #define QMP_LIBRARY(nq, pc, mo) QMP_LIBRARY_HELPER(nq, pc, mo)
 
-TORCH_LIBRARY_FRAGMENT(QMP_LIBRARY(N_QUBYTES, PARTICLE_CUT, MAX_OP_NUMBER), m) {
-    m.def("apply_within_subspace_in_double_side("
-          "Tensor configs_i, Tensor psi_i, Tensor configs_j, "
-          "Tensor site, Tensor kind, Tensor coef, "
-          "bool configs_i_sorted, bool configs_j_sorted, int direction) -> Tensor");
-}
-
 TORCH_LIBRARY_IMPL(QMP_LIBRARY(N_QUBYTES, PARTICLE_CUT, MAX_OP_NUMBER), CPU, m) {
     m.impl("apply_within_subspace_in_double_side",
            apply_within_subspace_in_double_side_interface<N_QUBYTES, PARTICLE_CUT, MAX_OP_NUMBER>);

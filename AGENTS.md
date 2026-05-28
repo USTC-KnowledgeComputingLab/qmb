@@ -60,4 +60,12 @@ tests/            # 测试
 
 ## 子系统设计
 
-- **Hamiltonian**：参见 `src/qmp/hamiltonian/AGENTS.md`，包含 C++ 内核/接口架构、设备归属、JIT 编译等设计细节。
+- **Hamiltonian**：参见 `src/qmp/hamiltonian/AGENTS.md`，包含 C++ 内核/接口架构、CPU/CUDA 差异、设备归属、JIT 编译等设计细节。
+
+## 跨设备测试
+
+测试应覆盖 CPU 和 CUDA 两种后端。`TestCUDA` 类模式：使用 `devices=["localhost:cuda:0"]` 创建 GPU Hamiltonian，结果与 `devices=["localhost:cpu:0"]` 的 CPU 参考输出对比。比较前需将结果移到 CPU 侧（`.cpu()`）。
+
+## TORCH_LIBRARY 注册原则
+
+每个 Torch 自定义 operator 的 `TORCH_LIBRARY_FRAGMENT`（operator schema 定义）**只能出现一次**。重复声明会导致 `c10::Dispatcher::registerDef` panic。当前约定：fragment 集中在 `_hamiltonian.cpp` 的 `#else` 分支中，该文件包含在 CPU 后端编译的源文件列表中。声明模块和 CUDA 后端不含 operator 定义。CPU 和 CUDA 后端各自仅含 `TORCH_LIBRARY_IMPL`。

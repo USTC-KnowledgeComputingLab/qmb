@@ -44,8 +44,33 @@ auto prepare(pybind11::dict hamiltonian, std::int64_t max_op_number)
     return std::make_tuple(site, kind, coef);
 }
 
+#ifndef N_QUBYTES
+#define N_QUBYTES 0
+#endif
+#ifndef PARTICLE_CUT
+#define PARTICLE_CUT 0
+#endif
+#ifndef MAX_OP_NUMBER
+#define MAX_OP_NUMBER 0
+#endif
+
+#define QMP_LIBRARY_HELPER(nq, pc, mo) qmp_hamiltonian_##nq##_##pc##_##mo
+#define QMP_LIBRARY(nq, pc, mo) QMP_LIBRARY_HELPER(nq, pc, mo)
+
+#if N_QUBYTES == 0
 PYBIND11_MODULE(qmp_hamiltonian, m) {
     m.def("prepare", &prepare, pybind11::arg("hamiltonian"), pybind11::arg("max_op_number"));
 }
+#else
+TORCH_LIBRARY_FRAGMENT(QMP_LIBRARY(N_QUBYTES, PARTICLE_CUT, MAX_OP_NUMBER), m) {
+    m.def("apply_within_subspace_in_double_side("
+          "Tensor configs_i, Tensor psi_i, Tensor configs_j, "
+          "Tensor site, Tensor kind, Tensor coef, "
+          "bool configs_i_sorted, bool configs_j_sorted, int direction) -> Tensor");
+}
+#endif
+
+#undef QMP_LIBRARY
+#undef QMP_LIBRARY_HELPER
 
 }  // namespace qmp_hamiltonian

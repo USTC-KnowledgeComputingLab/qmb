@@ -79,7 +79,10 @@ class Hamiltonian:
                 case "declaration":
                     sources = [os.path.join(folder, "_hamiltonian.cpp")]
                 case "cpu":
-                    sources = [os.path.join(folder, "_hamiltonian_cpu.cpp")]
+                    sources = [
+                        os.path.join(folder, "_hamiltonian.cpp"),
+                        os.path.join(folder, "_hamiltonian_cpu.cpp"),
+                    ]
                 case "cuda":
                     sources = [os.path.join(folder, "_hamiltonian_cuda.cu")]
                 case _:
