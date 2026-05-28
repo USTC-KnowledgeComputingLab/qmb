@@ -388,6 +388,142 @@ class TestCpuInvalidInput:
             )
 
 
+class TestCpuHeisenberg:
+    """Heisenberg spin chain: H = J/2 Σ (S+_i S-_j + h.c.) + Jz Σ S^z_i S^z_j.
+    S=1/2 hard-core bosons (bose2), particle_cut=2, each site 0 or 1 boson.
+    S+ = c†, S- = c, S^z = n - 1/2.
+    S^z_i S^z_j = n_i n_j - n_i/2 - n_j/2 + 1/4."""
+
+    def _build_heisenberg_2site(self, jxy=1.0, jz=1.0):
+        ham = {}
+        # hopping: Jxy/2 * (S+_0 S-_1 + h.c.)
+        ham[((0, 1), (1, 0))] = jxy / 2
+        ham[((1, 1), (0, 0))] = jxy / 2
+        # n_0 n_1 term
+        ham[((0, 1), (0, 0), (1, 1), (1, 0))] = jz
+        # -1/2 * n_0
+        ham[((0, 1), (0, 0))] = -jz / 2
+        # -1/2 * n_1
+        ham[((1, 1), (1, 0))] = -jz / 2
+        # constant 1/4 omitted
+        return Hamiltonian(ham, kind="bose2", max_op_number=4, devices=["localhost:cpu:0"])
+
+    def test_ferromagnetic_ground_state(self):
+        """Jxy = Jz = -1 (ferromagnetic): ||11⟩⟩ has energy 0 (both spins aligned)."""
+        h = self._build_heisenberg_2site(jxy=-1.0, jz=-1.0)
+        # ||11⟩⟩ both occupied: apply H to |11⟩
+        ci = torch.tensor([[3]], dtype=torch.uint8)  # |11⟩
+        pi = torch.tensor([1.0 + 0.0j], dtype=torch.complex64)
+        cj = torch.tensor([[3]], dtype=torch.uint8)
+        pj = h.apply_within_subspace_in_double_side(ci, pi, cj)
+        # Jxy term: S+_0 S-_1 on |11⟩ → site1=1, subtract→0, site0=0, add→1. parity 0. same config.
+        # But wait: S+_0 creates at 0 (already occupied) → fail. S-_1 annihilates at 1 → succeeds.
+        # Actually: apply operators right to left: 
+        #   S-_1 (kind=0 at site 1): 1→0, parity loop sites 0..0=bit0=1 → parity=1, sign=-1
+        #   S+_0 (kind=1 at site 0): 0→1, parity loop sites 0..-1=none → parity=0
+        # result: |11⟩ unchanged, sign=-1, contrib = (-jxy/2)*(-1)*1 = jxy/2
+        # Same from h.c.: S+_0, S-_1 reversed. h.c. contrib = jxy/2
+        # Total hopping contrib = jxy = -1.0
+        # Jz S^z S^z: n_0 n_1 contributes +jz = -1.0 since both occupied.
+        # -1/2 n_0: -jz/2 * n_0 = 0.5
+        # -1/2 n_1: -jz/2 * n_1 = 0.5
+        # Total = -1.0 + 0.5 + 0.5 = 0.0 (ferromagnetic ground state, constant term omitted)
+        assert torch.allclose(pj, torch.tensor([0.0 + 0.0j], dtype=torch.complex64))
+
+    def test_antiferromagnetic_singlet(self):
+        """Jxy = Jz = 1 (antiferromagnetic): check H|01⟩ → Jxy/2 |10⟩ + diagonal terms."""
+        h = self._build_heisenberg_2site(jxy=1.0, jz=1.0)
+        ci = torch.tensor([[1]], dtype=torch.uint8)  # |01⟩: site0 occupied
+        pi = torch.tensor([1.0 + 0.0j], dtype=torch.complex64)
+        cj = torch.tensor([[1], [2]], dtype=torch.uint8)  # |01⟩, |10⟩
+        pj = h.apply_within_subspace_in_double_side(ci, pi, cj)
+        # |01⟩: -n_0/2 = -0.5, n_0 n_1=0 (n_1=0). contrib = -0.5
+        # |10⟩: hopping = jxy/2 = 0.5
+        assert torch.allclose(pj, torch.tensor([-0.5 + 0.0j, 0.5 + 0.0j], dtype=torch.complex64))
+
+    def test_heisenberg_forward_matches_backward(self):
+        h = self._build_heisenberg_2site(jxy=1.0, jz=2.0)
+        ci = torch.tensor([[0], [1], [2]], dtype=torch.uint8)
+        pi = torch.tensor([1.0 + 0.0j, 1.0 + 0.0j, 0.5 + 0.0j], dtype=torch.complex64)
+        cj = torch.tensor([[0], [1], [2]], dtype=torch.uint8)
+        fwd = h.apply_within_subspace_in_double_side(ci, pi, cj, direction="forward")
+        bwd = h.apply_within_subspace_in_double_side(ci, pi, cj, direction="backward")
+        assert torch.allclose(fwd, bwd)
+
+
+class TestCpuMultiByteConfigs:
+    """Systems with n_qubytes > 1 (more than 8 spin-orbitals)."""
+
+    def test_nqubytes_2_hopping(self):
+        """10-site spinless fermion chain (n_qubytes=2). byte0=sites 0-7, byte1=sites 8-15.
+        H = -t Σ c†_{i} c_{i+1} + h.c."""
+        ham = {}
+        for i in range(9):
+            ham[((i + 1, 1), (i, 0))] = -1.0
+            ham[((i, 1), (i + 1, 0))] = -1.0
+        h = Hamiltonian(ham, kind="fermi", max_op_number=4, devices=["localhost:cpu:0"])
+        ci = torch.tensor([[1, 0]], dtype=torch.uint8)  # site 0: byte0 bit0
+        cj = torch.tensor([[2, 0]], dtype=torch.uint8)  # site 1: byte0 bit1
+        pi = torch.tensor([1.0 + 0.0j], dtype=torch.complex64)
+        pj = h.apply_within_subspace_in_double_side(ci, pi, cj)
+        assert torch.allclose(pj, torch.tensor([-1.0 + 0.0j], dtype=torch.complex64))
+
+    def test_nqubytes_2_cross_byte(self):
+        """Hopping across byte boundary: H[c†_8 c_7]|0000000100000000⟩ → -|1000000000000000⟩.
+        Site 7 (byte0 bit7=128) → site 8 (byte1 bit0=1). JW sign: parity=0."""
+        ham = {((8, 1), (7, 0)): -1.0, ((7, 1), (8, 0)): -1.0}
+        h = Hamiltonian(ham, kind="fermi", max_op_number=4, devices=["localhost:cpu:0"])
+        ci = torch.tensor([[128, 0]], dtype=torch.uint8)  # site 7: byte0 bit7
+        cj = torch.tensor([[0, 1]], dtype=torch.uint8)    # site 8: byte1 bit0
+        pi = torch.tensor([1.0 + 0.0j], dtype=torch.complex64)
+        pj = h.apply_within_subspace_in_double_side(ci, pi, cj)
+        assert torch.allclose(pj, torch.tensor([-1.0 + 0.0j], dtype=torch.complex64))
+
+    def test_nqubytes_3_forward_backward(self):
+        """20-site spinless fermion (n_qubytes=3). Verify forward == backward."""
+        ham = {}
+        for i in range(19):
+            ham[((i + 1, 1), (i, 0))] = -1.0
+            ham[((i, 1), (i + 1, 0))] = -1.0
+        h = Hamiltonian(ham, kind="fermi", max_op_number=4, devices=["localhost:cpu:0"])
+        ci = torch.tensor([[1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=torch.uint8)
+        pi = torch.tensor([1.0 + 0.0j, 1.0 + 0.0j, 0.5 + 0.0j], dtype=torch.complex64)
+        cj = torch.tensor([[1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=torch.uint8)
+        fwd = h.apply_within_subspace_in_double_side(ci, pi, cj, direction="forward")
+        bwd = h.apply_within_subspace_in_double_side(ci, pi, cj, direction="backward")
+        assert torch.allclose(fwd, bwd)
+
+
+class TestCpuMaxOpNumber:
+    def test_max_op_number_6(self):
+        """max_op_number=6 with 2-op terms: kind=2 padding fills unused slots."""
+        h = Hamiltonian(
+            {((1, 1), (0, 0)): -1.0, ((0, 1), (1, 0)): -1.0},
+            kind="fermi",
+            max_op_number=6,
+            devices=["localhost:cpu:0"],
+        )
+        ci = torch.tensor([[1]], dtype=torch.uint8)
+        pi = torch.tensor([1.0 + 0.0j], dtype=torch.complex64)
+        cj = torch.tensor([[2]], dtype=torch.uint8)
+        pj = h.apply_within_subspace_in_double_side(ci, pi, cj)
+        assert torch.allclose(pj, torch.tensor([-1.0 + 0.0j], dtype=torch.complex64))
+
+    def test_max_op_number_10(self):
+        """max_op_number=10 with 2-op terms: larger padding."""
+        h = Hamiltonian(
+            {((1, 1), (0, 0)): -1.0, ((0, 1), (1, 0)): -1.0},
+            kind="fermi",
+            max_op_number=10,
+            devices=["localhost:cpu:0"],
+        )
+        ci = torch.tensor([[1]], dtype=torch.uint8)
+        pi = torch.tensor([1.0 + 0.0j], dtype=torch.complex64)
+        cj = torch.tensor([[2]], dtype=torch.uint8)
+        pj = h.apply_within_subspace_in_double_side(ci, pi, cj)
+        assert torch.allclose(pj, torch.tensor([-1.0 + 0.0j], dtype=torch.complex64))
+
+
 class TestCUDA:
     _fermi_hopping = {((1, 1), (0, 0)): -1.0, ((0, 1), (1, 0)): -1.0}
 
