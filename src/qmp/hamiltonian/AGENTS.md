@@ -28,13 +28,17 @@ CPU 和 CUDA 后端各自是独立的自包含文件（`_hamiltonian_cpu.cpp` / 
 
 | | CPU (`_hamiltonian_cpu.cpp`) | CUDA (`_hamiltonian_cuda.cu`) |
 |---|---|---|
-| 线程模型 | 串行 `for term × for batch` | `__global__` 2D kernel，每线程一个 (term, config) 对 |
-| 排序 | `std::sort` + 索引数组 + `array_less` | `thrust::sort_by_key` on device |
+| 线程模型 | 串行 `for term × for batch` | `__global__` 2D kernel，block 内劈 batch 并行 |
+| 排序 | `std::sort` 对索引排序 → `configs.index({sort_idx})` | `thrust::sort_by_key` on device，返回 tuple `(sorted, sort_idx)` |
 | 结果累加 | 直接 `+=` | `atomicAdd`（两个 double 各一次） |
 | 奇偶校验 | `std::popcount(byte) & 1`（C++20 `<bit>`） | `__popc(byte) & 1` 硬件指令 |
-| 内存 | host memory | device memory，全部指针为 device 侧 |
-| 同步 | 无需 | `cudaDeviceSynchronize()` |
-| 核心逻辑 | 完全一致 | 完全一致（仅标注和累加方式不同） |
+| 设备管理 | 无需 | `CUDAGuard` + `getCurrentCUDAStream` + `cudaDeviceProp` |
+| 流同步 | 无需 | `AT_CUDA_CHECK(cudaStreamSynchronize(stream))`，thrust 使用 `device.on(stream)` |
+| 核心逻辑 | 完全一致 | 完全一致（仅标注、累加方式、设备管理不同） |
+
+### Block 配置
+
+CUDA kernel 使用 2D block：`dim3{1, maxThreadsPerBlock >> 1}`。其中 x=1（每 block 一个 term，享受 site/kind 广播），y≈512（劈 batch 并行）。grid 尺寸按 `ceil(term_number / 1) × ceil(batch_size / 512)` 计算。`>> 1` 的经验性调整避免寄存器压力。
 
 ### TORCH_LIBRARY 注册原则
 

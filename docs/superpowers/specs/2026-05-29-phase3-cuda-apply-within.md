@@ -14,8 +14,11 @@ Port the `apply_within_subspace_in_double_side` operator to CUDA GPU, reusing th
 | Code layout | Single `_hamiltonian_cuda.cu`, self-contained, no shared headers |
 | CPU backend | No modifications |
 | Kernel grid | 2D: x=term_index, y=batch_index, block(1,1,1) |
-| Config sorting | `thrust::sort_by_key` on device |
+| Config sorting | `thrust::sort_by_key` on device, stream-aware (`device.on(stream)`) |
 | Result accumulation | `atomicAdd` (two double per complex) |
+| Device management | `CUDAGuard` + `getCurrentCUDAStream` + `cudaDeviceProp` |
+| Error checking | `AT_CUDA_CHECK(cudaStreamSynchronize(stream))` |
+| Thread blocks | `dim3{1, maxThreadsPerBlock >> 1}` — x=1 term, y≈512 batch |
 | Binary search | Same lexicographic comparator as CPU, in device memory |
 | Forward/Backward | `bool` template parameter, `if constexpr` dispatch |
 | JW parity | `std::popcount` (CPU) / `__popc` (CUDA) hardware instruction |
@@ -29,7 +32,7 @@ _hamiltonian_cuda.cu
 ├── hamiltonian_apply_kernel                          (__device__)  — pure computation
 ├── apply_within_subspace_in_double_side_kernel       (__device__)  — per (term, batch)
 ├── apply_within_subspace_in_double_side_kernel_interface (__global__) — 2D grid
-└── apply_within_subspace_in_double_side_interface    (host) — thrust::sort + launch + unsort
+└── apply_within_subspace_in_double_side_interface    (host) — sort_configs_cuda + launch + unsort
 ```
 
 ## CUDA Kernel Flow

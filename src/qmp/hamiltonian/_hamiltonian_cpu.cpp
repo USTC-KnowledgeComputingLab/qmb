@@ -3,6 +3,7 @@
 #include <array>
 #include <bit>
 #include <cstdint>
+#include <tuple>
 
 namespace {
 
@@ -143,17 +144,16 @@ void apply_within_subspace_in_double_side_kernel_interface(
 }
 
 template <std::int64_t n_qubytes, std::int64_t particle_cut, std::int64_t max_op_number>
-auto sort_configs(const torch::Tensor& configs, torch::Tensor& sort_idx) -> torch::Tensor {
+auto sort_configs(const torch::Tensor& configs) -> std::tuple<torch::Tensor, torch::Tensor> {
     using Config = std::array<std::uint8_t, n_qubytes>;
     std::int64_t n = configs.size(0);
-    auto device = configs.device();
-    sort_idx = torch::arange(n, torch::TensorOptions().dtype(torch::kInt64).device(device));
+    auto sort_idx = torch::arange(n, torch::TensorOptions().dtype(torch::kInt64).device(configs.device()));
     auto* idx_ptr = sort_idx.data_ptr<std::int64_t>();
     const auto* cfg_ptr = reinterpret_cast<const Config*>(configs.data_ptr());
     std::sort(idx_ptr, idx_ptr + n, [cfg_ptr](std::int64_t a, std::int64_t b) {
         return array_less<n_qubytes>()(cfg_ptr[a], cfg_ptr[b]);
     });
-    return configs.index({sort_idx});
+    return {configs.index({sort_idx}), sort_idx};
 }
 
 template <std::int64_t n_qubytes, std::int64_t particle_cut, std::int64_t max_op_number>
@@ -184,10 +184,12 @@ auto apply_within_subspace_in_double_side_interface(
     auto* result_ptr = reinterpret_cast<Coef2*>(result_psi.data_ptr());
 
     if (direction == 0) {
-        torch::Tensor sort_j_idx;
-        auto sorted_j = configs_j_sorted
-            ? configs_j
-            : sort_configs<n_qubytes, particle_cut, max_op_number>(configs_j, sort_j_idx);
+        torch::Tensor sorted_j, sort_j_idx;
+        if (configs_j_sorted) {
+            sorted_j = configs_j;
+        } else {
+            std::tie(sorted_j, sort_j_idx) = sort_configs<n_qubytes, particle_cut, max_op_number>(configs_j);
+        }
 
         const auto* sorted_j_ptr = reinterpret_cast<const Config*>(sorted_j.data_ptr());
         const auto* ci_ptr = reinterpret_cast<const Config*>(configs_i.data_ptr());
@@ -206,10 +208,12 @@ auto apply_within_subspace_in_double_side_interface(
         }
         return result_psi;
     } else {
-        torch::Tensor sort_i_idx;
-        auto sorted_i = configs_i_sorted
-            ? configs_i
-            : sort_configs<n_qubytes, particle_cut, max_op_number>(configs_i, sort_i_idx);
+        torch::Tensor sorted_i, sort_i_idx;
+        if (configs_i_sorted) {
+            sorted_i = configs_i;
+        } else {
+            std::tie(sorted_i, sort_i_idx) = sort_configs<n_qubytes, particle_cut, max_op_number>(configs_i);
+        }
 
         torch::Tensor sorted_psi_i;
         if (configs_i_sorted) {

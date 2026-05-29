@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <tuple>
 #include <utility>
 
 #include <thrust/execution_policy.h>
@@ -98,9 +99,9 @@ __device__ void apply_within_subspace_in_double_side_kernel(
     std::array<double, 2>* result_psi)
 {
     std::array<std::uint8_t, n_qubytes> current_configs = src_configs[batch_index];
-    auto pair = hamiltonian_apply_kernel<n_qubytes, particle_cut, max_op_number, forward>(
+    auto [success, parity] = hamiltonian_apply_kernel<n_qubytes, particle_cut, max_op_number, forward>(
         current_configs, term_index, site, kind);
-    if (!pair.first) return;
+    if (!success) return;
 
     auto less = array_less<n_qubytes>();
     std::int64_t lo = 0, hi = dst_batch_size - 1;
@@ -116,7 +117,7 @@ __device__ void apply_within_subspace_in_double_side_kernel(
     }
     if (!found) return;
 
-    std::int8_t sign = pair.second ? -1 : +1;
+    std::int8_t sign = parity ? -1 : +1;
     double r = sign * (coef[term_index][0] * src_psi[batch_index][0] - coef[term_index][1] * src_psi[batch_index][1]);
     double i = sign * (coef[term_index][0] * src_psi[batch_index][1] + coef[term_index][1] * src_psi[batch_index][0]);
     atomicAdd(&result_psi[mid][0], r);
@@ -136,14 +137,26 @@ __global__ void apply_within_subspace_in_double_side_kernel_interface(
     const std::array<std::uint8_t, n_qubytes>* sorted_dst_configs,
     std::array<double, 2>* result_psi)
 {
-    std::int64_t term_index = blockIdx.x;
-    std::int64_t batch_index = blockIdx.y;
+    std::int64_t term_index = blockIdx.x * blockDim.x + threadIdx.x;
+    std::int64_t batch_index = blockIdx.y * blockDim.y + threadIdx.y;
 
     if (term_index >= term_number || batch_index >= src_batch_size) return;
 
     apply_within_subspace_in_double_side_kernel<n_qubytes, particle_cut, max_op_number, forward>(
         term_index, batch_index, dst_batch_size,
         site, kind, coef, src_configs, src_psi, sorted_dst_configs, result_psi);
+}
+
+template <std::int64_t n_qubytes, std::int64_t particle_cut, std::int64_t max_op_number>
+auto sort_configs_cuda(const torch::Tensor& configs, cudaStream_t stream) -> std::tuple<torch::Tensor, torch::Tensor> {
+    using Config = std::array<std::uint8_t, n_qubytes>;
+    std::int64_t n = configs.size(0);
+    auto sort_idx = torch::arange(n, torch::TensorOptions().dtype(torch::kInt64).device(configs.device()));
+    auto sorted = configs.clone();
+    auto* sorted_ptr = reinterpret_cast<Config*>(sorted.data_ptr());
+    auto* idx_ptr = sort_idx.data_ptr<std::int64_t>();
+    thrust::sort_by_key(thrust::device.on(stream), sorted_ptr, sorted_ptr + n, idx_ptr, array_less<n_qubytes>());
+    return {sorted, sort_idx};
 }
 
 template <std::int64_t n_qubytes, std::int64_t particle_cut, std::int64_t max_op_number>
@@ -165,6 +178,10 @@ auto apply_within_subspace_in_double_side_interface(
     std::int64_t batch_j = configs_j.size(0);
     std::int64_t term_number = site.size(0);
 
+    std::int64_t device_id = configs_i.device().index();
+    at::cuda::CUDAGuard cuda_device_guard(device_id);
+    auto stream = at::cuda::getCurrentCUDAStream(device_id);
+
     const auto* site_ptr = reinterpret_cast<const std::array<std::int16_t, max_op_number>*>(site.data_ptr());
     const auto* kind_ptr = reinterpret_cast<const std::array<std::uint8_t, max_op_number>*>(kind.data_ptr());
     const auto* coef_ptr = reinterpret_cast<const Coef2*>(coef.data_ptr());
@@ -173,34 +190,36 @@ auto apply_within_subspace_in_double_side_interface(
         torch::TensorOptions().dtype(torch::kFloat64).device(configs_i.device()));
     auto* result_ptr = reinterpret_cast<Coef2*>(result_psi.data_ptr());
 
+    cudaDeviceProp prop;
+    AT_CUDA_CHECK(cudaGetDeviceProperties(&prop, device_id));
+    std::int64_t max_threads_per_block = prop.maxThreadsPerBlock;
+
+    auto threads_per_block = dim3{1, static_cast<unsigned int>(max_threads_per_block >> 1)};
+
     if (direction == 0) {
-        torch::Tensor sorted_j;
-        torch::Tensor sort_j_idx;
+        torch::Tensor sorted_j, sort_j_idx;
         if (configs_j_sorted) {
             sorted_j = configs_j;
         } else {
-            sort_j_idx = torch::arange(batch_j,
-                torch::TensorOptions().dtype(torch::kInt64).device(configs_i.device()));
-            sorted_j = configs_j.clone();
-            auto* sorted_j_ptr = reinterpret_cast<Config*>(sorted_j.data_ptr());
-            auto* idx_ptr = sort_j_idx.data_ptr<std::int64_t>();
-            thrust::sort_by_key(
-                thrust::device,
-                sorted_j_ptr, sorted_j_ptr + batch_j, idx_ptr,
-                array_less<n_qubytes>());
+            std::tie(sorted_j, sort_j_idx) = sort_configs_cuda<n_qubytes, particle_cut, max_op_number>(configs_j, stream);
         }
 
-        dim3 block(1, 1, 1);
-        dim3 grid(term_number, batch_i, 1);
+        const auto* sorted_j_ptr = reinterpret_cast<const Config*>(sorted_j.data_ptr());
+        const auto* ci_ptr = reinterpret_cast<const Config*>(configs_i.data_ptr());
+        const auto* pi_ptr = reinterpret_cast<const Coef2*>(psi_i.data_ptr());
+
+        auto num_blocks = dim3{
+            static_cast<unsigned int>((term_number + threads_per_block.x - 1) / threads_per_block.x),
+            static_cast<unsigned int>((batch_i + threads_per_block.y - 1) / threads_per_block.y),
+        };
+
         apply_within_subspace_in_double_side_kernel_interface<n_qubytes, particle_cut, max_op_number, true>
-            <<<grid, block>>>(
+            <<<num_blocks, threads_per_block, 0, stream>>>(
                 term_number, batch_i, batch_j,
                 site_ptr, kind_ptr, coef_ptr,
-                reinterpret_cast<const Config*>(configs_i.data_ptr()),
-                reinterpret_cast<const Coef2*>(psi_i.data_ptr()),
-                reinterpret_cast<const Config*>(sorted_j.data_ptr()),
-                result_ptr);
-        cudaDeviceSynchronize();
+                ci_ptr, pi_ptr,
+                sorted_j_ptr, result_ptr);
+        AT_CUDA_CHECK(cudaStreamSynchronize(stream));
 
         if (!configs_j_sorted) {
             auto unsorted = torch::zeros_like(result_psi);
@@ -209,38 +228,38 @@ auto apply_within_subspace_in_double_side_interface(
         }
         return result_psi;
     } else {
-        torch::Tensor sorted_i;
-        torch::Tensor sort_i_idx;
-        torch::Tensor sorted_psi_i;
+        torch::Tensor sorted_i, sort_i_idx;
         if (configs_i_sorted) {
             sorted_i = configs_i;
+        } else {
+            std::tie(sorted_i, sort_i_idx) = sort_configs_cuda<n_qubytes, particle_cut, max_op_number>(configs_i, stream);
+        }
+
+        torch::Tensor sorted_psi_i;
+        if (configs_i_sorted) {
             sorted_psi_i = psi_i;
         } else {
-            sort_i_idx = torch::arange(batch_i,
-                torch::TensorOptions().dtype(torch::kInt64).device(configs_i.device()));
-            sorted_i = configs_i.clone();
-            auto* sorted_i_ptr = reinterpret_cast<Config*>(sorted_i.data_ptr());
-            auto* idx_ptr = sort_i_idx.data_ptr<std::int64_t>();
-            thrust::sort_by_key(
-                thrust::device,
-                sorted_i_ptr, sorted_i_ptr + batch_i, idx_ptr,
-                array_less<n_qubytes>());
             sorted_psi_i = torch::zeros({batch_i, 2},
                 torch::TensorOptions().dtype(torch::kFloat64).device(configs_i.device()));
             sorted_psi_i.index_put_({sort_i_idx}, psi_i);
         }
 
-        dim3 block(1, 1, 1);
-        dim3 grid(term_number, batch_j, 1);
+        const auto* sorted_i_ptr = reinterpret_cast<const Config*>(sorted_i.data_ptr());
+        const auto* sorted_pi_ptr = reinterpret_cast<const Coef2*>(sorted_psi_i.data_ptr());
+        const auto* cj_ptr = reinterpret_cast<const Config*>(configs_j.data_ptr());
+
+        auto num_blocks = dim3{
+            static_cast<unsigned int>((term_number + threads_per_block.x - 1) / threads_per_block.x),
+            static_cast<unsigned int>((batch_j + threads_per_block.y - 1) / threads_per_block.y),
+        };
+
         apply_within_subspace_in_double_side_kernel_interface<n_qubytes, particle_cut, max_op_number, false>
-            <<<grid, block>>>(
+            <<<num_blocks, threads_per_block, 0, stream>>>(
                 term_number, batch_j, batch_i,
                 site_ptr, kind_ptr, coef_ptr,
-                reinterpret_cast<const Config*>(configs_j.data_ptr()),
-                reinterpret_cast<const Coef2*>(sorted_psi_i.data_ptr()),
-                reinterpret_cast<const Config*>(sorted_i.data_ptr()),
-                result_ptr);
-        cudaDeviceSynchronize();
+                cj_ptr, sorted_pi_ptr,
+                sorted_i_ptr, result_ptr);
+        AT_CUDA_CHECK(cudaStreamSynchronize(stream));
 
         return result_psi;
     }
