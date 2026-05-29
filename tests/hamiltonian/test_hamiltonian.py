@@ -660,3 +660,5 @@ class TestCUDA:
             h_cuda.apply_within_subspace_in_double_side(ci, pi, cj),
             atol=1e-6,
         )
+
+
