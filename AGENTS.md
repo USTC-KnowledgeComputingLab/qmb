@@ -62,10 +62,26 @@ tests/            # 测试
 
 - **Hamiltonian**：参见 `src/qmp/hamiltonian/AGENTS.md`，包含 C++ 内核/接口架构、CPU/CUDA 差异、设备归属、JIT 编译等设计细节。
 
-## 跨设备测试
+## 设计原则
 
-测试应覆盖 CPU 和 CUDA 两种后端。`TestCUDA` 类模式：使用 `devices=["localhost:cuda:0"]` 创建 GPU Hamiltonian，结果与 `devices=["localhost:cpu:0"]` 的 CPU 参考输出对比。比较前需将结果移到 CPU 侧（`.cpu()`）。
+### 纯函数优于副作用
 
-## TORCH_LIBRARY 注册原则
+输出通过返回值传递，不通过可变的引用参数。`const` 输入 + 纯输出 = 更安全、更易测试。
 
-每个 Torch 自定义 operator 的 `TORCH_LIBRARY_FRAGMENT`（operator schema 定义）**只能出现一次**。重复声明会导致 `c10::Dispatcher::registerDef` panic。当前约定：fragment 集中在 `_hamiltonian.cpp` 的 `#else` 分支中，该文件包含在 CPU 后端编译的源文件列表中。声明模块和 CUDA 后端不含 operator 定义。CPU 和 CUDA 后端各自仅含 `TORCH_LIBRARY_IMPL`。
+反例（已修正）：`sort_configs(configs, /*out*/ sort_idx)`  
+正例：`auto [sorted, sort_idx] = sort_configs(configs)`
+
+### 文档是交付物
+
+每个 spec、plan、AGENTS.md 必须在代码稳定后统一检查并更新。过时的文档和过时的测试断言一样，都是 bug。每次提交前确认：
+- spec 中的 design decisions 表与代码一致
+- plan 的 status 标记（approved / implemented / completed）正确
+- AGENTS.md 中引用的函数名、参数顺序、模块名与代码同步
+
+### 参考旧代码
+
+`old/` 中的 main 分支代码是历经迭代验证的参考实现。新代码不必逐行复刻，但旧代码中的关键模式（CUDAGuard + stream、thread block 维度设计、thrust 与 kernel 同流等）是经过正确性验证的设计选择，不应随意偏离。
+
+### 设计先于实现
+
+任何非平凡的改动先产出 spec（要做什么、决策表）和 plan（分步实施），再动手写代码。跳过这一步会导致反复返工和在未确认方向上浪费时间。

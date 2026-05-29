@@ -61,3 +61,42 @@ Hamiltonian 子系统使用 `torch.utils.cpp_extension.load()` 进行 C++/CUDA �
 ```bash
 rm -rf ~/.cache/qmp
 ```
+
+## 设计原则
+
+### CPU/CUDA 对称性
+
+CPU 和 CUDA 两个后端的代码应尽可能保持一致。函数变量名、参数顺序、分支结构、排序/unsort 逻辑等，只要平台不强制不同，就写成一样的。平台差异应局限于必要的最小范围（设备管理、kernel 启动、同步）。
+
+具体表现：
+- 两边 `sort_configs` 签名、返回类型（tuple）、调用模式完全相同
+- 两边 `interface` 函数的预处理、指针提取、unsort 逻辑一一对应
+- 两边使用相同的结构化绑定（`auto [success, parity]`）
+
+### 命名一致性
+
+同一概念在全局使用同一名称和同一参数顺序：
+- 模板参数顺序 `n_qubytes, particle_cut, max_op_number, forward` 贯穿所有 C++ 签名
+- 模块名 `qmp_hamiltonian_{nq}_{pc}_{mo}` 贯穿 Python、C++ 宏、缓存 key
+- CUDA 内部函数名与注册的 operator 名保持一致（`apply_within_subspace_in_double_side_kernel` 等）
+
+### 单文件单一职责
+
+每份代码只承担一项职责：
+- `_hamiltonian.cpp` — `prepare` 和 `TORCH_LIBRARY_FRAGMENT`（operator schema 声明）
+- `_hamiltonian_cpu.cpp` — `TORCH_LIBRARY_IMPL(CPU)`
+- `_hamiltonian_cuda.cu` — `TORCH_LIBRARY_IMPL(CUDA)`
+
+CPU 和 CUDA 各自是独立的自包含文件，不共享头文件。跨文件职责重叠是 bug——`TORCH_LIBRARY_FRAGMENT` 曾因被放在两个后端文件中导致 `registerDef` panic。
+
+### 性能选择需有可解释的理由
+
+不是"这样更快"，而是"这样更快，因为…"：
+- `dim3{1, ~512}` 而非反转——batch 切进 block 内并行，site/kind 可广播到全 warp
+- `std::popcount`（CPU）/ `__popc`（CUDA）而非查表——硬件单指令，无内存访问
+- `thrust::sort_by_key` 与 kernel 同流而非 `std::sort` 回 CPU——避免 device↔host 数据搬移
+- `CUDAGuard` + `getCurrentCUDAStream` + `cudaDeviceProp` 而非裸 `cudaDeviceSynchronize`——正确的多 GPU 设备管理
+
+### 跨设备测试
+
+测试应覆盖 CPU 和 CUDA 两种后端。`TestCUDA` 类模式：使用 `devices=["localhost:cuda:0"]` 创建 GPU Hamiltonian，结果与 `devices=["localhost:cpu:0"]` 的 CPU 参考输出对比。比较前需将结果移到 CPU 侧（`.cpu()`）。
