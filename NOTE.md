@@ -164,39 +164,42 @@ diagonal_term(
 
 **操作**: 稀疏矩阵乘向量。输入 configs_i (源空间) + psi_i + configs_j (目标空间)，计算 H·ψ_i 投影到目标空间的结果 ψ_j。
 
+**双向支持** (refact 分支的改进):
+
+`hamiltonian_apply_kernel` 通过 `bool forward` 模板参数支持两个方向:
+
+| 方向 | 遍历模式 | 算符施加 | 二分查找 | 复杂度 |
+|------|---------|---------|---------|--------|
+| `forward` | term × config_i | 正常: bit → k, 检查 != k (Pauli) | 在 config_j 中查找结果 | O(T × B_i × log B_j) |
+| `backward` | term × config_j | 逆算符: bit → (1-k), 检查 != (1-k) | 在 config_i 中查找源 | O(T × B_j × log B_i) |
+
+**为什么需要双向**: 当 B_i << B_j 时 backward 更快；当 B_j << B_i 时 forward 更快。在 HAAR 算法中，config_i (当前基组) 和 config_j (扩展后的基组) 大小可能悬殊。
+
 **当前实现**:
-1. `thrust::sort_by_key` 对 configs_j 排序，保留逆序索引
-2. 2D grid (dim3{1, maxThreadsPerBlock >> 1}): 每个 (term, config_i) 施加 H 项 → 排序数组中二分查找 → `atomicAdd`
+1. 根据方向选择排序哪一侧（forward 排序 config_j，backward 排序 config_i）
+2. 2D grid (dim3{1, maxThreadsPerBlock >> 1}): term × src_configs → 施加 H/H^dag → 二分查找 → `atomicAdd`
+3. forward: 结果按 sort_idx 逆映射回原始 config_j 顺序；backward: 结果天然对应 config_j 顺序
 
-**分析**: configs_j 排序是一次性操作 (O(B_j log B_j))。二分查找每次 ~24 次全局内存随机访问 (log₂(10^7) ≈ 24)。
-
-**改进**: **二级索引二分查找**
-- L1 索引: 每 256 条 config_j 取样 → ~40K 条目，存 `__constant__` 内存
+**改进**: **二级索引二分查找** (两个方向同样适用)
+- L1 索引: 每 256 条 target config 取样 → ~40K 条目，存 `__constant__` 内存
 - 先在 L1 索引中二分查找 (~15 次 constant memory 访问，~20 cycles)
 - 然后在 256 条目的桶内线性扫描 (1-2 个 cache line)
 - 全局内存访问从 ~24 次降到 ~2 次
 
 ```
-kernel 内部:
-  int bucket = binary_search_l1(l1_index, target_config);  // constant memory
-  int idx = linear_scan_bucket(configs_j, bucket * 256, target_config);  // 1-2 cache line
-```
-
-**方案**: 保留排序 + CUDA kernel，添加二级索引优化。
-
-```
 FFI 签名:
 apply_within(
-  configs_i [B_i, Q] uint8,
-  psi_i     [B_i, 2] f64,
-  configs_j [B_j, Q] uint8,
-  site      [T, 4] int16,
-  kind      [T, 4] uint8,
-  coef      [T, 2] f64
+  configs_i       [B_i, Q] uint8,
+  psi_i           [B_i, 2] f64,
+  configs_j       [B_j, Q] uint8,
+  site            [T, 4] int16,
+  kind            [T, 4] uint8,
+  coef            [T, 2] f64,
+  direction       int (0=forward, 1=backward)
 ) → psi_j [B_j, 2] f64
 ```
 
-**多卡方案**: configs_j 按 batch 维度分片，每卡独立计算自己的 psi_j 片段。
+**多卡方案**: 源 configs 按 batch 维度分片，每卡独立计算自己的贡献。
 
 ### 4.4 list_relative
 
