@@ -123,6 +123,66 @@ def distributed_apply_within(configs_shard, psi_shard, ...):
 
 ## 4. Hamiltonian 层详细设计
 
+### 4.0 Hamiltonian term 的位运算表示 (BIT.md 方案)
+
+每个 fermionic Hamiltonian term 预处理为六个参数 `(a, b, t, p, s, coef)`:
+
+| 参数 | 含义 | 用途 |
+|------|------|------|
+| `a` | 必须为 0 的位（产生算符的目标位） | 可作用性判断 |
+| `b` | 无约束掩码的补集（b 中为 0 的位即湮灭算符的目标位，必须为 1） | 可作用性判断 |
+| `t` | 翻转掩码（所有算符作用的位） | 构型更新 |
+| `p` | JW 奇偶性掩码 | 符号计算 |
+| `s` | 基础符号 (0 或 1) | 符号计算 |
+| `coef` | 复数系数 (real + imag) | 振幅累加 |
+
+**可作用性判断**（2 次位运算 + 2 次比较）:
+```
+applicable = ((config & a) == 0) && ((config | b) == FULL_MASK)
+```
+- `a` 中为 1 的位，config 必须为 0（产生算符目标为空）
+- `b` 中为 0 的位，config 必须为 1（湮灭算符目标为占据）
+
+**构型更新**（1 次位运算）:
+```
+new_config = config ^ t
+```
+
+**JW 奇偶性**（1 次 popcount + 1 次 XOR）:
+```
+parity = s ^ (popcount(p & config) & 1)
+```
+
+**预处理**: 给定产生/湮灭算符的有序序列，通过 `term_from_normal_ordered` 生成 (a, b, t, p, s):
+
+```
+原理:
+  对每个算符 (idx, is_creation):
+    1. 作用条件: required_init = flip_bit ⊕ (0 if creation else 1)
+       若与已有条件冲突 → 此项恒零
+    2. JW 常数符号: const_s ⊕= popcount(flip_before & low_mask(idx)) % 2
+    3. 翻转位: flip ⊕= (1 << idx)
+
+  最终:
+    a = {i | cond[i] == 0}
+    b = FULL_MASK & ~{i | cond[i] == 1}
+    t = flip
+    p = XOR_{k} low_mask(idx_k)
+    s = const_s
+```
+
+**与当前表示 (site, kind, coef) 的对比**:
+
+| | 当前 | 新方案 |
+|---|---|---|
+| 可作用性检查 | for 循环按算符逐个检查 | 2 次位运算 |
+| 构型修改 | for 循环逐位 set_bit | 1 次 XOR |
+| JW 符号 | for 循环逐位 parity | 1 次 popcount |
+| 每个 term 的代价 | O(max_op_number) | O(1) |
+| 数据量 | site[T,4]int16 + kind[T,4]uint8 + coef[T,2]f64 | a[T,Q]uint8 + b[T,Q]uint8 + t[T,Q]uint8 + p[T,Q]uint8 + s[T]uint8 + coef[T,2]f64 |
+
+每个 term 从 ~14 bytes 变为 ~(4*Q + 17) bytes。对于 Q ≈ 25 qubytes (200 qubits)，~117 bytes/term。100K terms ≈ 11.7 MB，可接受。
+
 ### 4.1 CUDA kernel 迁移: 三阶段
 
 **阶段 1 (当前)**: 保留 Torch C++ extension 体系，DLPack 零拷贝桥接
@@ -142,49 +202,73 @@ def distributed_apply_within(configs_shard, psi_shard, ...):
 
 **操作**: 对每个 config，累加所有不改变该 config 的哈密顿项系数，得到对角元能量。
 
-**当前实现**: 2D grid (term × batch)，施加项后比较 config 是否不变，`atomicAdd` 累加。
+**位运算实现**:
 
-**分析**: Embarrassingly parallel。每个 (term, config) 对完全独立。无去重需求，无排序需求。当前实现已经最优。
+```
+for each (term_t, config_i):
+  // 可作用性检查
+  if ((config_i & a[t]) != 0) continue
+  if ((config_i | b[t]) != FULL_MASK) continue
+  // 对角条件：无净翻转
+  if (t_mask[t] != 0) continue
+  // JW 符号
+  sign = 1 - 2 * (s[t] ^ (popcount(p[t] & config_i) & 1))
+  // 累加
+  psi_result[i] += sign * coef[t]
+```
 
-**方案**: 保留当前 CUDA kernel，仅换 binding 层。
+**分析**: 每个 (term, config) 对完全独立。只需两层循环 + 位运算 + popcount，无排序无去重。
+
+**方案**: 纯 CUDA kernel，`(a, b, t, p, s, coef)` 为输入。2D grid 不变。
 
 ```
 FFI 签名:
 diagonal_term(
   configs  [B, Q] uint8,
-  site     [T, 4] int16,
-  kind     [T, 4] uint8,
+  a        [T, Q] uint8,
+  b        [T, Q] uint8,
+  t        [T, Q] uint8,
+  p        [T, Q] uint8,
+  s        [T]    uint8,
   coef     [T, 2] f64
 ) → psi [B, 2] f64 (real + imag)
 ```
 
-**多卡方案**: configs 按 batch 维度分片，每卡持有完整 Hamiltonian 副本，独立计算，结果天然分片，无需跨卡通信。
+**多卡方案**: configs 按 batch 维度分片，每卡持有完整 Hamiltonian 副本，独立计算，结果天然分片。
 
 ### 4.3 apply_within
 
 **操作**: 稀疏矩阵乘向量。输入 configs_i (源空间) + psi_i + configs_j (目标空间)，计算 H·ψ_i 投影到目标空间的结果 ψ_j。
 
-**双向支持** (refact 分支的改进):
-
-`hamiltonian_apply_kernel` 通过 `bool forward` 模板参数支持两个方向:
+**双向支持** (refact 分支):
 
 | 方向 | 遍历模式 | 算符施加 | 二分查找 | 复杂度 |
 |------|---------|---------|---------|--------|
-| `forward` | term × config_i | 正常: bit → k, 检查 != k (Pauli) | 在 config_j 中查找结果 | O(T × B_i × log B_j) |
-| `backward` | term × config_j | 逆算符: bit → (1-k), 检查 != (1-k) | 在 config_i 中查找源 | O(T × B_j × log B_i) |
+| `forward` | term × config_i | 正常 | 在 config_j 中查找 | O(T × B_i × log B_j) |
+| `backward` | term × config_j | 逆算符 | 在 config_i 中查找 | O(T × B_j × log B_i) |
 
-**为什么需要双向**: 当 B_i << B_j 时 backward 更快；当 B_j << B_i 时 forward 更快。在 HAAR 算法中，config_i (当前基组) 和 config_j (扩展后的基组) 大小可能悬殊。
+选择 B 较小的一侧遍历以最小化总线程数。
 
-**当前实现**:
-1. 根据方向选择排序哪一侧（forward 排序 config_j，backward 排序 config_i）
-2. 2D grid (dim3{1, maxThreadsPerBlock >> 1}): term × src_configs → 施加 H/H^dag → 二分查找 → `atomicAdd`
-3. forward: 结果按 sort_idx 逆映射回原始 config_j 顺序；backward: 结果天然对应 config_j 顺序
+**位运算实现** (forward 方向):
 
-**改进**: **二级索引二分查找** (两个方向同样适用)
-- L1 索引: 每 256 条 target config 取样 → ~40K 条目，存 `__constant__` 内存
-- 先在 L1 索引中二分查找 (~15 次 constant memory 访问，~20 cycles)
-- 然后在 256 条目的桶内线性扫描 (1-2 个 cache line)
-- 全局内存访问从 ~24 次降到 ~2 次
+```
+for each (term_t, config_i):
+  // 可作用性检查 (2 次位运算)
+  if ((config_i & a[t]) != 0) continue
+  if ((config_i | b[t]) != FULL_MASK) continue
+  // 构型翻转 (1 次 XOR)
+  new_config = config_i ^ t_mask[t]
+  // JW 符号 (1 次 popcount)
+  sign = 1 - 2 * (s[t] ^ (popcount(p[t] & config_i) & 1))
+  contribution = sign * coef[t] * psi_i[i]
+  // 二级索引二分查找
+  idx = two_level_search(sorted_configs_j, new_config)
+  if idx >= 0: atomicAdd(psi_result[idx], contribution)
+```
+
+backward 方向: 遍历 term × config_j，施加逆算符，在 sorted_configs_i 中查找。
+
+**改进**: 二级索引二分查找，将全局内存访问从 ~24 次降到 ~2 次。
 
 ```
 FFI 签名:
@@ -192,14 +276,17 @@ apply_within(
   configs_i       [B_i, Q] uint8,
   psi_i           [B_i, 2] f64,
   configs_j       [B_j, Q] uint8,
-  site            [T, 4] int16,
-  kind            [T, 4] uint8,
+  a               [T, Q] uint8,
+  b               [T, Q] uint8,
+  t               [T, Q] uint8,
+  p               [T, Q] uint8,
+  s               [T]    uint8,
   coef            [T, 2] f64,
   direction       int (0=forward, 1=backward)
 ) → psi_j [B_j, 2] f64
 ```
 
-**多卡方案**: 源 configs 按 batch 维度分片，每卡独立计算自己的贡献。
+**多卡方案**: 源 configs 按 batch 维度分片，每卡独立计算贡献。
 
 ### 4.4 list_relative
 
@@ -209,30 +296,30 @@ apply_within(
 
 **当前实现**: 256叉前缀树 (Trie)，device malloc 分配节点，atomicCAS 锁创建。
 
-**问题**: Trie 每 distinct entry 占用 ~25KB (N_levels × ~2.5KB/节点)，10^8 entries 需 2.5 TB 显存——不可行。且 device malloc 极慢。
+**问题**: Trie 每 distinct entry 占用 ~25KB，10^8 entries 需 2.5 TB 显存——不可行。
 
 **方案**: **预分配哈希表 (cuCollections `cuco::static_map`)**
 
+**位运算内核**:
+
 ```
-数据结构:
-  static_map<Key=config_bytes, Value=(real+f64, imag+f64)>
-  容量: 预估 distinct / 0.6 (60% 负载因子)
-  open addressing + linear probing
-  预分配，零运行时分配
-
-尺寸估算:
-  10^7 distinct: ~600 MB
-  10^8 distinct: ~6 GB   (H100 80GB 内可行)
-  10^9 distinct: ~60 GB  (需多卡分区)
-
-插入流程 (per thread):
-  1. 施加 H 项 → new_config, psi_contribution
-  2. 二分查找排除 exclude_configs (或 Bloom filter 预筛查)
-  3. 哈希表查找:
-     - 找到: atomicAdd(振幅)
-     - 未找到: atomicCAS 声明 slot + 写入
-
-收集: 线性扫描哈希表 → 所有非空 slot → (configs, psi)
+for each (term_t, config_i):
+  // 可作用性检查 (2 次位运算)
+  if ((config_i & a[t]) != 0) continue
+  if ((config_i | b[t]) != FULL_MASK) continue
+  // 构型翻转 (1 次 XOR)
+  new_config = config_i ^ t_mask[t]
+  // 排除已知构型
+  if bloom_maybe_present(exclude_set, new_config):
+    if binary_search_exact(exclude_configs, new_config): continue
+  // JW 符号 + 振幅 (1 次 popcount)
+  sign = 1 - 2 * (s[t] ^ (popcount(p[t] & config_i) & 1))
+  contribution = sign * coef[t] * psi_i[i]
+  // 哈希表插入
+  slot = hash_lookup(new_config)
+  if slot.found: atomicAdd(slot.value, contribution)
+  else: atomicCAS_claim_slot_and_write(new_config, contribution)
+// 收集: 线性扫描哈希表 → 所有非空 slot → (configs, psi)
 ```
 
 **与 Trie 的对比**:
@@ -255,8 +342,11 @@ list_relative(
   configs_i        [B_i, Q] uint8,
   psi_i            [B_i, 2] f64,
   configs_exclude  [E, Q] uint8,
-  site             [T, 4] int16,
-  kind             [T, 4] uint8,
+  a                [T, Q] uint8,
+  b                [T, Q] uint8,
+  t                [T, Q] uint8,
+  p                [T, Q] uint8,
+  s                [T]    uint8,
   coef             [T, 2] f64,
   hash_capacity    int (预估 distinct / 0.6)
 ) → (new_configs [N, Q] uint8, psi_j [N, 2] f64)
@@ -272,35 +362,31 @@ list_relative(
 
 **方案**: **全局哈希表 + 阈值加速 + 周期性 compact**
 
-用哈希表作为"软 Top-K"累加器，定期 compact 到精确 Top-K。
+位运算内核:
 
 ```
-数据结构:
-  ┌──────────────────────────────────────────────┐
-  │ 哈希表 (Global Memory, L2 cached)             │
-  │   容量: 2K = 200K slots                       │
-  │   (× ~48B/slot ≈ 9.6 MB, fits in L2)         │
-  │   负载因子上限: 0.6                           │
-  │   open addressing with linear probing         │
-  │                                               │
-  │   global_min_weight: float64 (阈值)            │
-  └──────────────────────────────────────────────┘
+for each (term_t, config_i):
+  // 可作用性检查 (2 次位运算)
+  if ((config_i & a[t]) != 0) continue
+  if ((config_i | b[t]) != FULL_MASK) continue
+  // 构型翻转 (1 次 XOR)
+  new_config = config_i ^ t_mask[t]
+  // 阈值快速拒绝 (~2 cycles)
+  weight = |coef[t] * psi_i[i]|²
+  if weight <= global_min_weight: continue
+  // 排除已知构型
+  if bloom_maybe_present(exclude_set, new_config):
+    if binary_search_exact(exclude_configs, new_config): continue
+  // 哈希表插入
+  slot = hash_lookup(new_config)
+  if slot.found: atomicMax(slot.weight, weight)
+  else: atomicCAS_claim_and_write(new_config, weight)
 
-流式插入 (per thread):
-  1. if weight ≤ global_min_weight → REJECT (~2 cycles)
-     → 99.9%+ 条目在此被过滤
-
-  2. 慢路径 (weight > threshold):
-     a. 二分查找排除 exclude_configs
-     b. 哈希探测 → 找到: atomicMax(weight) ; 未找到: atomicCAS slot
-     c. 每个成功的慢路径操作: ~100-200 cycles (L2 resident)
-
-  3. 周期性 compact (当 load_factor > 0.6 或间隔触发):
-     ▸ CUB DeviceRadixSort 按 weight 降序排序所有条目
-     ▸ 取前 K 个唯一 config
-     ▸ 重建哈希表 (仅用 top K)
-     ▸ 更新 global_min_weight
-     ▸ compact 成本: ~0.3ms/次 (200K 条目排序)
+// 周期性 compact:
+if load_factor > 0.6:
+  CUB::sort_descending(all_entries, by=weight)
+  keep top K unique, rebuild hash table
+  update global_min_weight  // ~0.3ms per compact
 ```
 
 **Compact 频率分析**:
@@ -331,8 +417,11 @@ find_relative(
   psi_i            [B_i, 2] f64,
   count_selected   int (K),
   configs_exclude  [E, Q] uint8,
-  site             [T, 4] int16,
-  kind             [T, 4] uint8,
+  a                [T, Q] uint8,
+  b                [T, Q] uint8,
+  t                [T, Q] uint8,
+  p                [T, Q] uint8,
+  s                [T]    uint8,
   coef             [T, 2] f64
 ) → new_configs [K, Q] uint8
 ```
