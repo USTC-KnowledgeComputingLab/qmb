@@ -63,7 +63,7 @@ tests/
 
 T = 有效 term 数量, Q = ceil(n_qubits/8)。
 
-**算法** (来自 BIT.md):
+**算法**:
 
 对每个 term，将产生/湮灭算符分类后按正规序排列作用序列:
 1. 逐算符计算对初始构型的约束条件 (flip_bit ⊕ (0 if creation else 1))
