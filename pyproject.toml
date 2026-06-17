@@ -1,0 +1,65 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "qmp-kit"
+dynamic = ["version"]
+requires-python = ">=3.13"
+authors = [{ name = "Hao Zhang", email = "hzhangxyz@outlook.com" }]
+description = "Quantum Manybody Problem"
+license = "AGPL-3.0-only"
+keywords = ["quantum", "manybody", "quantum-chemistry", "quantum-simulation"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: C++",
+  "Environment :: GPU :: NVIDIA CUDA",
+  "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+  "jax>=0.5.0",
+  "jaxlib>=0.5.0",
+  "numpy>=2.4.6",
+  "platformdirs>=4.10.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/USTC-KnowledgeComputingLab/qmp-kit"
+Repository = "https://github.com/USTC-KnowledgeComputingLab/qmp-kit.git"
+
+[dependency-groups]
+dev = [
+  "pytest>=9.0.3",
+  "ruff>=0.15.15",
+  "ty>=0.0.40",
+]
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.version.raw-options]
+version_scheme = "no-guess-dev"
+local_scheme = "no-local-version"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/qmp/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/qmp"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "SIM", "C4", "B", "RUF", "N", "T20", "PLC"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["qmp"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
