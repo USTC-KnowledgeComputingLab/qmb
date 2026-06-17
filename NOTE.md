@@ -23,7 +23,7 @@
 
 ### 2.1 构建与工具
 
-- **构建后端**: hatchling + hatch-vcs (setuptools → hatchling)
+- **构建后端**: hatchling + hatch-vcs
 - **包布局**: src layout (`src/qmp/`)
 - **License**: AGPL-3.0-only
 - **Python**: ≥3.13
@@ -51,27 +51,17 @@ qmp/
 │   ├── __init__.py
 │   ├── _version.py         # hatch-vcs 自动生成
 │   ├── version.py
-│   ├── hamiltonian/        # CUDA C++ kernel + Python thin wrapper
-│   │   ├── __init__.py
-│   │   ├── AGENTS.md
-│   │   ├── _hamiltonian.py          # Python thin wrapper
-│   │   ├── _hamiltonian.cpp         # prepare + TORCH_LIBRARY_FRAGMENT
-│   │   ├── _hamiltonian_cpu.cpp     # CPU backend (TORCH_LIBRARY_IMPL)
-│   │   ├── _hamiltonian_cuda.cu     # CUDA backend (TORCH_LIBRARY_IMPL)
-│   │   ├── _spin_separated_hamiltonian.py
-│   │   ├── _spin_separated_hamiltonian.cpp
-│   │   ├── _spin_separated_hamiltonian_cpu.cpp
-│   │   └── _spin_separated_hamiltonian_cuda.cu
-│   ├── networks/            # MLP / Transformers / MPS (→ Flax)
-│   ├── algorithms/          # HAAR / VMC / Lanczos (→ 纯 JAX)
-│   ├── models/              # FCIDUMP / Hubbard / Ising / PySCF / OpenFermion
-│   ├── plugins/             # 第三方框架接口
-│   └── utility/             # bitspack, losses, context, optimizer
+│   ├── hamiltonian/        # CUDA kernel + Python thin wrapper
+│   ├── networks/           # MLP / Transformers / MPS (→ Flax)
+│   ├── algorithms/         # HAAR / VMC / Lanczos (→ 纯 JAX)
+│   ├── models/             # FCIDUMP / Hubbard / Ising / PySCF / OpenFermion
+│   ├── plugins/            # 第三方框架接口
+│   └── utility/            # bitspack, losses, context, optimizer
 ├── tests/
 ├── docs/superpowers/
-│   ├── specs/               # 设计 spec
-│   └── plans/               # 实施 plan
-└── old/                     # main 分支参考代码
+│   ├── specs/              # 设计 spec
+│   └── plans/              # 实施 plan
+└── old/                    # main 分支参考代码
 ```
 
 ## 3. 总体架构
@@ -133,43 +123,16 @@ def distributed_apply_within(configs_shard, psi_shard, ...):
 
 ## 4. Hamiltonian 层详细设计
 
-### 4.0 现有架构 (refact 分支已确立的四层模式)
-
-```
-每个操作遵循相同的分层结构:
-
-1. hamiltonian_apply_kernel  (__device__)  — 纯计算核心，施加算符到组态上
-2. {operation}_kernel        (__device__)  — 每个 (term, batch) 对的工作单元
-3. {operation}_kernel_interface (__global__)  — 遍历所有 term×batch 对
-4. {operation}_interface     (host, TORCH_LIBRARY_IMPL)  — PyTorch 集成层
-```
-
-**CPU/CUDA 对称性原则**: 两边核心逻辑完全一致，平台差异局限于设备管理、kernel 启动、同步。`CUDAGuard` + `getCurrentCUDAStream` + `cudaDeviceProp` 而非裸 `cudaDeviceSynchronize`。`thrust::sort_by_key` 与 kernel 同流而非回 CPU `std::sort`。
-
-**模板参数命名**: `n_qubytes`, `particle_cut`, `max_op_number`, `forward`，贯穿所有 C++ 签名、模块名、缓存 key。编译期通过 `-DN_QUBYTES=X -DPARTICLE_CUT=Y` 传入。
-
-**编译与绑定**: 当前通过 `torch.utils.cpp_extension.load` JIT 编译，缓存于 `~/.cache/qmp/`:
-
-```
-_hamiltonian.cpp       → 声明模块 (prepare 函数 + TORCH_LIBRARY_FRAGMENT)
-_hamiltonian_cpu.cpp   → CPU 实现 (TORCH_LIBRARY_IMPL(..., CPU, ...))
-_hamiltonian_cuda.cu   → CUDA 实现 (TORCH_LIBRARY_IMPL(..., CUDA, ...))
-```
-
-**SpinSeparatedHamiltonian** (refact 分支新增): Hamiltonian 的变体，内部将自旋上下分离为 block 排列。prepare 阶段将每个 term 按偶数(up)/奇数(down)分拆为 5 张量输出。支持 `use_lookup_table` 开关将 binary search (O(log N)) 变为查表 (O(1))。
-
 ### 4.1 CUDA kernel 迁移: 三阶段
 
 **阶段 1 (当前)**: 保留 Torch C++ extension 体系，DLPack 零拷贝桥接
 - 继续用 `torch.utils.cpp_extension.load` 编译 C++/CUDA
 - Python 端通过 `torch.utils.dlpack.to_dlpack` / `jax.dlpack.from_dlpack` 做零拷贝 tensor 交换
-- 优点: CUDA 代码一行不改，四层架构完全保留，迁移风险低
+- 优点: CUDA 代码不改，迁移风险低
 - 缺点: 每次调用有 DLPack 转换开销（但量级小）
 
 **阶段 2 (中期)**: CUDA kernel 编译为独立共享库，通过 XLA FFI 直接调用
-- 保留四层架构中的第 1-3 层 (纯 CUDA 逻辑)，替换第 4 层 (Torch → XLA FFI)
-- 用 `nvcc` 编译 `.so`，导出 C ABI 函数
-- 用 `jax.extend.ffi` 注册为 XLA custom call target
+- 用 `nvcc` 编译 `.so`，导出 C ABI 函数，`jax.extend.ffi` 注册为 XLA custom call target
 - 优点: 零转换开销，JIT 可以融合优化
 - CUDA 代码几乎不改 (仅函数签名改为接受 raw pointer + strides)
 
@@ -183,7 +146,7 @@ _hamiltonian_cuda.cu   → CUDA 实现 (TORCH_LIBRARY_IMPL(..., CUDA, ...))
 
 **分析**: Embarrassingly parallel。每个 (term, config) 对完全独立。无去重需求，无排序需求。当前实现已经最优。
 
-**方案**: 保留当前 CUDA kernel (四层架构不变)，仅换 binding 层。
+**方案**: 保留当前 CUDA kernel，仅换 binding 层。
 
 ```
 FFI 签名:
@@ -201,11 +164,11 @@ diagonal_term(
 
 **操作**: 稀疏矩阵乘向量。输入 configs_i (源空间) + psi_i + configs_j (目标空间)，计算 H·ψ_i 投影到目标空间的结果 ψ_j。
 
-**当前实现** (refact 分支已支持 `forward`/`backward` 双向):
-1. `thrust::sort_by_key` 对 configs_j 排序，返回 tuple `(sorted, sort_idx)`
+**当前实现**:
+1. `thrust::sort_by_key` 对 configs_j 排序，保留逆序索引
 2. 2D grid (dim3{1, maxThreadsPerBlock >> 1}): 每个 (term, config_i) 施加 H 项 → 排序数组中二分查找 → `atomicAdd`
 
-**分析**: configs_j 排序是一次性操作 (O(B_j log B_j))。二分查找每次 ~24 次全局内存随机访问。block 配置 `dim3{1, ~512}` 的原因: term 在 block 间并行，batch 在 block 内并行，site/kind 可广播到全 warp。
+**分析**: configs_j 排序是一次性操作 (O(B_j log B_j))。二分查找每次 ~24 次全局内存随机访问 (log₂(10^7) ≈ 24)。
 
 **改进**: **二级索引二分查找**
 - L1 索引: 每 256 条 config_j 取样 → ~40K 条目，存 `__constant__` 内存
@@ -215,13 +178,11 @@ diagonal_term(
 
 ```
 kernel 内部:
-  // L1 index 二分查找 (全在 constant memory)
-  int bucket = binary_search_l1(l1_index, target_config);
-  // 桶内线性扫描
-  int idx = linear_scan_bucket(configs_j, bucket * 256, target_config);
+  int bucket = binary_search_l1(l1_index, target_config);  // constant memory
+  int idx = linear_scan_bucket(configs_j, bucket * 256, target_config);  // 1-2 cache line
 ```
 
-**方案**: 保留四层架构 + 排序逻辑，在第 2 层 (`apply_within_kernel`) 添加二级索引。
+**方案**: 保留排序 + CUDA kernel，添加二级索引优化。
 
 ```
 FFI 签名:
@@ -243,7 +204,7 @@ apply_within(
 
 **规模**: 预期 distinct new configs ≈ 10^7-10^8。
 
-**当前实现**: 256叉前缀树 (Trie)，device malloc 分配节点，atomicCAS 锁创建。四层架构: `list_relative_kernel` → `list_relative_kernel_interface` → `list_relative_interface`。
+**当前实现**: 256叉前缀树 (Trie)，device malloc 分配节点，atomicCAS 锁创建。
 
 **问题**: Trie 每 distinct entry 占用 ~25KB (N_levels × ~2.5KB/节点)，10^8 entries 需 2.5 TB 显存——不可行。且 device malloc 极慢。
 
@@ -256,13 +217,13 @@ apply_within(
   open addressing + linear probing
   预分配，零运行时分配
 
-配置尺寸估算:
-  10^7 distinct: ~600 MB (轻松)
+尺寸估算:
+  10^7 distinct: ~600 MB
   10^8 distinct: ~6 GB   (H100 80GB 内可行)
   10^9 distinct: ~60 GB  (需多卡分区)
 
 插入流程 (per thread):
-  1. hamiltonian_apply_kernel → new_config, psi_contribution
+  1. 施加 H 项 → new_config, psi_contribution
   2. 二分查找排除 exclude_configs (或 Bloom filter 预筛查)
   3. 哈希表查找:
      - 找到: atomicAdd(振幅)
@@ -304,11 +265,11 @@ list_relative(
 
 与 `list_relative` 的区别: 不返回所有新 config，只选 Top-K；重要性度量是 `|H_ij * psi_i|²` (per-path contribution squared)，而非累加振幅。
 
-**当前实现**: 2D grid → 并发最小堆 (per-node mutex + nanosleep backoff)，四层架构同其他操作。
+**当前实现**: 2D grid → 并发最小堆 (per-node mutex + nanosleep backoff)
 
 **方案**: **全局哈希表 + 阈值加速 + 周期性 compact**
 
-综合调研后选定的方案: 用哈希表作为"软 Top-K"累加器，定期 compact 到精确 Top-K。
+用哈希表作为"软 Top-K"累加器，定期 compact 到精确 Top-K。
 
 ```
 数据结构:
@@ -358,7 +319,7 @@ list_relative(
 1. K=100K 时堆有 17 层，单线程插入需 ~8 次锁操作；哈希表只需 ~2 次 probe
 2. 堆的 per-node mutex 带来锁争用；哈希表的 open addressing probe 是无锁的 (仅 CAS on slot)
 3. 堆需要预先确定"每个分片放多少条目"——对未知权重分布不鲁棒；哈希表通过 compact 动态适应
-4. 实现复杂度: 哈希表主要用现有库；堆需要手写 warp-level 协作逻辑
+4. 实现复杂度: 哈希表主要用现有库 (cuCollections)；堆需要手写 warp-level 协作逻辑
 
 ```
 FFI 签名:
@@ -454,14 +415,12 @@ def apply_within_distributed(configs_i, psi_i, configs_j, site, kind, coef):
 ### Phase 1: FFI 绑定层 (DLPack 零拷贝)
 - [ ] 将每个 CUDA kernel 的 Python wrapper 改为 DLPack 零拷贝调用
 - [ ] 验证 PyTorch 环境下性能无损
-- [ ] 保留四层 C++ 架构不变
 
 ### Phase 2: CUDA kernel 算法升级
 - [ ] `apply_within`: 添加二级索引二分查找
 - [ ] `list_relative`: 替换 Trie 为 cuCollections static_map
 - [ ] `find_relative`: 替换 mutex heap 为哈希表 + compact + 阈值加速
 - [ ] `diagonal_term`: 不变
-- [ ] `SpinSeparatedHamiltonian`: 对应升级各操作
 
 ### Phase 3: JAX 框架迁移
 - [ ] 网络层 (MLP/Transformers/MPS) 用 Flax 重写
@@ -485,4 +444,3 @@ def apply_within_distributed(configs_i, psi_i, configs_j, site, kind, coef):
 - CUB: https://nvidia.github.io/cccl/cub/
 - NetKet (JAX VMC reference): https://github.com/netket/netket
 - FermiNet (JAX NN-VMC reference): https://github.com/google-deepmind/ferminet
-- qmp-kit refact branch: `refact` (本仓库另一个 worktree)
