@@ -8,7 +8,7 @@
 实现 `src/qmp/hamiltonian/` 子包，包含：
 
 - **位掩码预处理** (`prepare`): 纯 Python 将费米子哈密顿量字典转为 (create_mask, annihilate_mask, flip_mask, parity_mask, parity_const, coef) 表示
-- **四个 CUDA kernel**: diagonal_term, apply_within, list_relative, find_relative — 通过 JAX FFI 接入
+- **四个 CUDA kernel**: `compute_diagonal`, `apply_within_subspace`, `find_all_relative_configs`, `find_topk_relative_configs` — 通过 JAX FFI 接入
 - **纯 JAX fallback**: CPU/CI 环境下无 GPU 可用时，用 `jax.jit` 实现相同功能
 - **JIT 编译与缓存**: CUDA kernel 按需编译 (.cu → .so)，缓存于 `~/.cache/qmp/`
 - **pytest 测试**: prepare 正确性 + fallback 端到端 + CUDA 回归
@@ -37,6 +37,15 @@ tests/
 ```
 
 ## 3. 模块设计
+
+### 命名约定
+
+| 操作 | Python 方法 | XLA FFI target | C++ handler | 语义 |
+|------|------------|----------------|-------------|------|
+| 对角元 | `compute_diagonal` | `qmp_compute_diagonal` | `ComputeDiagonal` | H[i,i] |
+| H·psi 投影 | `apply_within_subspace` | `qmp_apply_within_subspace` | `ApplyWithinSubspace` | H|ψ⟩ 投影到目标子空间 |
+| 全部枚举 | `find_all_relative_configs` | `qmp_find_all_relative_configs` | `FindAllRelativeConfigs` | 所有新构型 + 去重 |
+| Top-K 选择 | `find_topk_relative_configs` | `qmp_find_topk_relative_configs` | `FindTopKRelativeConfigs` | 最重要的 K 个新构型 |
 
 ### 3.1 `_hamiltonian_prepare.py` — 位掩码预处理
 
@@ -72,10 +81,10 @@ Python int 天然支持无限精度, n_qubits > 64 也无问题。`popcount` 用
 - `MAX_OP_NUMBER` (编译期宏): 每 term 最大算符数 (二体相互作用 = 4)
 
 **四个 handler** (`XLA_FFI_DEFINE_HANDLER_SYMBOL`):
-- `DiagonalTerm` — 完整实现
-- `ApplyWithin` — forward + backward 方向
-- `ListRelative` — cuCollections static_map 哈希表
-- `FindRelative` — 哈希表 + 阈值加速 + 周期性 CUB compact
+- `ComputeDiagonal` — 对角元 (完整实现)
+- `ApplyWithinSubspace` — 稀疏 H·psi 投影 (forward + backward 方向)
+- `FindAllRelativeConfigs` — cuCollections static_map 哈希表去重
+- `FindTopKRelativeConfigs` — 哈希表 + 阈值加速 + 周期性 CUB compact
 
 **工具函数** (device):
 - `is_applicable(config, create_mask, annihilate_mask, n_qubytes)` — 位 AND/OR+NOR check
@@ -116,23 +125,23 @@ def load_cuda_module(n_qubytes: int, particle_cut: int, max_op_number: int) -> c
 
 ```python
 @jax.jit
-def diagonal_term(configs, create_mask, annihilate_mask, flip_mask, parity_mask, parity_const, coef):
+def compute_diagonal(configs, create_mask, annihilate_mask, flip_mask, parity_mask, parity_const, coef):
     # 对每个 (term, config): 可作用性检查 + 翻转 = 0? + JW parity + 累加 coef
     ...
 
 @jax.jit
-def apply_within(configs_i, psi_i, configs_j, create_mask, annihilate_mask,
-                 flip_mask, parity_mask, parity_const, coef, direction=0):
+def apply_within_subspace(configs_i, psi_i, configs_j, create_mask, annihilate_mask,
+                          flip_mask, parity_mask, parity_const, coef, direction=0):
     ...
 
 @jax.jit
-def list_relative(configs_i, psi_i, configs_exclude, create_mask, annihilate_mask,
-                  flip_mask, parity_mask, parity_const, coef, hash_capacity):
+def find_all_relative_configs(configs_i, psi_i, configs_exclude, create_mask, annihilate_mask,
+                              flip_mask, parity_mask, parity_const, coef, hash_capacity):
     ...
 
 @jax.jit
-def find_relative(configs_i, psi_i, count_selected, configs_exclude, create_mask,
-                  annihilate_mask, flip_mask, parity_mask, parity_const, coef):
+def find_topk_relative_configs(configs_i, psi_i, count_selected, configs_exclude, create_mask,
+                                annihilate_mask, flip_mask, parity_mask, parity_const, coef):
     ...
 ```
 
@@ -148,12 +157,14 @@ class Hamiltonian:
         # 尝试加载 CUDA kernel
         self._use_cuda = _try_enable_cuda(...)
 
-    def diagonal_term(self, configs):
-        if self._use_cuda:
-            return self._diagonal_term_ffi(configs)
-        else:
-            return _hamiltonian_jax.diagonal_term(configs, self._masks...)
-    # apply_within, list_relative, find_relative 同理
+    def compute_diagonal(self, configs):
+        ...
+    def apply_within_subspace(self, configs_i, psi_i, configs_j, *, direction=0):
+        ...
+    def find_all_relative_configs(self, configs_i, psi_i, configs_exclude, *, hash_capacity):
+        ...
+    def find_topk_relative_configs(self, configs_i, psi_i, count_selected, configs_exclude):
+        ...
 ```
 
 ## 4. 依赖
@@ -174,9 +185,9 @@ class Hamiltonian:
 ### 5.2 `tests/unit/hamiltonian/test_fallback.py`
 - 小型合成哈密顿量 (4 qubits, ~10 terms), 10-20 configs
 - `test_diagonal_term_exact`: 手工计算结果对比
-- `test_apply_within_forward_backward_consistency`: H 和 H^dag 结果关系
-- `test_list_relative_dedup`: 去重和振幅累加
-- `test_find_relative_topk`: Top-K 排序
+- `test_apply_within_subspace_forward_backward_consistency`: H 和 H^dag 结果关系
+- `test_find_all_relative_configs_dedup`: 去重和振幅累加
+- `test_find_topk_relative_configs_topk`: Top-K 排序
 
 ### 5.3 `tests/unit/hamiltonian/test_cuda.py`
 - `@pytest.mark.cuda` — 仅 GPU 环境运行
