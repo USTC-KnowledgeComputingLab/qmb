@@ -65,13 +65,31 @@ T = 有效 term 数量, Q = ceil(n_qubits/8)。
 
 **算法**:
 
-对每个 term，将产生/湮灭算符分类后按正规序排列作用序列:
-1. 逐算符计算对初始构型的约束条件 (flip_bit ⊕ (0 if creation else 1))
-2. 累加 JW 奇偶性常数 (const ⊕= popcount(flip_before & low_mask(idx)))
-3. 更新翻转掩码 (flip ^= 1 << idx)
-4. 检查约束一致性，不一致则跳过 (项恒为零)
+输入为哈密顿量的一项：有序的产生/湮灭算符序列 `[(site_0, kind_0), (site_1, kind_1), ...]`，其中 kind=0 为湮灭，kind=1 为产生。
 
-Python int 天然支持无限精度, n_qubits > 64 也无问题。`popcount` 用 `int.bit_count()`。
+**Step 1: 构造作用序列。** 算符乘积 `A B` 作用在态上时，先作用 `B` 后作用 `A`。因此书写顺序的逆序即为作用顺序。将产生算符和湮灭算符分别收集后按正规序排列：先所有湮灭算符（反序），再所有产生算符（反序）。
+
+**Step 2: 逐算符模拟。** 维护四个状态变量：`flip`（当前已翻转的位掩码）、`conds`（每个 qubit 的约束条件，-1=未设/0=须为0/1=须为1）、`const_parity`（JW 奇偶性常数累加器）、`parity_mask`（奇偶性掩码累加器）。按作用序列依次处理每个算符 `(idx, is_creation)`：
+
+a) **约束推导。** 算符作用于当前中间态，该位的中间值 = `initial_bit ⊕ flip_bit`（其中 `flip_bit = (flip >> idx) & 1`）。
+   - 产生算符 (`is_creation=True`) 要求中间值为 0 → `initial_bit = flip_bit ⊕ 0 = flip_bit`
+   - 湮灭算符 (`is_creation=False`) 要求中间值为 1 → `initial_bit = flip_bit ⊕ 1`
+   若该位已有 `conds[idx]` 且与推导值冲突，则该 term 恒为零，跳过。
+
+b) **JW 常数贡献。** 该算符作用时，其 JW Z-string 累加前方所有位的中间占据数。前方位的中间占据数为 `initial_bit ⊕ before_flip`，其中 `before_flip` 为该算符作用之前的 flip 掩码。拆分为两部分：
+   - 与初始构型相关的部分：`Σ_{j<idx} initial_bit[j]` → 记入 `parity_mask`
+   - 与之前翻转相关的部分：`Σ_{j<idx} before_flip[j]` → 记入 `const_parity`
+   实现上 `const_parity ^= popcount(before_flip & low_mask(idx)) & 1`，`parity_mask ^= low_mask(idx)`（其中 `low_mask(k) = (1 << k) - 1`）。
+
+c) **翻转更新。** `flip ^= (1 << idx)`。
+
+**Step 3: 组装输出。** 遍历所有 qubit i（0 ≤ i < n_qubits）：
+   - `conds[i] == 0` → `create_mask` 该位置 1
+   - `conds[i] == 1` → `annihilate_mask` 该位置 1
+   - 其余位在两个掩码中均为 0（无约束）
+   `flip_mask = flip`，`parity_mask` 和 `parity_const` 为累加值，`coef` 为原复数系数。
+
+Python int 天然支持无限精度，`popcount` 用 `int.bit_count()`。
 
 ### 3.2 `_hamiltonian_cuda.cu` — CUDA kernel
 
