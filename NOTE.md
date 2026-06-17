@@ -96,24 +96,124 @@ qmp/
 
 ### 3.1 JAX FFI 集成方式
 
-每个 Hamiltonian 操作通过 `jax.extend.ffi` 注册为 XLA custom call:
+调研结论：**JAX FFI (`jax.ffi`) 是唯一正确选择。** Pallas 缺少原子操作支持，无法实现 hash-table 去重。DLPack 只能作为临时迁移桥接，不应是最终方案。CuPy 无法进入 `jax.jit`。
+
+每个 Hamiltonian 操作通过 `jax.ffi` 注册为 XLA custom call:
 
 ```python
 import jax
-from jax.extend import ffi
+import jax.ffi
+import ctypes
 
-# Python 端注册
-ffi.register_ffi_target("qmp_apply_within", cpp_capsule, platform="CUDA")
+# 加载编译好的 .so
+_lib = ctypes.cdll.LoadLibrary("libqmp_hamiltonian.so")
 
-@ffi.ffi_call("qmp_apply_within", result_shape_dtypes, vmap_method="sequential")
-def apply_within(configs_i, psi_i, configs_j, site, kind, coef):
-    ...
+# 注册每个 kernel 的 FFI target
+jax.ffi.register_ffi_target(
+    "qmp_diagonal_term",
+    jax.ffi.pycapsule(_lib.DiagonalTerm),
+    platform="CUDA",
+)
 
-# 与 shard_map 配合使用
-@jax.shard_map(mesh=mesh, in_specs=P('configs'), out_specs=P('configs'))
-def distributed_apply_within(configs_shard, psi_shard, ...):
-    return apply_within(configs_shard, psi_shard, ...)
+# 包装为 JAX callable
+def diagonal_term(configs, create_mask, annihilate_mask, flip_mask,
+                  parity_mask, parity_const, coef):
+    B = configs.shape[0]
+    return jax.ffi.ffi_call(
+        "qmp_diagonal_term",
+        jax.ShapeDtypeStruct((B, 2), jnp.float64),
+        vmap_method="broadcast_all",
+    )(configs, create_mask, annihilate_mask, flip_mask,
+      parity_mask, parity_const, coef)
+
+# 与 shard_map 配合 (多卡)
+from jax.sharding import PartitionSpec as P
+
+@partial(jax.shard_map, mesh=mesh,
+         in_specs=(P('configs'), P(None), P(None), P(None), P(None), P(None), P(None)),
+         out_specs=P('configs'))
+def distributed_diagonal_term(configs_shard, create_mask, annihilate_mask,
+                               flip_mask, parity_mask, parity_const, coef):
+    return diagonal_term(configs_shard, create_mask, annihilate_mask,
+                         flip_mask, parity_mask, parity_const, coef)
 ```
+
+**C++ 侧 handler 模式** (每个 kernel 一个 handler):
+
+```cpp
+#include "xla/ffi/api/ffi.h"
+#include <cuda_runtime.h>
+
+namespace ffi = xla::ffi;
+
+ffi::Error DiagonalTermImpl(
+    cudaStream_t stream,                         // FFI 自动注入
+    ffi::Buffer<ffi::U8>  configs,               // [B, Q]
+    ffi::Buffer<ffi::U8>  create_mask,           // [T, Q]
+    ffi::Buffer<ffi::U8>  annihilate_mask,       // [T, Q]
+    ffi::Buffer<ffi::U8>  flip_mask,             // [T, Q]
+    ffi::Buffer<ffi::U8>  parity_mask,           // [T, Q]
+    ffi::Buffer<ffi::U8>  parity_const,          // [T]
+    ffi::Buffer<ffi::F64> coef,                  // [T, 2]
+    ffi::ResultBuffer<ffi::F64> psi_result       // [B, 2]
+) {
+    int64_t B = configs.dimensions()[0];
+    int64_t T = create_mask.dimensions()[0];
+    int64_t Q = create_mask.dimensions()[1];
+
+    cudaMemsetAsync(psi_result->untyped_data(), 0,
+                    psi_result->size_bytes(), stream);
+
+    // 启动 CUDA kernel
+    diagonal_term_kernel<<<grid, block, 0, stream>>>(
+        B, T, Q,
+        configs.typed_data(), create_mask.typed_data(),
+        annihilate_mask.typed_data(), flip_mask.typed_data(),
+        parity_mask.typed_data(), parity_const.typed_data(),
+        reinterpret_cast<const double*>(coef.typed_data()),
+        reinterpret_cast<double*>(psi_result->typed_data()));
+
+    return ffi::Error::Success();
+}
+
+// 导出为 C ABI 符号
+XLA_FFI_DEFINE_HANDLER_SYMBOL(
+    DiagonalTerm, DiagonalTermImpl,
+    ffi::Ffi::Bind()
+        .Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Arg<ffi::Buffer<ffi::U8>>()    // configs
+        .Arg<ffi::Buffer<ffi::U8>>()    // create_mask
+        .Arg<ffi::Buffer<ffi::U8>>()    // annihilate_mask
+        .Arg<ffi::Buffer<ffi::U8>>()    // flip_mask
+        .Arg<ffi::Buffer<ffi::U8>>()    // parity_mask
+        .Arg<ffi::Buffer<ffi::U8>>()    // parity_const
+        .Arg<ffi::Buffer<ffi::F64>>()   // coef
+        .Ret<ffi::Buffer<ffi::F64>>()   // psi_result
+);
+```
+
+**编译** (CMake):
+
+```cmake
+find_path(XLA_INCLUDE_DIR xla/ffi/api/ffi.h
+  HINTS "${Python3_SITELIB}/jaxlib/include")
+
+add_library(qmp_hamiltonian SHARED
+  diagonal_term.cu apply_within.cu list_relative.cu find_relative.cu)
+target_include_directories(qmp_hamiltonian PRIVATE ${XLA_INCLUDE_DIR})
+target_link_libraries(qmp_hamiltonian PRIVATE cudart cuco)
+set_target_properties(qmp_hamiltonian PROPERTIES
+  CUDA_ARCHITECTURES "80;86;89;90")
+```
+
+**关键 API 要点**:
+- `jax.extend.ffi` 已废弃，使用 `jax.ffi` (JAX v0.4.31+ stable)
+- `ffi::Buffer<T>` 提供 `.typed_data()` (返回 T*) 和 `.dimensions()`
+- `ffi::ResultBuffer<T>` 用于输出，通过 `->typed_data()` 写入
+- `.Ctx<ffi::PlatformStream<cudaStream_t>>()` 自动注入 CUDA stream
+- `vmap_method="broadcast_all"` 比 `"sequential"` 快: kernel 本来就处理 batch
+- **不需要 `custom_vjp`**: Hamiltonian 操作不参与神经网络梯度
+- **动态输出形状**: list_relative/find_relative 预分配 max capacity + 返回 count
 
 ### 3.2 迁移策略
 
@@ -125,50 +225,52 @@ def distributed_apply_within(configs_shard, psi_shard, ...):
 
 ### 4.0 Hamiltonian term 的位运算表示 (BIT.md 方案)
 
-每个 fermionic Hamiltonian term 预处理为六个参数 `(a, b, t, p, s, coef)`:
+每个 fermionic Hamiltonian term 预处理为六个参数 `(create_mask, annihilate_mask, flip_mask, parity_mask, parity_const, coef)`:
 
 | 参数 | 含义 | 用途 |
 |------|------|------|
-| `a` | 必须为 0 的位（产生算符的目标位） | 可作用性判断 |
-| `b` | 无约束掩码的补集（b 中为 0 的位即湮灭算符的目标位，必须为 1） | 可作用性判断 |
-| `t` | 翻转掩码（所有算符作用的位） | 构型更新 |
-| `p` | JW 奇偶性掩码 | 符号计算 |
-| `s` | 基础符号 (0 或 1) | 符号计算 |
+| `create_mask` | 必须为 0 的位（产生算符的目标位） | 可作用性判断 |
+| `annihilate_mask` | 必须为 1 的位（湮灭算符的目标位） | 可作用性判断 |
+| `flip_mask` | 翻转掩码（所有算符作用的位） | 构型更新 |
+| `parity_mask` | JW 奇偶性掩码 | 符号计算 |
+| `parity_const` | 固定奇偶性贡献 (0 或 1) | 符号计算 |
 | `coef` | 复数系数 (real + imag) | 振幅累加 |
 
 **可作用性判断**（2 次位运算 + 2 次比较）:
 ```
-applicable = ((config & a) == 0) && ((config | b) == FULL_MASK)
+applicable = ((config & create_mask) == 0)
+          && ((config & annihilate_mask) == annihilate_mask)
 ```
-- `a` 中为 1 的位，config 必须为 0（产生算符目标为空）
-- `b` 中为 0 的位，config 必须为 1（湮灭算符目标为占据）
+- `create_mask` 中为 1 的位，config 必须为 0（产生算符目标为空）
+- `annihilate_mask` 中为 1 的位，config 必须为 1（湮灭算符目标为占据）
 
 **构型更新**（1 次位运算）:
 ```
-new_config = config ^ t
+new_config = config ^ flip_mask
 ```
 
 **JW 奇偶性**（1 次 popcount + 1 次 XOR）:
 ```
-parity = s ^ (popcount(p & config) & 1)
+parity = parity_const ^ (popcount(parity_mask & config) & 1)
+sign = 1 - 2 * parity  // +1 or -1
 ```
 
-**预处理**: 给定产生/湮灭算符的有序序列，通过 `term_from_normal_ordered` 生成 (a, b, t, p, s):
+**预处理**: 给定产生/湮灭算符的有序序列，通过 `term_from_normal_ordered` 生成:
 
 ```
-原理:
-  对每个算符 (idx, is_creation):
-    1. 作用条件: required_init = flip_bit ⊕ (0 if creation else 1)
-       若与已有条件冲突 → 此项恒零
-    2. JW 常数符号: const_s ⊕= popcount(flip_before & low_mask(idx)) % 2
-    3. 翻转位: flip ⊕= (1 << idx)
+对每个算符 (idx, is_creation):
+  1. flip_bit = (flip >> idx) & 1
+     required_init = flip_bit ^ (0 if creation else 1)
+     若与已有条件冲突 → 此项恒零
+  2. parity_const ^= popcount(flip & low_mask(idx)) % 2
+  3. flip ^= (1 << idx)
 
-  最终:
-    a = {i | cond[i] == 0}
-    b = FULL_MASK & ~{i | cond[i] == 1}
-    t = flip
-    p = XOR_{k} low_mask(idx_k)
-    s = const_s
+最终:
+  create_mask = {i | cond[i] == 0}
+  annihilate_mask = {i | cond[i] == 1}
+  flip_mask = flip
+  parity_mask = XOR_{k} low_mask(idx_k)
+  parity_const = 累加常数
 ```
 
 **与当前表示 (site, kind, coef) 的对比**:
@@ -179,24 +281,29 @@ parity = s ^ (popcount(p & config) & 1)
 | 构型修改 | for 循环逐位 set_bit | 1 次 XOR |
 | JW 符号 | for 循环逐位 parity | 1 次 popcount |
 | 每个 term 的代价 | O(max_op_number) | O(1) |
-| 数据量 | site[T,4]int16 + kind[T,4]uint8 + coef[T,2]f64 | a[T,Q]uint8 + b[T,Q]uint8 + t[T,Q]uint8 + p[T,Q]uint8 + s[T]uint8 + coef[T,2]f64 |
+| 数据量 | site[T,4]int16 + kind[T,4]uint8 + coef[T,2]f64 | create_mask[T,Q] + annihilate_mask[T,Q] + flip_mask[T,Q] + parity_mask[T,Q] + parity_const[T] + coef[T,2] |
 
 每个 term 从 ~14 bytes 变为 ~(4*Q + 17) bytes。对于 Q ≈ 25 qubytes (200 qubits)，~117 bytes/term。100K terms ≈ 11.7 MB，可接受。
 
-### 4.1 CUDA kernel 迁移: 三阶段
+### 4.1 CUDA kernel 与 JAX 的连接方式
 
-**阶段 1 (当前)**: 保留 Torch C++ extension 体系，DLPack 零拷贝桥接
-- 继续用 `torch.utils.cpp_extension.load` 编译 C++/CUDA
-- Python 端通过 `torch.utils.dlpack.to_dlpack` / `jax.dlpack.from_dlpack` 做零拷贝 tensor 交换
-- 优点: CUDA 代码不改，迁移风险低
-- 缺点: 每次调用有 DLPack 转换开销（但量级小）
+调研结论：**JAX FFI (`jax.ffi`) 是唯一正确选择。** 理由:
 
-**阶段 2 (中期)**: CUDA kernel 编译为独立共享库，通过 XLA FFI 直接调用
-- 用 `nvcc` 编译 `.so`，导出 C ABI 函数，`jax.extend.ffi` 注册为 XLA custom call target
-- 优点: 零转换开销，JIT 可以融合优化
-- CUDA 代码几乎不改 (仅函数签名改为接受 raw pointer + strides)
+| 方案 | 可行性 | 原因 |
+|------|--------|------|
+| **JAX FFI** | 唯一选择 | production-ready, zero-copy, stream-aware, jit/shard_map 全兼容 |
+| DLPack bridge | 仅迁移桥接 | 需要保留 PyTorch 依赖，无法进入 `jax.jit`，多节点不可行 |
+| Pallas | 不可行 | 缺少 `atomicAdd`/`atomicCAS` 支持，无法实现哈希表去重 |
+| CuPy interop | 不可行 | 无法在 `jax.jit` 内调用 |
 
-**阶段 3 (远期可选)**: Pallas 重写或全面 XLA 化 — 当前不做此承诺
+**核心路径**: CUDA `.cu` → CMake 编译为 `.so` → `XLA_FFI_DEFINE_HANDLER_SYMBOL` 导出 → `jax.ffi.register_ffi_target` 注册 → `jax.ffi.ffi_call` 调用 → `shard_map` 多卡分发。
+
+**关键集成要点**:
+- `ffi::Buffer<T>`: `.typed_data()` 获取设备指针，`.dimensions()` 获取形状
+- `ffi::PlatformStream<cudaStream_t>`: 自动注入 CUDA stream，kernel 在正确流上启动
+- `vmap_method="broadcast_all"`: kernel 本身支持 batch，避免 scan 开销
+- 输出动态形状: 预分配 max capacity + 返回 count (list_relative 和 find_relative)
+- **不需要 `custom_vjp`**: Hamiltonian 操作不参与神经网络梯度
 
 ### 4.2 diagonal_term
 
@@ -207,30 +314,30 @@ parity = s ^ (popcount(p & config) & 1)
 ```
 for each (term_t, config_i):
   // 可作用性检查
-  if ((config_i & a[t]) != 0) continue
-  if ((config_i | b[t]) != FULL_MASK) continue
+  if ((config_i & create_mask[t]) != 0) continue
+  if ((config_i & annihilate_mask[t]) != annihilate_mask[t]) continue
   // 对角条件：无净翻转
-  if (t_mask[t] != 0) continue
+  if (flip_mask[t] != 0) continue
   // JW 符号
-  sign = 1 - 2 * (s[t] ^ (popcount(p[t] & config_i) & 1))
+  sign = 1 - 2 * (parity_const[t] ^ (popcount(parity_mask[t] & config_i) & 1))
   // 累加
   psi_result[i] += sign * coef[t]
 ```
 
 **分析**: 每个 (term, config) 对完全独立。只需两层循环 + 位运算 + popcount，无排序无去重。
 
-**方案**: 纯 CUDA kernel，`(a, b, t, p, s, coef)` 为输入。2D grid 不变。
+**方案**: 纯 CUDA kernel，`(create_mask, annihilate_mask, flip_mask, parity_mask, parity_const, coef)` 为输入。2D grid 不变。
 
 ```
 FFI 签名:
 diagonal_term(
-  configs  [B, Q] uint8,
-  a        [T, Q] uint8,
-  b        [T, Q] uint8,
-  t        [T, Q] uint8,
-  p        [T, Q] uint8,
-  s        [T]    uint8,
-  coef     [T, 2] f64
+  configs          [B, Q] uint8,
+  create_mask      [T, Q] uint8,
+  annihilate_mask  [T, Q] uint8,
+  flip_mask        [T, Q] uint8,
+  parity_mask      [T, Q] uint8,
+  parity_const     [T]    uint8,
+  coef             [T, 2] f64
 ) → psi [B, 2] f64 (real + imag)
 ```
 
@@ -254,12 +361,13 @@ diagonal_term(
 ```
 for each (term_t, config_i):
   // 可作用性检查 (2 次位运算)
-  if ((config_i & a[t]) != 0) continue
-  if ((config_i | b[t]) != FULL_MASK) continue
+  if ((config_i & create_mask[t]) != 0) continue
+  if ((config_i & annihilate_mask[t]) != annihilate_mask[t]) continue
   // 构型翻转 (1 次 XOR)
-  new_config = config_i ^ t_mask[t]
+  new_config = config_i ^ flip_mask[t]
   // JW 符号 (1 次 popcount)
-  sign = 1 - 2 * (s[t] ^ (popcount(p[t] & config_i) & 1))
+  parity = parity_const[t] ^ (popcount(parity_mask[t] & config_i) & 1)
+  sign = 1 - 2 * parity
   contribution = sign * coef[t] * psi_i[i]
   // 二级索引二分查找
   idx = two_level_search(sorted_configs_j, new_config)
@@ -273,16 +381,16 @@ backward 方向: 遍历 term × config_j，施加逆算符，在 sorted_configs_
 ```
 FFI 签名:
 apply_within(
-  configs_i       [B_i, Q] uint8,
-  psi_i           [B_i, 2] f64,
-  configs_j       [B_j, Q] uint8,
-  a               [T, Q] uint8,
-  b               [T, Q] uint8,
-  t               [T, Q] uint8,
-  p               [T, Q] uint8,
-  s               [T]    uint8,
-  coef            [T, 2] f64,
-  direction       int (0=forward, 1=backward)
+  configs_i        [B_i, Q] uint8,
+  psi_i            [B_i, 2] f64,
+  configs_j        [B_j, Q] uint8,
+  create_mask      [T, Q] uint8,
+  annihilate_mask  [T, Q] uint8,
+  flip_mask        [T, Q] uint8,
+  parity_mask      [T, Q] uint8,
+  parity_const     [T]    uint8,
+  coef             [T, 2] f64,
+  direction        int (0=forward, 1=backward)
 ) → psi_j [B_j, 2] f64
 ```
 
@@ -305,15 +413,16 @@ apply_within(
 ```
 for each (term_t, config_i):
   // 可作用性检查 (2 次位运算)
-  if ((config_i & a[t]) != 0) continue
-  if ((config_i | b[t]) != FULL_MASK) continue
+  if ((config_i & create_mask[t]) != 0) continue
+  if ((config_i & annihilate_mask[t]) != annihilate_mask[t]) continue
   // 构型翻转 (1 次 XOR)
-  new_config = config_i ^ t_mask[t]
+  new_config = config_i ^ flip_mask[t]
   // 排除已知构型
   if bloom_maybe_present(exclude_set, new_config):
     if binary_search_exact(exclude_configs, new_config): continue
   // JW 符号 + 振幅 (1 次 popcount)
-  sign = 1 - 2 * (s[t] ^ (popcount(p[t] & config_i) & 1))
+  parity = parity_const[t] ^ (popcount(parity_mask[t] & config_i) & 1)
+  sign = 1 - 2 * parity
   contribution = sign * coef[t] * psi_i[i]
   // 哈希表插入
   slot = hash_lookup(new_config)
@@ -342,14 +451,14 @@ list_relative(
   configs_i        [B_i, Q] uint8,
   psi_i            [B_i, 2] f64,
   configs_exclude  [E, Q] uint8,
-  a                [T, Q] uint8,
-  b                [T, Q] uint8,
-  t                [T, Q] uint8,
-  p                [T, Q] uint8,
-  s                [T]    uint8,
+  create_mask      [T, Q] uint8,
+  annihilate_mask  [T, Q] uint8,
+  flip_mask        [T, Q] uint8,
+  parity_mask      [T, Q] uint8,
+  parity_const     [T]    uint8,
   coef             [T, 2] f64,
   hash_capacity    int (预估 distinct / 0.6)
-) → (new_configs [N, Q] uint8, psi_j [N, 2] f64)
+) → (new_configs [hash_capacity, Q] uint8, psi_j [hash_capacity, 2] f64, count int)
 ```
 
 ### 4.5 find_relative
@@ -367,10 +476,10 @@ list_relative(
 ```
 for each (term_t, config_i):
   // 可作用性检查 (2 次位运算)
-  if ((config_i & a[t]) != 0) continue
-  if ((config_i | b[t]) != FULL_MASK) continue
+  if ((config_i & create_mask[t]) != 0) continue
+  if ((config_i & annihilate_mask[t]) != annihilate_mask[t]) continue
   // 构型翻转 (1 次 XOR)
-  new_config = config_i ^ t_mask[t]
+  new_config = config_i ^ flip_mask[t]
   // 阈值快速拒绝 (~2 cycles)
   weight = |coef[t] * psi_i[i]|²
   if weight <= global_min_weight: continue
@@ -417,11 +526,11 @@ find_relative(
   psi_i            [B_i, 2] f64,
   count_selected   int (K),
   configs_exclude  [E, Q] uint8,
-  a                [T, Q] uint8,
-  b                [T, Q] uint8,
-  t                [T, Q] uint8,
-  p                [T, Q] uint8,
-  s                [T]    uint8,
+  create_mask      [T, Q] uint8,
+  annihilate_mask  [T, Q] uint8,
+  flip_mask        [T, Q] uint8,
+  parity_mask      [T, Q] uint8,
+  parity_const     [T]    uint8,
   coef             [T, 2] f64
 ) → new_configs [K, Q] uint8
 ```
@@ -494,8 +603,8 @@ def apply_within_distributed(configs_i, psi_i, configs_j, site, kind, coef):
 | 当前 (refact 分支) | 迁移后 |
 |---|---|
 | torch | jax + jaxlib |
-| torch.utils.cpp_extension | jax.extend.ffi (XLA FFI, 阶段2+) |
-| ninja + pybind11 | cmake / nvcc 直接编译 .so (阶段2+) |
+| torch.utils.cpp_extension | CMake + nvcc 编译 .so |
+| ninja + pybind11 | ctypes + `XLA_FFI_DEFINE_HANDLER_SYMBOL` |
 | numpy | jax.numpy (jnp) |
 | platformdirs | 保留 (缓存管理) |
 | hatchling + hatch-vcs | 保留 (构建系统不变) |
@@ -504,11 +613,15 @@ def apply_within_distributed(configs_i, psi_i, configs_j, site, kind, coef):
 
 ## 8. 实施计划
 
-### Phase 1: FFI 绑定层 (DLPack 零拷贝)
-- [ ] 将每个 CUDA kernel 的 Python wrapper 改为 DLPack 零拷贝调用
-- [ ] 验证 PyTorch 环境下性能无损
+### Phase 1: CUDA kernel 编译为独立 .so + JAX FFI 注册
+- [ ] CMake 构建系统，编译 CUDA kernel → `libqmp_hamiltonian.so`
+- [ ] 每个 kernel 定义 `XLA_FFI_DEFINE_HANDLER_SYMBOL` handler
+- [ ] `ctypes` 加载 `.so`，逐个 `jax.ffi.register_ffi_target`
+- [ ] Python 端 wrap 为 `jax.ffi.ffi_call` callable
+- [ ] 验证 JAX 环境下性能无损
 
-### Phase 2: CUDA kernel 算法升级
+### Phase 2: CUDA kernel 算法升级 + 变量重命名
+- [ ] `create_mask`/`annihilate_mask`/`flip_mask`/`parity_mask`/`parity_const` 表示层
 - [ ] `apply_within`: 添加二级索引二分查找
 - [ ] `list_relative`: 替换 Trie 为 cuCollections static_map
 - [ ] `find_relative`: 替换 mutex heap 为哈希表 + compact + 阈值加速
@@ -523,8 +636,7 @@ def apply_within_distributed(configs_i, psi_i, configs_j, site, kind, coef):
 - [ ] 配置系统适配
 
 ### Phase 4: 多节点集成
-- [ ] CUDA kernel 编译为独立 .so，注册到 XLA FFI
-- [ ] shard_map 数据分发
+- [ ] shard_map 数据分发 (configs batch 维度, Hamiltonian 复制)
 - [ ] 跨节点测试 (单机多卡 → 多机多卡)
 - [ ] 性能基准对比 (vs PyTorch baseline)
 
