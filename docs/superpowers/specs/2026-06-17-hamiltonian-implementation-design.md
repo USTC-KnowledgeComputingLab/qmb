@@ -8,7 +8,7 @@
 实现 `src/qmp/hamiltonian/` 子包，包含：
 
 - **位掩码预处理** (`prepare`): 纯 Python 将费米子哈密顿量字典转为 (create_mask, annihilate_mask, flip_mask, parity_mask, parity_const, coef) 表示
-- **四个 CUDA kernel**: `compute_diagonal`, `apply_within_subspace`, `find_all_relative_configs`, `find_topk_relative_configs` — 通过 JAX FFI 接入
+- **四个 CUDA kernel**: `compute_diagonal_within_subspace`, `apply_within_subspace`, `find_all_relative_configs`, `find_topk_relative_configs` — 通过 JAX FFI 接入
 - **纯 JAX fallback**: CPU/CI 环境下无 GPU 可用时，用 `jax.jit` 实现相同功能
 - **JIT 编译与缓存**: CUDA kernel 按需编译 (.cu → .so)，缓存于 `~/.cache/qmp/`
 - **pytest 测试**: prepare 正确性 + fallback 端到端 + CUDA 回归
@@ -42,7 +42,7 @@ tests/
 
 | 操作 | Python 方法 | XLA FFI target | C++ handler | 语义 |
 |------|------------|----------------|-------------|------|
-| 对角元 | `compute_diagonal` | `qmp_compute_diagonal` | `ComputeDiagonal` | H[i,i] |
+| 对角元 | `compute_diagonal_within_subspace` | `qmp_compute_diagonal_within_subspace` | `ComputeDiagonalWithinSubspace` | H[i,i] |
 | H·psi 投影 | `apply_within_subspace` | `qmp_apply_within_subspace` | `ApplyWithinSubspace` | H|ψ⟩ 投影到目标子空间 |
 | 全部枚举 | `find_all_relative_configs` | `qmp_find_all_relative_configs` | `FindAllRelativeConfigs` | 所有新构型 + 去重 |
 | Top-K 选择 | `find_topk_relative_configs` | `qmp_find_topk_relative_configs` | `FindTopKRelativeConfigs` | 最重要的 K 个新构型 |
@@ -81,7 +81,7 @@ Python int 天然支持无限精度, n_qubits > 64 也无问题。`popcount` 用
 - `MAX_OP_NUMBER` (编译期宏): 每 term 最大算符数 (二体相互作用 = 4)
 
 **四个 handler** (`XLA_FFI_DEFINE_HANDLER_SYMBOL`):
-- `ComputeDiagonal` — 对角元 (完整实现)
+- `ComputeDiagonalWithinSubspace` — 对角元 (完整实现)
 - `ApplyWithinSubspace` — 稀疏 H·psi 投影 (forward + backward 方向)
 - `FindAllRelativeConfigs` — cuCollections static_map 哈希表去重
 - `FindTopKRelativeConfigs` — 哈希表 + 阈值加速 + 周期性 CUB compact
@@ -125,7 +125,7 @@ def load_cuda_module(n_qubytes: int, particle_cut: int, max_op_number: int) -> c
 
 ```python
 @jax.jit
-def compute_diagonal(configs, create_mask, annihilate_mask, flip_mask, parity_mask, parity_const, coef):
+def compute_diagonal_within_subspace(configs, create_mask, annihilate_mask, flip_mask, parity_mask, parity_const, coef):
     # 对每个 (term, config): 可作用性检查 + 翻转 = 0? + JW parity + 累加 coef
     ...
 
@@ -157,7 +157,7 @@ class Hamiltonian:
         # 尝试加载 CUDA kernel
         self._use_cuda = _try_enable_cuda(...)
 
-    def compute_diagonal(self, configs):
+    def compute_diagonal_within_subspace(self, configs):
         ...
     def apply_within_subspace(self, configs_i, psi_i, configs_j, *, direction=0):
         ...
