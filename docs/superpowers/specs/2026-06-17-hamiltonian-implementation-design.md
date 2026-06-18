@@ -65,31 +65,36 @@ T = 有效 term 数量, Q = ceil(n_qubits/8)。
 
 **算法**:
 
-输入为哈密顿量的一项：有序的产生/湮灭算符序列 `[(site_0, kind_0), (site_1, kind_1), ...]`，其中 kind=0 为湮灭，kind=1 为产生。
+输入为一个 Hamiltonian term = 有序的费米子算符序列（书写顺序）。假设已按正规序给出（产生全在左，湮灭全在右）。
 
-**Step 1: 构造作用序列。** 算符乘积 `A B` 作用在态上时，先作用 `B` 后作用 `A`。因此书写顺序的逆序即为作用顺序。将产生算符和湮灭算符分别收集后按正规序排列：先所有湮灭算符（反序），再所有产生算符（反序）。
+**Step 1 — 构造作用序列**。算符乘积作用在态上时右边先作用，故作用序列为书写序的逆序。对正规序输入，等价于：先所有湮灭算符（逆书写序），再所有产生算符（逆书写序）。
 
-**Step 2: 逐算符模拟。** 维护四个状态变量：`flip`（当前已翻转的位掩码）、`conds`（每个 qubit 的约束条件，-1=未设/0=须为0/1=须为1）、`const_parity`（JW 奇偶性常数累加器）、`parity_mask`（奇偶性掩码累加器）。按作用序列依次处理每个算符 `(idx, is_creation)`：
+**Step 2 — 逐算符模拟**。维护状态变量（初始全 0）：`flip`（已翻转位掩码）、`cond[i]` (−1=未设/0=须为0/1=须为1)、`parity_const`（JW 常数累加）、`parity_mask`（JW 初始构型依赖累加）。
 
-a) **约束推导。** 算符作用于当前中间态，该位的中间值 = `initial_bit ⊕ flip_bit`（其中 `flip_bit = (flip >> idx) & 1`）。
-   - 产生算符 (`is_creation=True`) 要求中间值为 0 → `initial_bit = flip_bit ⊕ 0 = flip_bit`
-   - 湮灭算符 (`is_creation=False`) 要求中间值为 1 → `initial_bit = flip_bit ⊕ 1`
-   若该位已有 `conds[idx]` 且与推导值冲突，则该 term 恒为零，跳过。
+按作用序列依次处理每个算符 `(site, is_creation)`：
 
-b) **JW 常数贡献。** 该算符作用时，其 JW Z-string 累加前方所有位的中间占据数。前方位的中间占据数为 `initial_bit ⊕ before_flip`，其中 `before_flip` 为该算符作用之前的 flip 掩码。拆分为两部分：
-   - 与初始构型相关的部分：`Σ_{j<idx} initial_bit[j]` → 记入 `parity_mask`
-   - 与之前翻转相关的部分：`Σ_{j<idx} before_flip[j]` → 记入 `const_parity`
-   实现上 `const_parity ^= popcount(before_flip & low_mask(idx)) & 1`，`parity_mask ^= low_mask(idx)`（其中 `low_mask(k) = (1 << k) - 1`）。
+a) **约束推导。** `flip_bit = (flip >> site) & 1`。产生要求中间态为 0 → `required = flip_bit ^ 0`，湮灭要求中间态为 1 → `required = flip_bit ^ 1`。若 `cond[site]` 已设且冲突 → 此项恒零跳过；否则 `cond[site] = required`。
 
-c) **翻转更新。** `flip ^= (1 << idx)`。
+b) **JW 相位贡献。** 格点 site 上的 JW Z-string 覆盖所有 j < site，相位 = Σ_{j<site} (初始构型[j] ⊕ flip[j]) mod 2。拆分为：初始构型依赖 → `parity_mask ^= low_mask(site)`；翻转常数 → `parity_const ^= popcount(flip & low_mask(site)) & 1`。其中 `low_mask(k) = (1<<k)-1` 即低 k 位全 1 掩码，作用为提取严格小于 k 的所有格点。
 
-**Step 3: 组装输出。** 遍历所有 qubit i（0 ≤ i < n_qubits）：
-   - `conds[i] == 0` → `create_mask` 该位置 1
-   - `conds[i] == 1` → `annihilate_mask` 该位置 1
-   - 其余位在两个掩码中均为 0（无约束）
-   `flip_mask = flip`，`parity_mask` 和 `parity_const` 为累加值，`coef` 为原复数系数。
+c) **翻转更新。** `flip ^= (1 << site)`。
 
-Python int 天然支持无限精度，`popcount` 用 `int.bit_count()`。
+**Step 3 — 组装输出。** `create_mask` = {i | cond[i]==0}，`annihilate_mask` = {i | cond[i]==1}。`flip_mask = flip`。掩码天然稀疏——仅操作格点有非零值。
+
+**示例**（8 qubits，c₃† c₁ dag c₅ c₇）：
+
+| Step | 算符 | site | flip_bit | required | cond 变化 | parity_const 增量 | parity_mask XOR | flip 后 |
+|------|------|------|----------|----------|-----------|-------------------|-----------------|---------|
+| 1 | 湮灭 | 7 | 0 | 1 | cond[7]=1 | 0 | low_mask(7) | {7} |
+| 2 | 湮灭 | 5 | 0 | 1 | cond[5]=1 | 0 | low_mask(5) | {5,7} |
+| 3 | 产生 | 1 | 0 | 0 | cond[1]=0 | 0 | low_mask(1) | {1,5,7} |
+| 4 | 产生 | 3 | 0 | 0 | cond[3]=0 | 1 | low_mask(3) | {1,3,5,7} |
+
+最终: `create_mask`={1,3}, `annihilate_mask`={5,7}, `flip_mask`={1,3,5,7}, `parity_mask`={1,2,5,6}, `parity_const`=1。
+
+**边缘情形**: `c_i^† c_i`（同格点产生后湮灭=粒子数算符）→ `create_mask`=0, `annihilate_mask`={i}, `flip_mask`=0, `parity_mask`=0, `parity_const`=0。`c_i c_i`（两次湮灭同格点）→ cond 冲突，项恒零。
+
+**关键性质**: `parity_mask = XOR_{所有算符} low_mask(site)`。若某格点出现在偶数个 low_mask 中，XOR 自消为 0。JW 相位始终基于**初始构型**（非翻转后）计算。
 
 ### 3.2 `_hamiltonian_cuda.cu` — CUDA kernel
 
