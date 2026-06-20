@@ -71,39 +71,37 @@ def prepare(operators, n_qubits):
     operators: list[(site, kind)] in WRITING order. kind=1=create, kind=0=annihilate.
     Returns: (create_mask, annihilate_mask, flip_mask, parity_mask, parity_const)
     """
-    # 作用顺序 = 书写序的逆序 (最右边的算符先作用)
-    ops = list(reversed(operators))
+    ops = list(reversed(operators))  # 最右边的算符先作用
 
-    # ---- 逐算符累积的状态变量 (均从 0 开始, 每处理一个算符就更新) ----
-    known   = [False] * n_qubits   # 分析到当前算符时, qubit i 的初始构型值是否已被约束
-    initial = [0]     * n_qubits   # 分析到当前算符时, 被约束的初始值 (仅 known[i]=True 时有效)
-    flip    = 0                    # 分析到当前算符时, 已处理算符造成的累计翻转位掩码
-    p_const = 0                    # 分析到当前算符时, JW 相位的固定常数部分 (mod 2)
-    p_mask  = 0                    # 分析到当前算符时, JW 相位对运行时构型的依赖掩码
+    known   = [False] * n_qubits  # qubit i 的初始构型是否已被约束
+    initial = [0]     * n_qubits  # 被约束的初始值 (仅 known[i] 时有效)
+    flip    = 0                    # 已处理算符的累计翻转位掩码
+    p_const = 0                    # JW 相位固定常数 (mod 2)
+    p_mask  = 0                    # JW 相位对运行时构型的依赖掩码
 
-    for s, c in ops:               # s=site, c=1(产生) or 0(湮灭)
-        # ---- a) 约束推导: 该算符对当前中间态的要求, 反向推导对初始构型的约束 ----
-        flip_s = (flip >> s) & 1   # 分析到当前算符时, qubit s 已被之前的算符翻转了奇数次?
-        target = 1 - c             # 产生(c=1)要求中间态=0; 湮灭(c=0)要求中间态=1
+    for s, c in ops:               # c=1(产生) or 0(湮灭)
+        # ---- a) 约束推导 ----
+        flip_s = (flip >> s) & 1   # qubit s 被之前的算符翻转了奇数次?
+        target = 1 - c             # 产生要求中间态=0, 湮灭要求中间态=1
         if known[s]:
-            # qubit s 在更早的算符中已被约束。检查中间态是否满足当前算符的要求
+            # 之前已有算符约束了 qubit s, 验证中间态是否满足
             if (initial[s] ^ flip_s) != target:
-                return ZERO         # Pauli 冲突 → 该项恒为零
+                return ZERO
         else:
-            # 首次触及 qubit s。反向传播约束到初始构型
-            # 需要 initial[s] XOR flip_s == target, 故 initial[s] = flip_s XOR target
-            initial[s] = flip_s ^ target
+            # 首次触及 qubit s, flip_s 必为 0 (无更早的算符翻转它)
+            # 中间态 = 初始值 = target
+            initial[s] = target
             known[s] = True
 
-        # ---- b) JW 相位贡献: 基于分析到当前算符时的中间态 (本算符还未翻转) ----
-        lo = (1 << s) - 1          # low_mask(s): 位 0,1,...,s-1 为 1
-        p_const ^= (flip & lo).bit_count() & 1   # 已翻转位对中间态的常数贡献
-        p_mask  ^= lo                           # 所有 j<s 的初始构型依赖
+        # ---- b) JW 相位贡献 (基于当前算符作用前的中间态) ----
+        lo = (1 << s) - 1          # low_mask(s): 位 0..s-1 为 1
+        p_const ^= (flip & lo).bit_count() & 1
+        p_mask  ^= lo
 
-        # ---- c) 翻转: 该算符施加后, qubit s 翻转 ----
+        # ---- c) 翻转 (在相位计算之后) ----
         flip ^= (1 << s)
 
-    # ---- 组装输出: 从最终的初始约束 + 累计翻转构建位掩码 ----
+    # ---- 组装输出 ----
     create_mask = 0
     annihilate_mask = 0
     for i in range(n_qubits):
@@ -113,19 +111,15 @@ def prepare(operators, n_qubits):
     return (create_mask, annihilate_mask, flip, p_mask, p_const)
 ```
 
-**时序要点** (每处理一个算符时):
-- `flip` 代表"之前已处理的算符"造成的翻转。当前算符的翻转在步骤 c 才加入。
-- `known[i]` 和 `initial[i]` 代表"到当前算符为止"对初始构型的约束。
-- 步骤 b 的 `flip & lo` 必须用步骤 c 翻转**之前**的 `flip`——因为 JW Z-string 是在算符作用前的中间态上求值的。
-- 步骤 a 中的 `flip_s` 也是步骤 c 翻转**之前**的值。若先翻转再检查约束，会得到错误的条件 (因为中间态已被当前算符改变)。
+**不变量**: `known[s]=false` ⇒ `flip[s]=0`（首次触及必定无历史翻转）。
 
 **边缘情形**:
-- `c_i c_i` (两次湮灭同格点): 第一个 c_i 设 `initial[i]=1, flip[i]=1`; 第二个 c_i 检查 `initial[i]^flip_s = 1^1=0 ≠ target=1` → ZERO ✓
-- `c_i^dag c_i` (产生后湮灭): 作用序为 c_i, c_i^dag。c_i 设 `initial[i]=1, flip[i]=1`; c_i^dag 检查 `1^1=0=target(产生要求0)` ✓。最终 `flip[i]=0` → flip_mask 不含 i ✓
-- `c_i c_i^dag` (湮灭后产生): 作用序为 c_i^dag, c_i。c_i^dag 设 `initial[i]=0, flip[i]=1`; c_i 检查 `0^1=1=target(湮灭要求1)` ✓。最终 `flip[i]=0` ✓
-- `kind=2` (恒等算符): 直接跳过，不设约束、不翻转、不贡献相位
-
-**多字节扩展** (n_qubits > 64): Python int 天然无限精度，`flip`, `p_mask` 直接作为大整数操作。输出时按 Q = ceil(n_qubits/8) 字节切片到 uint8 JAX arrays。
+| 项 | 作用序 | 过程 | 结果 |
+|----|--------|------|------|
+| `c_i c_i` | c_i, c_i | 首次: init[i]=1, flip={i}; 再次: init[i]=1^flip_s(1)=0≠target(1) → ZERO | ✓ |
+| `c_i^dag c_i` | c_i, c_i^dag | 首次: init[i]=1, flip={i}; 再次: init[i]=1^flip_s(1)=0=target(产生要求0) ✓ | flip_mask=0, annihilate_mask={i} |
+| `c_i c_i^dag` | c_i^dag, c_i | 首次: init[i]=0, flip={i}; 再次: init[i]=0^flip_s(1)=1=target(湮灭要求1) ✓ | flip_mask=0, create_mask={i} |
+| `kind=2` | — | 跳过 | — |
 
 ### 3.2 `_hamiltonian_cuda.cu` — CUDA kernel
 
