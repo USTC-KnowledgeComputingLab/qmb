@@ -65,9 +65,9 @@ T = 有效 term 数量, Q = ceil(n_qubits/8)。
 
 **算法**:
 
-输入为一个 Hamiltonian term = 有序的费米子算符序列（书写顺序）。假设已按正规序给出（产生全在左，湮灭全在右）。
+输入为一个 Hamiltonian term = 任意有序的费米子算符列表 `[(site_0, kind_0), (site_1, kind_1), ...]`（书写顺序）。kind=1 为产生，kind=0 为湮灭。**不需要正规序假设**。
 
-**Step 1 — 构造作用序列**。算符乘积作用在态上时右边先作用，故作用序列为书写序的逆序。对正规序输入，等价于：先所有湮灭算符（逆书写序），再所有产生算符（逆书写序）。
+**Step 1 — 构造作用序列**。算符乘积在态上从右往左依次作用。因此作用序列 = 书写序的逆序（列表反转），不做任何分类。
 
 **Step 2 — 逐算符模拟**。维护状态变量（初始全 0）：`flip`（已翻转位掩码）、`cond[i]` (−1=未设/0=须为0/1=须为1)、`parity_const`（JW 常数累加）、`parity_mask`（JW 初始构型依赖累加）。
 
@@ -81,7 +81,7 @@ c) **翻转更新。** `flip ^= (1 << site)`。
 
 **Step 3 — 组装输出。** `create_mask` = {i | cond[i]==0}，`annihilate_mask` = {i | cond[i]==1}。`flip_mask = flip`。掩码天然稀疏——仅操作格点有非零值。
 
-**示例**（8 qubits，c₃† c₁ dag c₅ c₇）：
+**示例**（8 qubits，c₃† c₁ dag c₅ c₇，书写序为正规序）：
 
 | Step | 算符 | site | flip_bit | required | cond 变化 | parity_const 增量 | parity_mask XOR | flip 后 |
 |------|------|------|----------|----------|-----------|-------------------|-----------------|---------|
@@ -92,7 +92,10 @@ c) **翻转更新。** `flip ^= (1 << site)`。
 
 最终: `create_mask`={1,3}, `annihilate_mask`={5,7}, `flip_mask`={1,3,5,7}, `parity_mask`={1,2,5,6}, `parity_const`=1。
 
-**边缘情形**: `c_i^† c_i`（同格点产生后湮灭=粒子数算符）→ `create_mask`=0, `annihilate_mask`={i}, `flip_mask`=0, `parity_mask`=0, `parity_const`=0。`c_i c_i`（两次湮灭同格点）→ cond 冲突，项恒零。
+**同格点算符示例**：
+- `c_i^dag c_i`（书写序：先产生后湮灭。作用序：先湮灭后产生）→ `annihilate_mask`={i}, `flip_mask`=0, `parity_mask`=0, `parity_const`=0。即 `n_i` 算符 ✓
+- `c_i c_i^dag`（书写序：先湮灭后产生。作用序：先产生后湮灭）→ `create_mask`={i}, `flip_mask`=0。即 `1-n_i` ✓
+- `c_i c_i`（两次湮灭同格点）→ cond 冲突，项恒零 ✓
 
 **关键性质**: `parity_mask = XOR_{所有算符} low_mask(site)`。若某格点出现在偶数个 low_mask 中，XOR 自消为 0。JW 相位始终基于**初始构型**（非翻转后）计算。
 
