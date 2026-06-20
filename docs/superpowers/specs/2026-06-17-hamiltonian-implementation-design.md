@@ -18,11 +18,11 @@
 ```
 src/qmp/hamiltonian/
 ├── AGENTS.md                    # 子系统设计文档 (已存在, 待更新)
-├── __init__.py                  # re-export Hamiltonian
-├── _hamiltonian.py              # Hamiltonian 类 + FFI 注册 + CUDA/fallback 路由
+├── __init__.py                  # re-export FermiHamiltonian
+├── _hamiltonian.py              # FermiHamiltonian 类 + FFI 注册 + CUDA/fallback 路由
 ├── _hamiltonian_prepare.py      # 纯 Python 位掩码预处理 → JAX arrays
 ├── _hamiltonian_jax.py          # 纯 JAX fallback 实现 (四个操作, @jax.jit)
-├── _hamiltonian_cuda.cu         # CUDA kernel (四个操作, 模板化 n_qubytes/particle_cut/max_op_number)
+├── _hamiltonian_cuda.cu         # CUDA kernel (四个操作, 模板化 n_qubytes/max_op_number)
 └── _hamiltonian_cuda_loader.py  # CUDA JIT 编译 + 缓存 (nvcc + platformdirs)
 
 tests/
@@ -40,7 +40,7 @@ tests/
 
 ### 命名约定
 
-| 操作 | Python 方法 | XLA FFI target | C++ handler | 语义 |
+| 操作 | Python 方法 (FermiHamiltonian) | XLA FFI target | C++ handler | 语义 |
 |------|------------|----------------|-------------|------|
 | 对角元 | `compute_diagonal_within_subspace` | `qmp_compute_diagonal_within_subspace` | `ComputeDiagonalWithinSubspace` | H[i,i] |
 | H·psi 投影 | `apply_within_subspace` | `qmp_apply_within_subspace` | `ApplyWithinSubspace` | H|ψ⟩ 投影到目标子空间 |
@@ -128,10 +128,15 @@ def prepare(operators, n_qubits):
 
 ### 3.2 `_hamiltonian_cuda.cu` — CUDA kernel
 
-**模板参数**:
-- `N_QUBYTES` (编译期宏): ceil(n_qubits/8)
-- `PARTICLE_CUT` (编译期宏): 1 (fermi) 或 2 (bose2)
-- `MAX_OP_NUMBER` (编译期宏): 每 term 最大算符数 (二体相互作用 = 4)
+**模板参数** (编译期宏):
+- `N_QUBYTES`: ceil(n_qubits/8)，同时作为静态分发键
+- `MAX_OP_NUMBER`: 每 term 最大算符数 (二体相互作用 = 4)
+
+**静态分发**: `N_QUBYTES` 决定内核使用哪种位运算路径。通过 `if constexpr (N_QUBYTES <= 8)` 在编译期选择:
+- **n_qubits ≤ 64** (N_QUBYTES ≤ 8): 所有掩码 (`create_mask`, `config` 等) 可装载为单个 `uint64_t` 寄存器。可作用性检查 `(config & create_mask) == 0` 是单条 AND+JZ 指令，JW 奇偶性 `popcount(parity_mask & config)` 是单条 POPCNT 指令。零循环开销。
+- **n_qubits > 64** (N_QUBYTES > 8): 掩码以 `std::array<uint8_t, N_QUBYTES>` 存储，逐字节循环做 AND/XOR/popcount。循环边界是编译期常量，编译器可完全展开（unroll）。
+
+两条路径共享同样的算法逻辑，仅数据宽度不同。n_qubits ≤ 64 的路径是重要的优化——它在寄存器中完成全部操作，避免 shared memory 和 global memory 的位运算往返。
 
 **四个 handler** (`XLA_FFI_DEFINE_HANDLER_SYMBOL`):
 - `ComputeDiagonalWithinSubspace` — 对角元 (完整实现)
@@ -144,23 +149,19 @@ def prepare(operators, n_qubits):
 - `apply_flip(config, flip_mask, n_qubytes)` — XOR
 - `jw_parity(config, parity_mask, parity_const, n_qubytes)` — popcount + XOR
 
-**编译期分支**: 对 n_qubits <= 64 可使用 64-bit 寄存器优化；n_qubits > 64 逐字节。
-
 ### 3.3 `_hamiltonian_cuda_loader.py` — JIT 编译与缓存
 
 ```python
-def load_cuda_module(n_qubytes: int, particle_cut: int, max_op_number: int) -> ctypes.CDLL:
-    key = f"qmp_hamiltonian_{n_qubytes}_{particle_cut}_{max_op_number}"
+def load_cuda_module(n_qubytes: int, max_op_number: int) -> ctypes.CDLL:
+    key = f"qmp_hamiltonian_{n_qubytes}_{max_op_number}"
     cache_dir = platformdirs.user_cache_path("qmp", "kclab") / key
     so_path = cache_dir / "lib.so"
 
     if not so_path.exists():
-        # 用 nvcc 编译 _hamiltonian_cuda.cu
         subprocess.run([
             "nvcc", "-shared", "-Xcompiler", "-fPIC",
             f"-I{jaxlib.get_include_dir()}",
             f"-DN_QUBYTES={n_qubytes}",
-            f"-DPARTICLE_CUT={particle_cut}",
             f"-DMAX_OP_NUMBER={max_op_number}",
             "-std=c++20", "-O3", "--use_fast_math",
             "-arch=native",
@@ -198,10 +199,10 @@ def find_topk_relative_configs(configs_i, psi_i, count_selected, configs_exclude
     ...
 ```
 
-### 3.5 `_hamiltonian.py` — Hamiltonian 类 + FFI 路由
+### 3.5 `_hamiltonian.py` — FermiHamiltonian 类 + FFI 路由
 
 ```python
-class Hamiltonian:
+class FermiHamiltonian:
     def __init__(self, hamiltonian_dict, *, n_qubits, devices):
         arrays = prepare(hamiltonian_dict, n_qubits)
         self._create_mask, self._annihilate_mask, self._flip_mask, ...
@@ -248,6 +249,4 @@ class Hamiltonian:
 
 ## 6. 非目标
 
-- SpinSeparatedHamiltonian: 不实现
 - 多节点 shard_map 集成: 不在此 spec 中 (基础设施已预留)
-- n_qubits > 64 的逐字节 CUDA kernel: n_qubits <= 64 的 64-bit 寄存器版本优先。多字节扩展后续迭代
