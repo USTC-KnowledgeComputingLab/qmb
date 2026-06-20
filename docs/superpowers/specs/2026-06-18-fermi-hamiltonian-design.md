@@ -160,13 +160,15 @@ for each term_t:
 计算 `ψ_j = H · ψ_i` 投影到 `configs_j` 子空间。支持 forward/backward 双向。
 
 ```
-预处理: 对 dst_configs 排序 + 构建 L1 索引 (每 256 条取样)
+预处理: 对 dst_configs 构建 cuco::static_map (key=config, value=index_in_original_order)
+         10^7 entries → ~500 MB (60% load factor)
 
 for each term_t:
     for each src_i:                              # forward: src=configs_i; backward: src=configs_j
         if not is_applicable(src_i, create_mask[t], annihilate_mask[t]): continue
         new_config = src_i XOR flip_mask[t]
-        idx = two_level_search(l1_index, sorted_dst, new_config)  # 二级索引二分查找
+
+        idx = hash_table.lookup(new_config)       # O(1) expected, ~2-3 probes
         if idx < 0: continue
 
         parity = parity_const[t] XOR popcount(parity_mask[t] & src_i) & 1
@@ -174,13 +176,11 @@ for each term_t:
         contribution = sign * complex_mul(coef[t], psi_src[i])
         atomicAdd(psi_j[idx,0], contribution.real)
         atomicAdd(psi_j[idx,1], contribution.imag)
-
-post: unsort(psi_j, sort_idx)   # 仅 forward 方向需要
 ```
 
-**`two_level_search`**: 先在 L1 索引中二分查找 (constant memory)，再在 ≤256 条目的桶内线性扫描 (1-2 cache line)。全局内存访问从 ~24 次降到 ~2 次。
-
 **方向选择**: forward 遍历 T × B_i，backward 遍历 T × B_j。选较小侧最小化总线程数。
+
+**设计决策**: 使用哈希表而非二分查找。二分查找在 GPU 上有严重的 warp divergence（数据依赖分支导致 32 线程串行化），哈希表 probe 是 O(1) 且无发散。代价: 哈希表 ~500 MB vs 排序数组 ~250 MB，在 80 GB H100 上可接受。构建哈希表（一次性 ~50ms）相对于 10^12 次搜索（10+ 分钟）可忽略。
 
 #### 3.2.3 `find_all_relative_configs` — 全部枚举 + 去重
 
@@ -217,6 +217,8 @@ return hash_table.collect_nonempty()  # 线性扫描
 
 选出最重要的 K 个新 config。重要性度量 = `|H_ij * psi_i|²`（单路径贡献权重）。
 
+**最终方案**: 哈希表 + 阈值加速 + 周期性 compact:
+
 ```
 初始化 哈希表 (capacity = 2K, 驻留 L2 cache ~10 MB)
 global_min_weight = 0.0
@@ -235,14 +237,16 @@ for each term_t:
         if slot: atomicMax(slot.weight, weight)
         else:
             if load_factor > 0.6:
-                compact(): sort_descending → unique_top_K → rebuild_table → update threshold
+                compact(): CUB radix sort desc → unique top K → rebuild → update threshold
             hash_table.insert_cas(new_config, weight)
 
-final_compact(): sort_descending → unique_top_K
+final_compact(): CUB radix sort desc → unique top K
 return top_K_configs
 ```
 
-**`compact()`**: CUB radix sort 按 weight 降序排列 → 取前 K 个唯一 config → 重建哈希表 → 更新 `global_min_weight`。200K 条目排序约 0.3ms。10^8 distinct 时约 1000 次 compact，总计 ~300ms。阈值上升后频率指数下降。
+**`compact()`**: CUB radix sort 按 weight 降序排列 → 取前 K 个唯一 config → 重建哈希表 → 更新 `global_min_weight`。200K 条目排序约 0.3ms。阈值稳定后 compact 频率指数下降。
+
+**首版简化** (推荐先用): 全量哈希表 + 最终排序。即分配足够大的哈希表容纳所有 distinct configs（10^8 distinct, 60% load → ~167M slots, ~5.7 GB），流式插入所有条目，最后 CUB radix sort 全量 → 取 top K。实现基本等同于 `list_relative` + 一次排序，大幅降低复杂度。只有当 HBM 压力成为实际瓶颈时再升级到 compact 方案。
 
 ### 3.3 `_hamiltonian_cuda_loader.py` — JIT 编译与缓存
 
