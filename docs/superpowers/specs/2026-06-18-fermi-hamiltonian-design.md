@@ -178,9 +178,9 @@ for each term_t:
         atomicAdd(psi_j[idx,1], contribution.imag)
 ```
 
-**方向选择**: forward 遍历 T × B_i，backward 遍历 T × B_j。选较小侧最小化总线程数。
+**方向选择**: forward 遍历 T × B_i，backward 遍历 T × B_j。选较小侧最小化总线程数。forward 时 `psi_i` 为输入波函数，backward 时 `psi_i` 为 `configs_j` 上的波函数（H^dag 作用于它，投影回 `configs_i`）。输出形状始终为 `[B_j, 2]`。
 
-**设计决策**: 使用哈希表而非二分查找。二分查找在 GPU 上有严重的 warp divergence（数据依赖分支导致 32 线程串行化），哈希表 probe 是 O(1) 且无发散。代价: 哈希表 ~500 MB vs 排序数组 ~250 MB，在 80 GB H100 上可接受。构建哈希表（一次性 ~50ms）相对于 10^12 次搜索（10+ 分钟）可忽略。
+**设计决策**: 使用哈希表而非二分查找。二分查找在 GPU 上有严重的 warp divergence（数据依赖分支导致 32 线程串行化），哈希表 probe 是 O(1) 且无发散。代价: 哈希表 ~500 MB vs 排序数组 ~250 MB，在 80 GB H100 上可接受。构建哈希表（一次性 ~50ms）相对于 10^12 次搜索（10+ 分钟）可忽略。为减少重复 alloc/free 碎片化，考虑使用 `cudaMemPool` 预分配或跨调用缓存哈希表（当 `configs_j` 不变时）。
 
 #### 3.2.3 `find_all_relative_configs` — 全部枚举 + 去重
 
@@ -213,40 +213,36 @@ return hash_table.collect_nonempty()  # 线性扫描
 
 **容量**: 10^7 distinct → ~600 MB; 10^8 → ~6 GB。预分配，零运行时分配。
 
-#### 3.2.4 `find_topk_relative_configs` — 流式 Top-K 选择
+#### 3.2.4 `find_topk_relative_configs` — Top-K 选择
 
 选出最重要的 K 个新 config。重要性度量 = `|H_ij * psi_i|²`（单路径贡献权重）。
 
-**最终方案**: 哈希表 + 阈值加速 + 周期性 compact:
-
 ```
-初始化 哈希表 (capacity = 2K, 驻留 L2 cache ~10 MB)
-global_min_weight = 0.0
+初始化 cuco::static_map (capacity = estimated_distinct / 0.6)
+     # 典型: 10^8 distinct → ~167M slots → ~5.7 GB
 
 for each term_t:
     for each config_i:
         if not is_applicable(config_i, create_mask[t], annihilate_mask[t]): continue
-
-        weight = |coef[t] * psi_i[i]|²
-        if weight <= global_min_weight: continue    # ~99.9% 条目在这里被快速拒绝
-
         new_config = config_i XOR flip_mask[t]
         if in_exclude_set(new_config): continue
 
+        weight = |coef[t] * psi_i[i]|²
         slot = hash_table.find(new_config)
         if slot: atomicMax(slot.weight, weight)
-        else:
-            if load_factor > 0.6:
-                compact(): CUB radix sort desc → unique top K → rebuild → update threshold
-            hash_table.insert_cas(new_config, weight)
+        else: hash_table.insert_cas(new_config, weight)
 
-final_compact(): CUB radix sort desc → unique top K
-return top_K_configs
+# 最终: CUB radix sort 按 weight 降序排列 → 取前 K 个唯一 config
+entries = hash_table.collect_nonempty()
+CUB::radix_sort_descending(entries, key=weight)
+return unique_top_k(entries, K).configs
 ```
 
-**`compact()`**: CUB radix sort 按 weight 降序排列 → 取前 K 个唯一 config → 重建哈希表 → 更新 `global_min_weight`。200K 条目排序约 0.3ms。阈值稳定后 compact 频率指数下降。
+**设计决策**: 全量哈希表 + 最终排序。实现与 `list_relative` 共享哈希表基础设施，仅差异在于 (a) 存 weight 而非振幅 (b) 最后多一次 CUB radix sort 取 top K。10^8 distinct → 5.7 GB HBM，在 80 GB H100 上可接受。排序 10^8 entries (~2.5 GB) 约 0.5-2 秒。
 
-**首版简化** (推荐先用): 全量哈希表 + 最终排序。即分配足够大的哈希表容纳所有 distinct configs（10^8 distinct, 60% load → ~167M slots, ~5.7 GB），流式插入所有条目，最后 CUB radix sort 全量 → 取 top K。实现基本等同于 `list_relative` + 一次排序，大幅降低复杂度。只有当 HBM 压力成为实际瓶颈时再升级到 compact 方案。
+**哈希表溢出**: 当 distinct 超过预分配容量时，`cuco::static_map` 的 open addressing probe 会无限循环（所有 slot 满且 key 不匹配）。必须做 overflow detection: 若插入失败（probe 超过阈值如 10×log₂(capacity)），返回错误码并让 Python 层用更大的 capacity 重试。
+
+**排除集**: `configs_exclude` 在 Python 层预先排序。kernel 内用二分查找确认排除。可选择性使用 Bloom filter 预筛查减少二分查找次数。
 
 ### 3.3 `_hamiltonian_cuda_loader.py` — JIT 编译与缓存
 
@@ -322,8 +318,20 @@ class FermiHamiltonian:
 
 ### 5.3 `tests/unit/hamiltonian/test_cuda.py`
 - `@pytest.mark.cuda` — 仅 GPU 环境运行
-- 与 test_fallback 相同输入，assert CUDA 输出 == JAX fallback 输出 (tol=1e-10)
+- 与 test_fallback 相同输入，assert CUDA 输出 ≈ JAX fallback 输出 (`allclose(rtol=1e-12)`)
+- **非 bit-exact**: GPU 的 `atomicAdd` 顺序非确定，浮点加法非结合律导致末位差异，不能用 `==` 比较
+- `test_hash_table_overflow_retry`: 人为给定过小 capacity，验证重试逻辑
 
 ## 6. 非目标
 
 - 多节点 shard_map 集成: 不在此 spec 中 (基础设施已预留)
+
+## 7. 已知风险
+
+| 风险 | 等级 | 缓解 |
+|------|------|------|
+| 哈希表溢出导致 kernel hang (`cuco::static_map` open addressing 无限 probe) | **高** | 插入失败检测 (probe 超阈值) → 错误码 → Python 层 retry 更大 capacity |
+| 重复 alloc/free 500 MB 哈希表导致 HBM 碎片化 | 中 | `cudaMemPool` 预分配；跨调用缓存（configs_j 不变时复用以节省 50ms 构建时间） |
+| 结构化 config bytes 导致哈希函数聚集 | 中 | 使用 xxHash64 替代默认 MurmurHash3；上线前用真实 SCI 分布 benchmark |
+| 纯 JAX fallback 与 CUDA 不能 bit-exact 一致 (atomicAdd 顺序非确定) | 低 | 测试用 `allclose(rtol=1e-12)`，不要求 `==` |
+| `exclude_configs` 未排序传给 CUDA | 低 | Python 层预处理排序后再传 FFI

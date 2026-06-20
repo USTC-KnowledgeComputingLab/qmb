@@ -64,21 +64,21 @@ parity     = parity_const[t] ^ (popcount(parity_mask[t] & config) & 1)
 
 ## 四个核心操作
 
-### diagonal_term
+### compute_diagonal_within_subspace
 
 对每个 config 累加不改变构型的哈密顿项系数 (对角元)。`t == 0` 项才对对角有贡献。
 
-### apply_within
+### apply_within_subspace
 
-稀疏矩阵乘向量: H · psi_i 投影到 configs_j 张成的子空间。支持 forward/backward 双向遍历。使用二级索引二分查找减少全局内存访问。
+稀疏矩阵乘向量: H · psi_i 投影到 configs_j 张成的子空间。支持 forward/backward 双向遍历。使用 cuCollections `cuco::static_map` 哈希表进行 O(1) config 查找——二分查找在 GPU 上因 warp divergence 不可行。
 
-### list_relative
+### find_all_relative_configs
 
 全部列举新构型 + 去重 + 振幅累加。使用 cuCollections `cuco::static_map` 预分配哈希表。Bloom filter 预筛查排除已知构型。
 
-### find_relative
+### find_topk_relative_configs
 
-流式 Top-K 选择。使用哈希表 + 全局阈值加速 + 周期性 CUB radix-sort compact。distinct 量大时 compact 频率自适应调节。
+Top-K 选择。使用哈希表 + CUB radix sort 最终排序。
 
 ## 多节点多卡
 
