@@ -76,8 +76,8 @@ def prepare(operators, n_qubits):
     known   = [False] * n_qubits  # qubit i 的初始构型是否已被约束
     initial = [0]     * n_qubits  # 被约束的初始值 (仅 known[i] 时有效)
     flip    = 0                    # 已处理算符的累计翻转位掩码
-    p_const = 0                    # JW 相位固定常数 (mod 2)
-    p_mask  = 0                    # JW 相位对运行时构型的依赖掩码
+    p_const = 0                    # JW 相位: 全部确定性贡献 (已知 qubit 的 initial⊕flip)
+    p_mask  = 0                    # JW 相位: 运行时构型依赖部分 (仅未知 qubit)
 
     for s, c in ops:               # c=1(产生) or 0(湮灭)
         # ---- a) 约束推导 ----
@@ -93,10 +93,15 @@ def prepare(operators, n_qubits):
             initial[s] = target
             known[s] = True
 
-        # ---- b) JW 相位贡献 (基于当前算符作用前的中间态) ----
-        lo = (1 << s) - 1          # low_mask(s): 位 0..s-1 为 1
-        p_const ^= (flip & lo).bit_count() & 1
-        p_mask  ^= lo
+        # ---- b) JW 相位贡献 ----
+        lo = (1 << s) - 1
+        # 对已知 qubit (known[j]=true)：initial[j] XOR flip[j] 已完全确定 → 直接计入 p_const
+        # 对未知 qubit (known[j]=false)：flip[j]=0 (不变量)，贡献 = initial[j] → 计入 p_mask
+        # 将两者分离：已知的全部放入 p_const，未知的全部放入 p_mask
+        known_mask = sum((1 << i) for i in range(n_qubits) if known[i])
+        unknown_mask = lo & ~known_mask
+        p_const ^= sum((initial[i] ^ ((flip >> i) & 1)) for i in range(s) if known[i]) & 1
+        p_mask  ^= unknown_mask
 
         # ---- c) 翻转 (在相位计算之后) ----
         flip ^= (1 << s)
@@ -111,7 +116,7 @@ def prepare(operators, n_qubits):
     return (create_mask, annihilate_mask, flip, p_mask, p_const)
 ```
 
-**不变量**: `known[s]=false` ⇒ `flip[s]=0`（首次触及必定无历史翻转）。
+**不变量**: `known[s]=false` ⇒ `flip[s]=0`（首次触及必定无历史翻转）。因此未知 qubit 在 p_mask 中贡献的运行时 `config[i]` 恰好等于中间态 `initial[i]`（无翻转修正）。已知 qubit 的 `initial[i] XOR flip[i]` 已完全确定，直接计入 `p_const`。
 
 **边缘情形**:
 | 项 | 作用序 | 过程 | 结果 |
