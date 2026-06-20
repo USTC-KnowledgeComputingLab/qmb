@@ -133,21 +133,116 @@ def prepare(operators, n_qubits):
 - `MAX_OP_NUMBER`: 每 term 最大算符数 (二体相互作用 = 4)
 
 **静态分发**: `N_QUBYTES` 决定内核使用哪种位运算路径。通过 `if constexpr (N_QUBYTES <= 8)` 在编译期选择:
-- **n_qubits ≤ 64** (N_QUBYTES ≤ 8): 所有掩码 (`create_mask`, `config` 等) 可装载为单个 `uint64_t` 寄存器。可作用性检查 `(config & create_mask) == 0` 是单条 AND+JZ 指令，JW 奇偶性 `popcount(parity_mask & config)` 是单条 POPCNT 指令。零循环开销。
-- **n_qubits > 64** (N_QUBYTES > 8): 掩码以 `std::array<uint8_t, N_QUBYTES>` 存储，逐字节循环做 AND/XOR/popcount。循环边界是编译期常量，编译器可完全展开（unroll）。
+- **n_qubits ≤ 64** (N_QUBYTES ≤ 8): 所有掩码可装载为单个 `uint64_t` 寄存器。可作用性检查 `(config & create_mask) == 0` 是单条 AND+JZ 指令，JW 奇偶性是单条 POPCNT 指令。零循环开销。
+- **n_qubits > 64** (N_QUBYTES > 8): 掩码以 `std::array<uint8_t, N_QUBYTES>` 存储，逐字节循环。循环边界是编译期常量，编译器可完全展开。
 
-两条路径共享同样的算法逻辑，仅数据宽度不同。n_qubits ≤ 64 的路径是重要的优化——它在寄存器中完成全部操作，避免 shared memory 和 global memory 的位运算往返。
+#### 3.2.1 `compute_diagonal_within_subspace` — 对角元
 
-**四个 handler** (`XLA_FFI_DEFINE_HANDLER_SYMBOL`):
-- `ComputeDiagonalWithinSubspace` — 对角元 (完整实现)
-- `ApplyWithinSubspace` — 稀疏 H·psi 投影 (forward + backward 方向)
-- `FindAllRelativeConfigs` — cuCollections static_map 哈希表去重
-- `FindTopKRelativeConfigs` — 哈希表 + 阈值加速 + 周期性 CUB compact
+计算 H 在每个 config 上的对角元期望值。只有 `flip_mask[t] == 0` 的 term（不改变构型）才对对角有贡献。
 
-**工具函数** (device):
-- `is_applicable(config, create_mask, annihilate_mask, n_qubytes)` — 位 AND/OR+NOR check
-- `apply_flip(config, flip_mask, n_qubytes)` — XOR
-- `jw_parity(config, parity_mask, parity_const, n_qubytes)` — popcount + XOR
+```
+for each term_t:
+    for each config_i:
+        if not is_applicable(config_i, create_mask[t], annihilate_mask[t]): continue
+        if flip_mask[t] != 0: continue   # 对角条件: 无净翻转
+
+        parity = parity_const[t] XOR popcount(parity_mask[t] & config_i) & 1
+        sign = -1.0 if parity else 1.0
+
+        atomicAdd(psi[i,0], sign * coef[t,0])
+        atomicAdd(psi[i,1], sign * coef[t,1])
+```
+
+**并行度**: 2D grid `(ceil(T / 1), ceil(B / 512))`。每个线程处理一个 (term, config) 对，`atomicAdd` 处理多 term 对同一 config 的累加。
+
+#### 3.2.2 `apply_within_subspace` — 稀疏 H·psi 投影
+
+计算 `ψ_j = H · ψ_i` 投影到 `configs_j` 子空间。支持 forward/backward 双向。
+
+```
+预处理: 对 dst_configs 排序 + 构建 L1 索引 (每 256 条取样)
+
+for each term_t:
+    for each src_i:                              # forward: src=configs_i; backward: src=configs_j
+        if not is_applicable(src_i, create_mask[t], annihilate_mask[t]): continue
+        new_config = src_i XOR flip_mask[t]
+        idx = two_level_search(l1_index, sorted_dst, new_config)  # 二级索引二分查找
+        if idx < 0: continue
+
+        parity = parity_const[t] XOR popcount(parity_mask[t] & src_i) & 1
+        sign = -1.0 if parity else 1.0
+        contribution = sign * complex_mul(coef[t], psi_src[i])
+        atomicAdd(psi_j[idx,0], contribution.real)
+        atomicAdd(psi_j[idx,1], contribution.imag)
+
+post: unsort(psi_j, sort_idx)   # 仅 forward 方向需要
+```
+
+**`two_level_search`**: 先在 L1 索引中二分查找 (constant memory)，再在 ≤256 条目的桶内线性扫描 (1-2 cache line)。全局内存访问从 ~24 次降到 ~2 次。
+
+**方向选择**: forward 遍历 T × B_i，backward 遍历 T × B_j。选较小侧最小化总线程数。
+
+#### 3.2.3 `find_all_relative_configs` — 全部枚举 + 去重
+
+枚举 H 作用产生的所有不重复新 config，累加各路径贡献的振幅。
+
+```
+初始化 cuCollections cuco::static_map (capacity = estimated_distinct / 0.6)
+
+for each term_t:
+    for each config_i:
+        if not is_applicable(config_i, create_mask[t], annihilate_mask[t]): continue
+        new_config = config_i XOR flip_mask[t]
+
+        # 排除已知构型: Bloom 预筛查 → 二分查找确认
+        if bloom_maybe_present(exclude_set, new_config):
+            if binary_search(exclude_configs, new_config) >= 0: continue
+
+        # 计算贡献
+        parity = parity_const[t] XOR popcount(parity_mask[t] & config_i) & 1
+        sign = -1.0 if parity else 1.0
+        contribution = sign * complex_mul(coef[t], psi_i[i])
+
+        # 哈希表: 找到则 atomicAdd, 未找到则 CAS 声明 slot
+        slot = hash_table.find(new_config)
+        if slot: atomicAdd(slot, contribution)
+        else: hash_table.insert_cas(new_config, contribution)
+
+return hash_table.collect_nonempty()  # 线性扫描
+```
+
+**容量**: 10^7 distinct → ~600 MB; 10^8 → ~6 GB。预分配，零运行时分配。
+
+#### 3.2.4 `find_topk_relative_configs` — 流式 Top-K 选择
+
+选出最重要的 K 个新 config。重要性度量 = `|H_ij * psi_i|²`（单路径贡献权重）。
+
+```
+初始化 哈希表 (capacity = 2K, 驻留 L2 cache ~10 MB)
+global_min_weight = 0.0
+
+for each term_t:
+    for each config_i:
+        if not is_applicable(config_i, create_mask[t], annihilate_mask[t]): continue
+
+        weight = |coef[t] * psi_i[i]|²
+        if weight <= global_min_weight: continue    # ~99.9% 条目在这里被快速拒绝
+
+        new_config = config_i XOR flip_mask[t]
+        if in_exclude_set(new_config): continue
+
+        slot = hash_table.find(new_config)
+        if slot: atomicMax(slot.weight, weight)
+        else:
+            if load_factor > 0.6:
+                compact(): sort_descending → unique_top_K → rebuild_table → update threshold
+            hash_table.insert_cas(new_config, weight)
+
+final_compact(): sort_descending → unique_top_K
+return top_K_configs
+```
+
+**`compact()`**: CUB radix sort 按 weight 降序排列 → 取前 K 个唯一 config → 重建哈希表 → 更新 `global_min_weight`。200K 条目排序约 0.3ms。10^8 distinct 时约 1000 次 compact，总计 ~300ms。阈值上升后频率指数下降。
 
 ### 3.3 `_hamiltonian_cuda_loader.py` — JIT 编译与缓存
 
@@ -175,29 +270,7 @@ def load_cuda_module(n_qubytes: int, max_op_number: int) -> ctypes.CDLL:
 
 ### 3.4 `_hamiltonian_jax.py` — 纯 JAX fallback
 
-四个 `@jax.jit` 函数，语义与 CUDA kernel 完全一致:
-
-```python
-@jax.jit
-def compute_diagonal_within_subspace(configs, create_mask, annihilate_mask, flip_mask, parity_mask, parity_const, coef):
-    # 对每个 (term, config): 可作用性检查 + 翻转 = 0? + JW parity + 累加 coef
-    ...
-
-@jax.jit
-def apply_within_subspace(configs_i, psi_i, configs_j, create_mask, annihilate_mask,
-                          flip_mask, parity_mask, parity_const, coef, direction=0):
-    ...
-
-@jax.jit
-def find_all_relative_configs(configs_i, psi_i, configs_exclude, create_mask, annihilate_mask,
-                              flip_mask, parity_mask, parity_const, coef, hash_capacity):
-    ...
-
-@jax.jit
-def find_topk_relative_configs(configs_i, psi_i, count_selected, configs_exclude, create_mask,
-                                annihilate_mask, flip_mask, parity_mask, parity_const, coef):
-    ...
-```
+四个 `@jax.jit` 函数，算法与 3.2.1-3.2.4 完全一致，区别仅在循环结构: CUDA 用 2D grid (`term × batch` 维度并行 + `atomicAdd`)，JAX 用 `vmap` + `lax.scan` 或嵌套 `fori_loop`。两套实现共享相同的位掩码输入和输出语义。
 
 ### 3.5 `_hamiltonian.py` — FermiHamiltonian 类 + FFI 路由
 
