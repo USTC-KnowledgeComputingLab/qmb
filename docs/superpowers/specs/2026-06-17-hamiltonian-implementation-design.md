@@ -63,52 +63,69 @@ tests/
 
 T = 有效 term 数量, Q = ceil(n_qubits/8)。
 
-**算法**:
+**算法**（伪码级别）:
 
-输入为一个 Hamiltonian term = 任意有序的费米子算符列表 `[(site_0, kind_0), (site_1, kind_1), ...]`（书写顺序）。kind=1 为产生，kind=0 为湮灭。**不需要正规序假设**。
+```python
+def prepare(operators, n_qubits):
+    """
+    operators: list[(site, kind)] in WRITING order. kind=1=create, kind=0=annihilate.
+    Returns: (create_mask, annihilate_mask, flip_mask, parity_mask, parity_const)
+    """
+    # 作用顺序 = 书写序的逆序 (最右边的算符先作用)
+    ops = list(reversed(operators))
 
-**核心思想**: 逐算符模拟作用过程，跟踪每个 qubit 的**初始构型约束**和**累计翻转**。
+    # ---- 逐算符累积的状态变量 (均从 0 开始, 每处理一个算符就更新) ----
+    known   = [False] * n_qubits   # 分析到当前算符时, qubit i 的初始构型值是否已被约束
+    initial = [0]     * n_qubits   # 分析到当前算符时, 被约束的初始值 (仅 known[i]=True 时有效)
+    flip    = 0                    # 分析到当前算符时, 已处理算符造成的累计翻转位掩码
+    p_const = 0                    # 分析到当前算符时, JW 相位的固定常数部分 (mod 2)
+    p_mask  = 0                    # 分析到当前算符时, JW 相位对运行时构型的依赖掩码
 
-**Step 1 — 构造作用序列**。算符乘积作用时最右边的先作用，故作用序列 = 书写序的逆序。
+    for s, c in ops:               # s=site, c=1(产生) or 0(湮灭)
+        # ---- a) 约束推导: 该算符对当前中间态的要求, 反向推导对初始构型的约束 ----
+        flip_s = (flip >> s) & 1   # 分析到当前算符时, qubit s 已被之前的算符翻转了奇数次?
+        target = 1 - c             # 产生(c=1)要求中间态=0; 湮灭(c=0)要求中间态=1
+        if known[s]:
+            # qubit s 在更早的算符中已被约束。检查中间态是否满足当前算符的要求
+            if (initial[s] ^ flip_s) != target:
+                return ZERO         # Pauli 冲突 → 该项恒为零
+        else:
+            # 首次触及 qubit s。反向传播约束到初始构型
+            # 需要 initial[s] XOR flip_s == target, 故 initial[s] = flip_s XOR target
+            initial[s] = flip_s ^ target
+            known[s] = True
 
-**Step 2 — 逐算符模拟**。维护以下状态变量（初始全 0）：
+        # ---- b) JW 相位贡献: 基于分析到当前算符时的中间态 (本算符还未翻转) ----
+        lo = (1 << s) - 1          # low_mask(s): 位 0,1,...,s-1 为 1
+        p_const ^= (flip & lo).bit_count() & 1   # 已翻转位对中间态的常数贡献
+        p_mask  ^= lo                           # 所有 j<s 的初始构型依赖
 
-| 变量 | 含义 |
-|------|------|
-| `known[i]` (bool) | qubit i 的初始构型值是否已被约束 |
-| `initial[i]` (0/1) | qubit i 的初始构型约束值（`known[i]=true` 时有效） |
-| `flip[i]` (0/1) | qubit i 被已处理算符翻转的总次数 mod 2 |
-| `parity_const` (0/1) | JW 相位中由已知中间态 qubit 贡献的固定部分 |
-| `parity_mask` (uint64) | JW 相位中依赖运行时初始构型的部分 |
+        # ---- c) 翻转: 该算符施加后, qubit s 翻转 ----
+        flip ^= (1 << s)
 
-当前中间态: `current[i] = initial[i] XOR flip[i]`（当 `known[i]=true`）；否则未知。
+    # ---- 组装输出: 从最终的初始约束 + 累计翻转构建位掩码 ----
+    create_mask = 0
+    annihilate_mask = 0
+    for i in range(n_qubits):
+        if known[i] and initial[i] == 0: create_mask      |= (1 << i)
+        if known[i] and initial[i] == 1: annihilate_mask  |= (1 << i)
 
-对作用序列中每个算符 `(site=s, type=c)`:
-- `c=1`（产生）要求 `current[s] = 0`；`c=0`（湮灭）要求 `current[s] = 1`
-- 若 `known[s]=true`: 检查 `initial[s] XOR flip[s] == 要求值`，不满足则此项恒零跳过
-- 若 `known[s]=false`: 该算符反向约束初始值 → `initial[s] = flip[s] XOR 要求值`，`known[s]=true`
-- JW 相位贡献: `parity_mask ^= low_mask(s)`; `parity_const ^= popcount(flip_before & low_mask(s)) & 1`
-- 翻转: `flip[s] ^= 1`
-  其中 `low_mask(k) = (1<<k)-1`（低 k 位全 1 掩码）。
+    return (create_mask, annihilate_mask, flip, p_mask, p_const)
+```
 
-**Step 3 — 组装输出**。`create_mask` = {i | known[i] ∧ initial[i]=0}，`annihilate_mask` = {i | known[i] ∧ initial[i]=1}，`flip_mask = flip`。
+**时序要点** (每处理一个算符时):
+- `flip` 代表"之前已处理的算符"造成的翻转。当前算符的翻转在步骤 c 才加入。
+- `known[i]` 和 `initial[i]` 代表"到当前算符为止"对初始构型的约束。
+- 步骤 b 的 `flip & lo` 必须用步骤 c 翻转**之前**的 `flip`——因为 JW Z-string 是在算符作用前的中间态上求值的。
+- 步骤 a 中的 `flip_s` 也是步骤 c 翻转**之前**的值。若先翻转再检查约束，会得到错误的条件 (因为中间态已被当前算符改变)。
 
-**示例**（8 qubits，c₃† c₁dag c₅ c₇）:
+**边缘情形**:
+- `c_i c_i` (两次湮灭同格点): 第一个 c_i 设 `initial[i]=1, flip[i]=1`; 第二个 c_i 检查 `initial[i]^flip_s = 1^1=0 ≠ target=1` → ZERO ✓
+- `c_i^dag c_i` (产生后湮灭): 作用序为 c_i, c_i^dag。c_i 设 `initial[i]=1, flip[i]=1`; c_i^dag 检查 `1^1=0=target(产生要求0)` ✓。最终 `flip[i]=0` → flip_mask 不含 i ✓
+- `c_i c_i^dag` (湮灭后产生): 作用序为 c_i^dag, c_i。c_i^dag 设 `initial[i]=0, flip[i]=1`; c_i 检查 `0^1=1=target(湮灭要求1)` ✓。最终 `flip[i]=0` ✓
+- `kind=2` (恒等算符): 直接跳过，不设约束、不翻转、不贡献相位
 
-| Step | 算符 | s | flip[s]前 | 要求 | initial[s] | known | flip[s]后 | p_const⊕ | p_mask⊕ |
-|------|------|---|-----------|------|------------|-------|-----------|----------|---------|
-| 1 | 湮灭 | 7 | 0 | 1 | 1 | true | 1 | 0 | lo(7) |
-| 2 | 湮灭 | 5 | 0 | 1 | 1 | true | 1 | 0 | lo(5) |
-| 3 | 产生 | 1 | 0 | 0 | 0 | true | 1 | 0 | lo(1) |
-| 4 | 产生 | 3 | 0 | 0 | 0 | true | 1 | 1 | lo(3) |
-
-结果: `create_mask`={1,3}, `annihilate_mask`={5,7}, `flip_mask`={1,3,5,7}, `parity_mask`={1,2,5,6}, `parity_const`=1。
-
-**同格点算符**: `c_i^dag c_i`（产生后湮灭）→ `annihilate_mask`={i}, `flip_mask`=0, `parity_mask`=0, `parity_const`=0（即 `n_i`）；`c_i c_i^dag`（湮灭后产生）→ `create_mask`={i}, `flip_mask`=0（即 `1-n_i`）；`c_i c_i`（两次湮灭）→ `known[s]` 冲突，恒零。
-
-**kind=2（恒等算符）**: 不设约束、不翻转、不贡献相位，直接跳过。
-
-**多字节扩展** (n_qubits > 64): 将 64-bit 掩码按 `Q = ceil(n_qubits/8)` 字节切片到 uint8 数组。Python int 天然无限精度。
+**多字节扩展** (n_qubits > 64): Python int 天然无限精度，`flip`, `p_mask` 直接作为大整数操作。输出时按 Q = ceil(n_qubits/8) 字节切片到 uint8 JAX arrays。
 
 ### 3.2 `_hamiltonian_cuda.cu` — CUDA kernel
 
