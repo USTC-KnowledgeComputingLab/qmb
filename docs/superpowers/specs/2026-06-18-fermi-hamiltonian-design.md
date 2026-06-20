@@ -1,11 +1,11 @@
-# Spec: Hamiltonian 子系统实现
+# Spec: Fermi Hamiltonian 子系统实现
 
 **日期**: 2026-06-17
 **状态**: approved
 
 ## 1. 目标
 
-实现 `src/qmp/hamiltonian/` 子包，包含：
+实现 `src/qmp/hamiltonian/fermi_hamiltonian/` 子包，包含：
 
 - **位掩码预处理** (`prepare`): 纯 Python 将费米子哈密顿量字典转为 (create_mask, annihilate_mask, flip_mask, parity_mask, parity_const, coef) 表示
 - **四个 CUDA kernel**: `compute_diagonal_within_subspace`, `apply_within_subspace`, `find_all_relative_configs`, `find_topk_relative_configs` — 通过 JAX FFI 接入
@@ -16,8 +16,8 @@
 ## 2. 文件结构
 
 ```
-src/qmp/hamiltonian/
-├── AGENTS.md                    # 子系统设计文档 (已存在, 待更新)
+src/qmp/hamiltonian/fermi_hamiltonian/
+├── AGENTS.md                    # 子系统设计文档
 ├── __init__.py                  # re-export FermiHamiltonian
 ├── _hamiltonian.py              # FermiHamiltonian 类 + FFI 注册 + CUDA/fallback 路由
 ├── _hamiltonian_prepare.py      # 纯 Python 位掩码预处理 → JAX arrays

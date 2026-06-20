@@ -18,25 +18,20 @@
 ## 代码结构
 
 ```
-src/qmp/              # 源码 (src layout)
+src/qmp/                # 源码 (src layout)
 ├── __init__.py
-├── _version.py        # hatch-vcs 自动生成
-├── hamiltonian/       # Hamiltonian CUDA kernel + Python wrapper
-│   ├── AGENTS.md      # 子系统设计
-│   ├── __init__.py
-│   ├── _hamiltonian.py        # Python 层: FFI 绑定 + Hamiltonian 类
-│   ├── _hamiltonian.cpp       # term 预处理 (Python dict → 位掩码)
-│   ├── _hamiltonian_cuda.cu   # CUDA 后端 (四个核心操作)
-│   └── _hamiltonian_cpu.cpp   # CPU 后端 (测试/fallback)
-├── networks/          # MLP / Transformers / MPS (Flax)
-├── algorithms/        # HAAR / VMC / Lanczos
-├── models/            # FCIDUMP / Hubbard / Ising / PySCF / OpenFermion
-├── plugins/           # 第三方框架接口
-└── utility/           # bitspack, losses, context, optimizer
+├── _version.py          # hatch-vcs 自动生成
+├── hamiltonian/         # Hamiltonian 子系统
+│   └── fermi_hamiltonian/  # Fermi Hamiltonian CUDA kernel + Python wrapper
+├── networks/            # MLP / Transformers / MPS (Flax)
+├── algorithms/          # HAAR / VMC / Lanczos
+├── models/              # FCIDUMP / Hubbard / Ising / PySCF / OpenFermion
+├── plugins/             # 第三方框架接口
+└── utility/             # bitspack, losses, context, optimizer
 
-tests/                 # 测试 (镜像 src/ 结构)
-docs/superpowers/      # 设计 spec + plan
-old/                   # 旧 main 分支参考代码 (如存在)
+tests/                   # 测试 (镜像 src/ 结构)
+docs/superpowers/        # 设计 spec + plan
+old/                     # 旧 main 分支参考代码 (如存在)
 ```
 
 ## 类型注解约定
