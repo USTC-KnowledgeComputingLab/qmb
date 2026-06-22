@@ -30,10 +30,11 @@ tests/
 └── unit/
     ├── __init__.py
     └── hamiltonian/
-        ├── __init__.py
-        ├── test_prepare.py       # prepare 正确性测试
-        ├── test_fallback.py      # 纯 JAX fallback 四个操作端到端
-        └── test_cuda.py          # CUDA vs fallback 回归 (pytest.mark.cuda)
+        └── fermi_hamiltonian/
+            ├── __init__.py
+            ├── test_prepare.py       # prepare 正确性测试
+            ├── test_fallback.py      # 纯 JAX fallback 四个操作端到端
+            └── test_cuda.py          # CUDA vs fallback 回归 (pytest.mark.cuda)
 ```
 
 ## 3. 模块设计
@@ -320,21 +321,21 @@ class FermiHamiltonian:
 
 ## 5. 测试
 
-### 5.1 `tests/unit/hamiltonian/test_prepare.py`
+### 5.1 `tests/unit/hamiltonian/fermi_hamiltonian/test_prepare.py`
 - `test_create_mask_h2`: H₂ 哈密顿量 verify create_mask
 - `test_annihilate_mask_hubbard_2x1`: 2-site Hubbard verify annihilate_mask
 - `test_parity_mask_jw`: JW 符号正确性 (已知手工计算)
 - `test_zero_term_skip`: 恒为零的 term 被正确跳过
 - `test_coef_preserved`: 系数保持
 
-### 5.2 `tests/unit/hamiltonian/test_fallback.py`
+### 5.2 `tests/unit/hamiltonian/fermi_hamiltonian/test_fallback.py`
 - 小型合成哈密顿量 (4 qubits, ~10 terms), 10-20 configs
 - `test_diagonal_term_exact`: 手工计算结果对比
 - `test_apply_within_subspace_forward_backward_consistency`: H 和 H^dag 结果关系
 - `test_find_all_relative_configs_dedup`: 去重和振幅累加
 - `test_find_topk_relative_configs_topk`: Top-K 排序
 
-### 5.3 `tests/unit/hamiltonian/test_cuda.py`
+### 5.3 `tests/unit/hamiltonian/fermi_hamiltonian/test_cuda.py`
 - `@pytest.mark.cuda` — 仅 GPU 环境运行
 - 与 test_fallback 相同输入，assert CUDA 输出 ≈ JAX fallback 输出 (`allclose(rtol=1e-12)`)
 - **非 bit-exact**: GPU 的 `atomicAdd` 顺序非确定，浮点加法非结合律导致末位差异，不能用 `==` 比较
