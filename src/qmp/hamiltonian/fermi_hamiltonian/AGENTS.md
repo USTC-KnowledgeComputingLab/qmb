@@ -4,8 +4,8 @@
 
 Hamiltonian 子系统负责量子多体哈密顿量的存储和操作。核心设计围绕三个层面:
 
-1. **预处理层** (Python + C++): 将量子化学哈密顿量 (产生/湮灭算符乘积) 转换为位运算友好的紧凑表示
-2. **计算层** (CUDA C++): 四个核心操作 (diagonal_term, apply_within, list_relative, find_relative) 的 GPU kernel
+1. **预处理层** (Python): 将量子化学哈密顿量 (产生/湮灭算符乘积) 转换为位运算友好的紧凑表示
+2. **计算层** (CUDA C++): 四个核心操作 (compute_diagonal_within_subspace, apply_within_subspace, find_all_relative_configs, find_topk_relative_configs) 的 GPU kernel
 3. **绑定层** (Python): 通过 JAX FFI 将 CUDA kernel 注册为 XLA custom call
 
 ## 设计原则
@@ -54,7 +54,7 @@ parity     = parity_const[t] ^ (popcount(parity_mask[t] & config) & 1)
 
 ### 预处理
 
-`_hamiltonian.cpp` 中的 `prepare` 函数负责将产生/湮灭算符序列转换为上述表示。:
+`_hamiltonian_prepare.py` 中的 `prepare` 函数负责将产生/湮灭算符序列转换为上述表示。:
 
 给定产生算符列表和湮灭算符列表，模拟逐算符作用过程:
 1. 对每个算符，计算其对初始构型的约束条件
@@ -85,7 +85,7 @@ Top-K 选择。使用哈希表 + CUB radix sort 最终排序。
 - configs 按 batch 维度 `shard_map` 分片
 - Hamiltonian 参数 (create_mask, annihilate_mask 等) 在所有设备上复制
 - 每个设备独立执行 FFI kernel，无需跨设备通信
-- 全局归并 (如 find_relative 的 top-K) 通过 `jax.lax.all_gather` 实现
+- 全局归并 (如 find_topk_relative_configs 的 top-K) 通过 `jax.lax.all_gather` 实现
 
 ## 其他子系统引用
 

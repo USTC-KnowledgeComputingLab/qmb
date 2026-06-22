@@ -185,7 +185,7 @@ def _process_term(
 
 ```bash
 git add src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian_prepare.py
-git commit -m "feat: implement pure Python Hamiltonian prepare with BIT.md algorithm"
+git commit -m "feat: implement pure Python Hamiltonian prepare with spec §3.1 algorithm"
 ```
 
 ---
@@ -960,7 +960,6 @@ def load_cuda_module(n_qubytes: int) -> ctypes.CDLL:
     """Compile and load a CUDA shared library for the given parameters.
 
     The library is cached in ~/.cache/qmp/kclab/{key}/lib.so.
-    On the first call for a given (n_qubytes, max_op_number), nvcc is
     invoked to compile _hamiltonian_cuda.cu with the appropriate macros.
     Subsequent calls load the cached .so directly via ctypes.
 
@@ -968,7 +967,6 @@ def load_cuda_module(n_qubytes: int) -> ctypes.CDLL:
     ----------
     n_qubytes : int
         ceil(n_qubits/8), passed as -DN_QUBYTES.
-    max_op_number : int
         Maximum operators per term, passed as -DMAX_OP_NUMBER.
 
     Returns

@@ -228,7 +228,7 @@ return hash_table.collect_nonempty()  # 线性扫描
 选出最重要的 K 个新 config。
 
 ```
-初始化 哈希表 (capacity = 2K, ~680 MB)  # K×2 overprovisioning
+初始化 哈希表 (capacity = 2K, ~6 MB)  # K×2 overprovisioning
 global_min_weight = 0.0
 chunk_size = max_terms_per_launch       # ~1000, 按 GPU 能力动态确定
 
@@ -358,7 +358,7 @@ class FermiHamiltonian:
 | `compute_diagonal` 对角 term 仅占 1-10%，grid-stride loop 避免 10^12 线程启动 | **高** | 预过滤对角 term 子集 + grid-stride loop (~10^5 blocks)，不用 T×B 网格 |
 | 结构化 config bytes 导致 MurmurHash3 聚集 | 中 | 所有哈希表统一使用 wyhash |
 | L2 cache thrashing（configs 流驱逐 hash table 条目） | 中 | configs 用 `cudaAccessPropertyStreaming` 标记，`__ldg()` 走 read-only cache |
-| 重复 alloc/free 500 MB 哈希表导致 HBM 碎片化 | 中 | `cudaMemPool` 预分配；apply_within 哈希表跨调用缓存 |
+| 重复 alloc/free 哈希表导致 HBM 碎片化 | 中 | `cudaMemPool` 预分配；apply_within 哈希表跨调用缓存 |
 | find_topk 多 kernel 分段中 compact 开销（~100 轮 × 0.5ms） | 低 | 总开销 ~50ms，相对 10+ 分钟总体计算忽略不计 |
 | 纯 JAX fallback 与 CUDA 非 bit-exact (`atomicAdd` 顺序非确定) | 低 | 测试用 `allclose(rtol=1e-12)` |
 | `exclude_configs` 未排序传入 CUDA | 低 | Python 层预处理排序，或用第二哈希表替代 Bloom+二分查找
