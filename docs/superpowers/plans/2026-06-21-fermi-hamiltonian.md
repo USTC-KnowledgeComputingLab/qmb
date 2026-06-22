@@ -1361,3 +1361,39 @@ def test_cuda_vs_fallback_diagonal():
 git add tests/unit/hamiltonian/fermi_hamiltonian/test_cuda.py
 git commit -m "test: add CUDA vs JAX fallback regression tests"
 ```
+
+---
+
+## 执行阶段补充说明
+
+以下事项 spec 有明确要求，但 plan 中未完整展开。执行 agent 必须在对应任务中补全：
+
+### 补充 1: 块级归约（Task 8a）
+
+Spec §3.2.1 要求 `compute_diagonal_within_subspace` 使用 shared memory 做 intra-block 归约，每个 block 只发一次 `atomicAdd`——而非每个线程都发 `atomicAdd`。实现方法：block 内用 `__shared__ double2 accum[256]` 做 warp-level reduction，最后 thread 0 写回 global。
+
+### 补充 2: `__ldg()` 读取优化（Task 8a-8d）
+
+Spec §3.2.2 要求所有只读输入（configs, create_mask, annihilate_mask, flip_mask, parity_mask, parity_const, coef）通过 `__ldg()` 走 read-only cache。在 CUDA kernel 中将 `const uint8_t* __restrict__` 的访问改为 `__ldg(ptr + offset)` 模式。
+
+### 补充 3: 哈希表跨调用缓存（Task 8b）
+
+Spec §3.2.2 要求 `apply_within_subspace` 的哈希表在 `configs_j` 不变时跨调用复用。实现：在 `FermiHamiltonian` 中维护 `(configs_j_hash, hash_table)` 缓存对，每次调用时比较 hash，命中则跳过 ~50ms 重建。
+
+### 补充 4: 缺失测试（Task 3, Task 5）
+
+Spec §5.1-5.3 要求但 plan 未包含的测试：
+- `test_parity_mask_jw`: H₂ 哈密顿量手工计算 JW 奇偶性验证
+- `test_create_mask_h2`: H₂ 哈密顿量 verify create_mask
+- `test_forward_backward_value_consistency`: apply_within 的 forward 和 backward 结果数值一致性（不仅是 shape）
+- `test_diagonal_hand_calculated`: 手工计算结果对比（不仅是 all-zeros）
+- `test_hash_table_overflow_retry`: 人为过小 capacity 验证重试逻辑
+- `test_cuda_apply_within`, `test_cuda_find_all`, `test_cuda_find_topk`: CUDA vs fallback 对所有四个操作（不仅是 diagonal）
+
+### 补充 5: AGENTS.md 更新（Task 1）
+
+`src/qmp/hamiltonian/fermi_hamiltonian/AGENTS.md` 中旧操作名（`diagonal_term`, `apply_within`, `list_relative`, `find_relative`）需更新为 spec 正式名。旧预处理引用 `_hamiltonian.cpp` 需改为 `_hamiltonian_prepare.py`。
+
+### 补充 6: `N_QUBYTES` 宏在 CUDA kernel 中的使用（Task 8a）
+
+Plan 中 CUDA 模板参数用 `NQ`，但 nvcc 编译时传的是 `N_QUBYTES` 宏。执行时需统一：要么 kernel 代码直接用 `N_QUBYTES` 宏，要么在 `if constexpr` 分支中按 `N_QUBYTES` 值选择模板实例化。
