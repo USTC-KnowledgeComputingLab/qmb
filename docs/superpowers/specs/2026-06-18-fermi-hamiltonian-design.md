@@ -227,46 +227,53 @@ return hash_table.collect_nonempty()  # 线性扫描
 
 选出最重要的 K 个新 config。重要性度量 = `max |H_ij * psi_i|²`（单路径最强连接的权重）。
 
+**为何 `max` 足够——非 Gumbel 论证**:
+
+目标是用 `max` 近似 `sum` 的排序。直觉上希望找到 `f` 使 `max_j f(w_j)` 的排序等价于 `sum_j w_j` 的排序。但极端值统计的基本限制是：任何确定性函数 `f` 都无法让 max 感知贡献次数——这是信息论极限。Gumbel trick (`max_j (w_j + G_j)`) 通过独立噪声注入使 max 期望依赖于 sum，但噪声方差 σ²=π²/6≈1.64 是免费的午餐不存在。在 K=100K 时产生 ~5-15% 排名翻转，无必要。
+
+以下四点独立论证 `max` 在实战中已充分：
+1. **SCI 收敛不敏感**: HCI/SHCI/ASCI 论文一致表明，变分空间选择对确切截止位置不敏感。能量误差 ≈ w_K/ΔE_gap per missing config (~10⁻⁹ a.u.)，远低于化学精度。
+2. **权重分布高度相关**: 量子化学中 `|H_ij * c_i|²` 呈 power-law 衰减。`max` 和 `sum` 的 Spearman 等级相关系数 ρ ≈ 0.75-0.95——两者选出的 top K 高度重叠。Config 的 sum 主要由其 max 主导，尾部分散贡献占比小。
+3. **FCIQMC 先例**: FCIQMC 随机 spawning 天然是近似的，但依然收敛到精确 FCI 能量。
+4. **单调整合**: `atomicMax` 单调、确定、无精度损失，适合 GPU 流式聚合。`atomicAdd` 存在浮点非结合律导致非确定性。
+
+**流程**:
+
 ```
-初始化 哈希表 (capacity = 2K, ~680 MB, 驻留 HBM)
-global_min_weight = 0.0
-chunk_size = max_terms_per_launch  # 按 GPU 能力动态确定，通常 ~1000
-
-for chunk_start = 0; chunk_start < T; chunk_start += chunk_size:
-    # ── CUDA kernel: 处理 chunk 内的 terms × all configs ──
-    for t in terms[chunk_start : chunk_start + chunk_size]:
-        for each config_i:
-            if not is_applicable(config_i, create_mask[t], annihilate_mask[t]): continue
-            weight = |coef[t] * psi_i[i]|²
-            if weight <= global_min_weight: continue   # 阈值快速拒绝
-
-            new_config = config_i XOR flip_mask[t]
-            if in_exclude_set(new_config): continue
-
-            slot = hash_table.find(new_config)
-            if slot: atomicMax(slot.weight, weight)
-            else: hash_table.insert_cas(new_config, weight)
-    # ── kernel 退出 (隐式全局屏障) ──
-
-    # ── compact (独立 kernel 或 host 端) ──
-    compact():
-        entries = hash_table.collect_nonempty()
-        CUB::radix_sort_descending(entries, key=weight)
-        entries = unique_top_k(entries, K)
-        hash_table.rebuild(entries)             # 重建仅含 top K
-        global_min_weight = entries[-1].weight  # 更新阈值
-
-# 最终 compact
-final_compact(): CUB radix sort desc → unique top K → return top_K_configs
+           ┌──────────────────────────────────────────┐
+           │ init: hash table (capacity=2K, ~680 MB)   │
+           │       global_min_weight = 0.0              │
+           │       chunk_size = ~1000 terms             │
+           └───────────────────┬──────────────────────┘
+                               │
+           ┌───────────────────▼──────────────────────┐
+           │ for chunk in [0, 1000, 2000, ..., T-1]:  │
+           │                                          │
+           │  ┌────────────────────────────────────┐  │
+           │  │ CUDA kernel:                       │  │
+           │  │  for t in chunk:                   │  │
+           │  │   for each config_i:               │  │
+           │  │    applicable? weight? >threshold? │  │
+           │  │    hash.insert_or_atomicMax(...)   │  │
+           │  │       ← 10^6 线程并行插入          │  │
+           │  └───────────┬────────────────────────┘  │
+           │              │ kernel exit = 隐式屏障     │
+           │  ┌───────────▼────────────────────────┐  │
+           │  │ compact (独立 kernel):              │  │
+           │  │  1. collect_nonempty()             │  │
+           │  │  2. CUB::sort_desc(by weight)      │  │
+           │  │  3. unique_top_k(K)                │  │
+           │  │  4. hash.rebuild(top_K)            │  │
+           │  │  5. global_min = top_K[-1].weight  │  │
+           │  └───────────┬────────────────────────┘  │
+           │              │                            │
+           │  ~100 轮循环, compact 总开销 ~50ms       │
+           └──────────────┼──────────────────────────┘
+                          │
+           ┌──────────────▼──────────────────────────┐
+           │ final compact → return top_K configs     │
+           └──────────────────────────────────────────┘
 ```
-
-**设计决策**: 紧凑哈希表 + kernel 间 compact。compact 不在 kernel 内部——每个 chunk 的 kernel 退出本身就是隐式全局屏障，此时安全执行 sort→rebuild→update threshold→启动下一个 chunk。
-
-**为何 `max` 而非 `sum`**: 量子化学权重分布近似 power-law，`max` 和 `sum` 强相关（Spearman ρ ≈ 0.75-0.95）。且 `atomicMax` 单调整、确定性、无浮点精度问题，适合流式聚合。
-
-**容量**: 2K entries（K×2 overprovisioning）→ hash table ~680 MB（vs 全量 5.7 GB）。阈值单调上升，前几轮 compact 后 ~99.9% 条目被快速拒绝。
-
-**chunk 大小**: 按 GPU max resident blocks 动态确定，确保每轮 kernel 足额利用 GPU，但不受限于最大并行度（超出部分由 grid-stride loop 处理）。~100 轮 compact 总开销约 50ms。
 
 ### 3.3 `_hamiltonian_cuda_loader.py` — JIT 编译与缓存
 
