@@ -799,14 +799,9 @@ class FermiHamiltonian:
         self._parity_mask = self._parity_mask[order]
         self._parity_const = self._parity_const[order]
         self._coef = self._coef[order]
-        # 预过滤: 将对角 term (flip_mask == 0) 分离出来
-        fm_sum = jnp.sum(self._flip_mask, axis=1)
-        self._diag_idx = jnp.where(fm_sum == 0)[0]
-        self._offdiag_idx = jnp.where(fm_sum != 0)[0]
         self._use_cuda = _try_register_ffi(self._n_qubytes)
-        logger.info("FermiHamiltonian: %d terms (%d diagonal), %d qubits, cuda=%s",
-                     int(self._coef.shape[0]), int(len(self._diag_idx)),
-                     n_qubits, self._use_cuda)
+        logger.info("FermiHamiltonian: %d terms, %d qubits, cuda=%s",
+                     int(self._coef.shape[0]), n_qubits, self._use_cuda)
 
     @staticmethod
     def _parse_device(devices: list[str]) -> jax.Device:
@@ -1213,11 +1208,11 @@ git commit -m "feat: CUDA kernel skeleton with diagonal_term and FFI handlers"
      atomicAdd(psi_j[idx, 0], contribution.real)
      atomicAdd(psi_j[idx, 1], contribution.imag)
 
-3. 方向: direction==0 → src=configs_i, dst=configs_j
-          direction==1 → src=configs_j, dst=configs_i (反向)
+        # apply_within_subspace kernel with pre-built hash table
+        for t in terms_in_chunk:
+            for i in src_batch:  # width B_i or B_j depending on direction
+                applicable? → src XOR fm → lookup → atomicAdd
 
-4. 哈希表构建在 host 端 (cudaMalloc + cuco API)，
-   然后传入 kernel。方向选择在 Python 层完成。
 ```
 
 - [ ] **Step 2: Commit**
@@ -1245,7 +1240,9 @@ git commit -m "feat: add apply_within_subspace CUDA handler"
 2. Grid-stride loop over (term, config_i):
    for each (t, i):
      applicable check → new_config = config_i XOR fm[t]
-     exclude check (binary search in sorted exclude, or hash table)
+     # 排除已知构型: 第二个 cuco::static_map (config → dummy)
+     # spec §3.2.3 设计: 用第二哈希表代替 Bloom+二分查找
+     if exclude_hash_table.contains(new_config): continue
      parity → sign → contribution = sign * complex_mul(coef[t], psi_i[i])
      
      hash lookup → 
@@ -1390,7 +1387,11 @@ Spec §5.1-5.3 要求但 plan 未包含的测试：
 - `test_hash_table_overflow_retry`: 人为过小 capacity 验证重试逻辑
 - `test_cuda_apply_within`, `test_cuda_find_all`, `test_cuda_find_topk`: CUDA vs fallback 对所有四个操作（不仅是 diagonal）
 
-### 补充 5: AGENTS.md 更新（Task 1）
+### 补充 5: AGENTS.md 名称确认与更新（Task 1）
 
-`src/qmp/hamiltonian/fermi_hamiltonian/AGENTS.md` 中旧操作名（`diagonal_term`, `apply_within`, `list_relative`, `find_relative`）需更新为 spec 正式名。旧预处理引用 `_hamiltonian.cpp` 需改为 `_hamiltonian_prepare.py`。
+`src/qmp/hamiltonian/fermi_hamiltonian/AGENTS.md` 中的操作名必须与 spec 命名表一致。执行 agent 需逐项核对：`diagonal_term` → `compute_diagonal_within_subspace`，`apply_within` → `apply_within_subspace`，`list_relative` → `find_all_relative_configs`，`find_relative` → `find_topk_relative_configs`。引用 `_hamiltonian.cpp` 处改为 `_hamiltonian_prepare.py`。如有不一致则更新。
 
+
+### 补充 6: `if constexpr (n_qubytes <= 8)` 静态分发 (Task 8a-8d)
+
+Spec §3.2: n_qubits ≤ 64 时走 `uint64_t` 单寄存器。执行 agent 须在 CUDA kernel 中实现两条编译期路径：`if constexpr (n_qubytes <= 8)` 用 `uint64_t` 批量 AND/POPCNT/XOR，else 逐字节循环。`n_qubytes` 是 template parameter，false 分支不参与编译。
