@@ -146,11 +146,11 @@ for each term_t:
         if not is_applicable(config_i, create_mask[t], annihilate_mask[t]): continue
         if flip_mask[t] != 0: continue   # 对角条件: 无净翻转
 
-parity = parity_const[t] XOR popcount(parity_mask[t] & config_i) & 1
-            sign = -1.0 if parity else 1.0
+        parity = parity_const[t] XOR popcount(parity_mask[t] & config_i) & 1
+        sign = -1.0 if parity else 1.0
 
-            atomicAdd(psi[i,0], sign * coef[t,0])
-            atomicAdd(psi[i,1], sign * coef[t,1])
+        atomicAdd(psi[i,0], sign * coef[t,0])
+        atomicAdd(psi[i,1], sign * coef[t,1])
 ```
 
 **并行度**: grid-stride loop，grid 大小按 SM 数量 × 最大 occupancy 设定（~10^5 blocks 级别，而非 T×B = 10^12）。每个 block 内循环处理多个 term × config 对。
