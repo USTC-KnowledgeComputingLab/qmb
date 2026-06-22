@@ -169,20 +169,23 @@ for each term_t:
 
 for each term_t:
     for each src_i:                              # forward: src=configs_i; backward: src=configs_j
-        if not is_applicable(src_i, create_mask[t], annihilate_mask[t]): continue
+        # backward 时需检查 config_i (= config_j XOR flip[t]) 是否满足约束
+        check_config = src_i XOR flip_mask[t] if direction == 1 else src_i
+        if not is_applicable(check_config, create_mask[t], annihilate_mask[t]): continue
         new_config = src_i XOR flip_mask[t]
 
-        idx = hash_table.lookup(new_config)       # O(1) expected, ~2-3 probes
+        idx = hash_table.lookup(new_config)       # forward: lookup in configs_j; backward: lookup in configs_i
         if idx < 0: continue
 
-        parity = parity_const[t] XOR popcount(parity_mask[t] & src_i) & 1
+        parity = parity_const[t] XOR popcount(parity_mask[t] & check_config) & 1
         sign = -1.0 if parity else 1.0
-        contribution = sign * complex_mul(coef[t], psi_src[i])
+        cf = (coef[t,0], -coef[t,1]) if direction == 1 else (coef[t,0], coef[t,1])  # conj for H^†
+        contribution = sign * complex_mul(cf, psi_src[i])
         atomicAdd(psi_j[idx,0], contribution.real)
         atomicAdd(psi_j[idx,1], contribution.imag)
 ```
 
-**方向选择**: forward 遍历 T × B_i，backward 遍历 T × B_j。选较小侧最小化总线程数。forward 时 `psi_i` 为输入波函数，backward 时 `psi_i` 为 `configs_j` 上的波函数（H^dag 作用于它，投影回 `configs_i`）。输出形状始终为 `[B_j, 2]`。
+**方向选择**: forward 遍历 T × B_i，backward 遍历 T × B_j。选较小侧最小化总线程数。forward 时 `psi_i` 为输入波函数，输出形状 `[B_j,2]`。backward 时 `psi_i` 为 `configs_j` 上的波函数，H^† 作用于它，投影回 `configs_i`，输出形状 `[B_i,2]`。
 
 - **`__ldg()` 读取掩码和数据**: 所有只读输入通过 `__ldg()` 走 read-only cache，减少 L1 压力。
 - **哈希表跨调用缓存**: 若 `configs_j` 在多轮迭代中不变（Lanczos 内循环常见），复用哈希表省 50-200ms 构建时间。以 `configs_j` 数据指针的 hash 作为 key 判断是否需要重建。

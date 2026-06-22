@@ -1238,7 +1238,9 @@ git commit -m "feat: add apply_within_subspace CUDA handler"
 2. Grid-stride loop over (term, config_i):
    for each (t, i):
      applicable check → new_config = config_i XOR fm[t]
-     # 排除已知构型: 第二个 cuco::static_map (config → dummy)
+    # 排除已知构型: 第二个 cuco::static_map (config → dummy)
+    # spec §3.2.3 设计: 用第二哈希表代替 Bloom+二分查找
+    if exclude_hash_table.contains(new_config): continue
      # spec §3.2.3 设计: 用第二哈希表代替 Bloom+二分查找
      if exclude_hash_table.contains(new_config): continue
      parity → sign → contribution = sign * complex_mul(coef[t], psi_i[i])
@@ -1391,5 +1393,8 @@ Spec §5.1-5.3 要求但 plan 未包含的测试：
 
 
 ### 补充 6: `if constexpr (n_qubytes <= 8)` 静态分发 (Task 8a-8d)
+
+### 补充 7: compute_diagonal 预过滤 (Task 6, Task 8a)
+Spec §3.2.1: 仅遍历 flip_mask==0 的对角 term 子集。执行时在 FermiHamiltonian 中分离 diag_idx，compute_diagonal 只传对角 term 的 masks 给 kernel/JAX fallback，减少 90-99% 无用对。
 
 Spec §3.2: n_qubits ≤ 64 时走 `uint64_t` 单寄存器。执行 agent 须在 CUDA kernel 中实现两条编译期路径：`if constexpr (n_qubytes <= 8)` 用 `uint64_t` 批量 AND/POPCNT/XOR，else 逐字节循环。`n_qubytes` 是 template parameter，false 分支不参与编译。
