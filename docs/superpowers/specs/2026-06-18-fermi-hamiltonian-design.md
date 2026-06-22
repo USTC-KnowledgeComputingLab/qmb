@@ -131,7 +131,6 @@ def prepare(operators, n_qubits):
 
 **模板参数** (编译期宏):
 - `N_QUBYTES`: ceil(n_qubits/8)，同时作为静态分发键
-- `MAX_OP_NUMBER`: 每 term 最大算符数 (二体相互作用 = 4)
 
 **静态分发**: `N_QUBYTES` 决定内核使用哪种位运算路径。通过 `if constexpr (N_QUBYTES <= 8)` 在编译期选择:
 - **n_qubits ≤ 64** (N_QUBYTES ≤ 8): 所有掩码可装载为单个 `uint64_t` 寄存器。可作用性检查 `(config & create_mask) == 0` 是单条 AND+JZ 指令，JW 奇偶性是单条 POPCNT 指令。零循环开销。
@@ -166,7 +165,7 @@ for each term_t:
 
 ```
 预处理: 对 dst_configs 构建 cuco::static_map (key=config, value=index_in_original_order)
-         10^7 entries → ~500 MB (60% load factor)
+         10^7 entries → ~300 MB (10^7 entries, 60% load, ~17B per slot)
 
 for each term_t:
     for each src_i:                              # forward: src=configs_i; backward: src=configs_j
@@ -187,7 +186,7 @@ for each term_t:
 
 - **`__ldg()` 读取掩码和数据**: 所有只读输入通过 `__ldg()` 走 read-only cache，减少 L1 压力。
 - **哈希表跨调用缓存**: 若 `configs_j` 在多轮迭代中不变（Lanczos 内循环常见），复用哈希表省 50-200ms 构建时间。以 `configs_j` 数据指针的 hash 作为 key 判断是否需要重建。
-- **哈希函数**: 使用 xxHash64。config bytes 非随机（受占据数、自旋守恒约束），MurmurHash3 在结构化数据上可能产生聚集。
+- **哈希函数**: 使用 wyhash。config bytes 非随机（受占据数、自旋守恒约束），wyhash 使用 multiply-and-xor 链 (wymum) 对结构化 occupation-number 字节有良好扩散。
 
 #### 3.2.3 `find_all_relative_configs` — 全部枚举 + 去重
 
@@ -266,8 +265,8 @@ for chunk_start in [0, chunk_size, 2*chunk_size, ..., T-1]:
 ### 3.3 `_hamiltonian_cuda_loader.py` — JIT 编译与缓存
 
 ```python
-def load_cuda_module(n_qubytes: int, max_op_number: int) -> ctypes.CDLL:
-    key = f"qmp_hamiltonian_{n_qubytes}_{max_op_number}"
+def load_cuda_module(n_qubytes: int) -> ctypes.CDLL:
+    key = f"qmp_hamiltonian_{n_qubytes}"
     cache_dir = platformdirs.user_cache_path("qmp", "kclab") / key
     so_path = cache_dir / "lib.so"
 
@@ -275,8 +274,8 @@ def load_cuda_module(n_qubytes: int, max_op_number: int) -> ctypes.CDLL:
         subprocess.run([
             "nvcc", "-shared", "-Xcompiler", "-fPIC",
             f"-I{jaxlib.get_include_dir()}",
+            f"-I{THIRD_PARTIES_DIR}/cuco/include",
             f"-DN_QUBYTES={n_qubytes}",
-            f"-DMAX_OP_NUMBER={max_op_number}",
             "-std=c++20", "-O3", "--use_fast_math",
             "-arch=native",
             "-o", str(so_path),
@@ -315,9 +314,15 @@ class FermiHamiltonian:
 
 ## 4. 依赖
 
-- **运行时**: `jax`, `jaxlib` (>=0.5.0), `platformdirs`
-- **编译 CUDA**: `nvcc` (用户机器上), `jaxlib` 的 XLA headers
-- **无**: numpy, torch, pybind11, ninja
+**运行时**: `jax`, `jaxlib` (>=0.5.0), `platformdirs`
+
+**编译 CUDA**: `nvcc` (用户机器上), `jaxlib` 的 XLA headers (`xla/ffi/api/ffi.h`)
+
+**第三方库** (git submodule, 置于 `/third_parties/`):
+- `cuCollections`: GPU hash table (`cuco::static_map`), header-only, [github.com/NVIDIA/cuCollections](https://github.com/NVIDIA/cuCollections)
+- `wyhash`: 哈希函数, ~30 行 C inline 到 .cu 中, 无需编译
+
+**无**: numpy, torch, pybind11, ninja
 
 ## 5. 测试
 
@@ -351,7 +356,7 @@ class FermiHamiltonian:
 |------|------|------|
 | 哈希表溢出导致 kernel hang (`cuco::static_map` open addressing 无限 probe) | **高** | 插入失败检测 (probe 超阈值 10×log₂(capacity)) → 错误码 → Python 层 retry 更大 capacity |
 | `compute_diagonal` 对角 term 仅占 1-10%，grid-stride loop 避免 10^12 线程启动 | **高** | 预过滤对角 term 子集 + grid-stride loop (~10^5 blocks)，不用 T×B 网格 |
-| 结构化 config bytes 导致 MurmurHash3 聚集 | 中 | 所有哈希表统一使用 xxHash64 |
+| 结构化 config bytes 导致 MurmurHash3 聚集 | 中 | 所有哈希表统一使用 wyhash |
 | L2 cache thrashing（configs 流驱逐 hash table 条目） | 中 | configs 用 `cudaAccessPropertyStreaming` 标记，`__ldg()` 走 read-only cache |
 | 重复 alloc/free 500 MB 哈希表导致 HBM 碎片化 | 中 | `cudaMemPool` 预分配；apply_within 哈希表跨调用缓存 |
 | find_topk 多 kernel 分段中 compact 开销（~100 轮 × 0.5ms） | 低 | 总开销 ~50ms，相对 10+ 分钟总体计算忽略不计 |

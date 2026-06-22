@@ -6,7 +6,7 @@
 
 **Architecture:** Pure Python `prepare` → 位掩码 JAX arrays → `FermiHamiltonian` 类路由 (CUDA FFI or JAX fallback) → 四个操作。CUDA kernel 通过 nvcc JIT 编译，`XLA_FFI_DEFINE_HANDLER_SYMBOL` 导出，`jax.ffi` 注册。
 
-**Tech Stack:** jax, jaxlib, cuCollections, CUB, nvcc, pytest
+**Tech Stack:** jax, jaxlib, cuCollections, CUB, nvcc, pytest, wyhash
 
 ---
 
@@ -756,7 +756,7 @@ def _try_register_ffi(n_qubytes: int) -> bool:
     """
     try:
         from ._hamiltonian_cuda_loader import load_cuda_module
-        lib = load_cuda_module(n_qubytes=n_qubytes, max_op_number=4)
+        lib = load_cuda_module(n_qubytes=n_qubytes)
         targets = {
             f"qmp_compute_diagonal_within_subspace_{n_qubytes}": "ComputeDiagonalWithinSubspace",
             f"qmp_apply_within_subspace_{n_qubytes}": "ApplyWithinSubspace",
@@ -956,7 +956,7 @@ logger = logging.getLogger(__name__)
 _SOURCE_DIR = Path(__file__).resolve().parent
 
 
-def load_cuda_module(n_qubytes: int, max_op_number: int) -> ctypes.CDLL:
+def load_cuda_module(n_qubytes: int) -> ctypes.CDLL:
     """Compile and load a CUDA shared library for the given parameters.
 
     The library is cached in ~/.cache/qmp/kclab/{key}/lib.so.
@@ -976,7 +976,7 @@ def load_cuda_module(n_qubytes: int, max_op_number: int) -> ctypes.CDLL:
     ctypes.CDLL
         The loaded shared library.
     """
-    key = f"qmp_hamiltonian_{n_qubytes}_{max_op_number}"
+    key = f"qmp_hamiltonian_{n_qubytes}"
     cache_dir = platformdirs.user_cache_path("qmp", "kclab") / key
     so_path = cache_dir / "lib.so"
 
@@ -999,7 +999,7 @@ def load_cuda_module(n_qubytes: int, max_op_number: int) -> ctypes.CDLL:
             "nvcc", "-shared", "-Xcompiler", "-fPIC",
             f"-I{jax_include}",
             f"-DN_QUBYTES={n_qubytes}",
-            f"-DMAX_OP_NUMBER={max_op_number}",
+            
             "-std=c++20", "-O3", "--use_fast_math",
             "-arch=native",
             "-o", str(so_path),
@@ -1031,7 +1031,7 @@ This is the largest task. The CUDA file contains all four operations as XLA FFI 
 1. Receives buffers via `ffi::Buffer<T>` and `ffi::ResultBuffer<T>`
 2. Launches a 2D grid-stride loop kernel
 3. Uses `is_applicable`, `apply_flip`, `_parity` as device helper functions
-4. Hashes with xxHash64, uses `cuco::static_map` for hash table operations
+4. Hashes with wyhash, uses `cuco::static_map` for hash table operations
 
 Due to CUDA file length, implement in three sub-tasks.
 
@@ -1194,7 +1194,7 @@ git commit -m "feat: CUDA kernel skeleton with diagonal_term and FFI handlers"
 1. 预处理: 对 dst_configs 构建 cuco::static_map
    - Key = config bytes (N_QUBYTES uint8), Value = index in original order
    - 容量 = B_dst / 0.6 (60% load factor)
-   - 哈希函数: xxHash64
+   - 哈希函数: wyhash
 
 2. Grid-stride loop over (term, src_config):
    for each (t, i):
@@ -1235,7 +1235,7 @@ git commit -m "feat: add apply_within_subspace CUDA handler"
 1. 预分配 cuco::static_map
    - capacity = estimated_distinct / 0.6
    - Key = config bytes, Value = (real:f64, imag:f64)
-   - 哈希: xxHash64, open addressing + linear probing
+   - 哈希: wyhash, open addressing + linear probing
 
 2. Grid-stride loop over (term, config_i):
    for each (t, i):
@@ -1273,7 +1273,7 @@ git commit -m "feat: add find_all_relative_configs CUDA handler"
 算法 (参考 spec §3.2.4):
 
 ```
-1. 初始化 hash table (capacity = 2K, ~680 MB)
+1. 初始化 hash table (capacity = 2K, ~6 MB (200K entries))
    global_min_weight = 0.0
 
 2. for chunk in term_chunks:      ← Python 层循环，非 CUDA 内部

@@ -54,7 +54,7 @@ parity     = parity_const[t] ^ (popcount(parity_mask[t] & config) & 1)
 
 ### 预处理
 
-`_hamiltonian.cpp` 中的 `prepare` 函数负责将产生/湮灭算符序列转换为上述表示。算法来自 `BIT.md`:
+`_hamiltonian.cpp` 中的 `prepare` 函数负责将产生/湮灭算符序列转换为上述表示。:
 
 给定产生算符列表和湮灭算符列表，模拟逐算符作用过程:
 1. 对每个算符，计算其对初始构型的约束条件
