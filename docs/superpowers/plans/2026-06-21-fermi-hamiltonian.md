@@ -1181,13 +1181,127 @@ git add src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian_cuda.cu
 git commit -m "feat: CUDA kernel skeleton with diagonal_term and FFI handlers"
 ```
 
-#### Task 8b: apply_within CUDA kernel
+#### Task 8b: apply_within_subspace CUDA handler
 
-Full implementation — see the expanded `_hamiltonian_cuda.cu`.
+**Files:**
+- Modify: `src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian_cuda.cu`
 
-#### Task 8c: find_all + find_topk CUDA kernel
+- [ ] **Step 1: Implement ApplyWithinSubspaceImpl**
 
-Full implementation — see the expanded `_hamiltonian_cuda.cu`.
+算法 (参考 spec §3.2.2):
+
+```
+1. 预处理: 对 dst_configs 构建 cuco::static_map
+   - Key = config bytes (N_QUBYTES uint8), Value = index in original order
+   - 容量 = B_dst / 0.6 (60% load factor)
+   - 哈希函数: xxHash64
+
+2. Grid-stride loop over (term, src_config):
+   for each (t, i):
+     if !is_applicable(src[i], cm[t], am[t]): continue
+     new_config = src[i] XOR fm[t]
+     idx = hash_table.lookup(new_config)
+     if idx < 0: continue
+     parity = parity_const[t] XOR popcount(parity_mask[t] & src[i]) & 1
+     sign = parity ? -1.0 : 1.0
+     contribution = sign * complex_mul(coef[t], psi_src[i])
+     atomicAdd(psi_j[idx, 0], contribution.real)
+     atomicAdd(psi_j[idx, 1], contribution.imag)
+
+3. 方向: direction==0 → src=configs_i, dst=configs_j
+          direction==1 → src=configs_j, dst=configs_i (反向)
+
+4. 哈希表构建在 host 端 (cudaMalloc + cuco API)，
+   然后传入 kernel。方向选择在 Python 层完成。
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian_cuda.cu
+git commit -m "feat: add apply_within_subspace CUDA handler"
+```
+
+#### Task 8c: find_all_relative_configs CUDA handler
+
+**Files:**
+- Modify: `src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian_cuda.cu`
+
+- [ ] **Step 1: Implement FindAllRelativeConfigsImpl**
+
+算法 (参考 spec §3.2.3):
+
+```
+1. 预分配 cuco::static_map
+   - capacity = estimated_distinct / 0.6
+   - Key = config bytes, Value = (real:f64, imag:f64)
+   - 哈希: xxHash64, open addressing + linear probing
+
+2. Grid-stride loop over (term, config_i):
+   for each (t, i):
+     applicable check → new_config = config_i XOR fm[t]
+     exclude check (binary search in sorted exclude, or hash table)
+     parity → sign → contribution = sign * complex_mul(coef[t], psi_i[i])
+     
+     hash lookup → 
+       found: atomicAdd on (real, imag)
+       not found: CAS claim slot + write (config, real, imag)
+
+3. 收集: 线性扫描 hash table → 所有 non-empty slots
+   → return (new_configs, psi_j, count)
+
+4. 溢出保护: probe 超阈值 (10×log₂(capacity)) → 标记 overflow → 
+   kernel 返回错误码 → Python 层 retry 更大 capacity
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian_cuda.cu
+git commit -m "feat: add find_all_relative_configs CUDA handler"
+```
+
+#### Task 8d: find_topk_relative_configs CUDA handler
+
+**Files:**
+- Modify: `src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian_cuda.cu`
+
+- [ ] **Step 1: Implement FindTopKRelativeConfigsImpl**
+
+算法 (参考 spec §3.2.4):
+
+```
+1. 初始化 hash table (capacity = 2K, ~680 MB)
+   global_min_weight = 0.0
+
+2. for chunk in term_chunks:      ← Python 层循环，非 CUDA 内部
+     # CUDA kernel: 处理 chunk × all configs
+     grid-stride loop:
+       for each (t, i) in chunk:
+         applicable check
+         weight = |coef[t] * psi_i[i]|²
+         if weight <= global_min_weight: continue
+         exclude check
+         hash lookup → found: atomicMax; not found: CAS insert
+
+     # kernel exit (隐式屏障)
+     
+     # compact (host 端或独立 kernel):
+     entries = collect_nonempty()
+     CUB::radix_sort_descending(entries, by=weight)
+     entries = unique_top_k(entries, K)
+     hash_table.rebuild(entries)
+     global_min_weight = entries[-1].weight
+
+3. 最终 compact → 返回 top K configs
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian_cuda.cu
+git commit -m "feat: add find_topk_relative_configs CUDA handler"
+```
 
 ---
 
