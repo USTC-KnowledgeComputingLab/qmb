@@ -19,6 +19,7 @@
 - Create placeholder: `src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian_prepare.py`
 - Create placeholder: `src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian_jax.py`
 - Create placeholder: `src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian_cuda_loader.py`
+- Create placeholder: `tests/unit/hamiltonian/fermi_hamiltonian/__init__.py`
 - Create placeholder: `tests/unit/hamiltonian/__init__.py`
 - Create placeholder: `tests/unit/__init__.py`
 
@@ -31,6 +32,7 @@ rm src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian_cuda.cu
 touch src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian_prepare.py
 touch src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian_jax.py
 touch src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian_cuda_loader.py
+touch tests/unit/hamiltonian/fermi_hamiltonian/__init__.py
 touch tests/unit/hamiltonian/__init__.py
 touch tests/unit/__init__.py
 ```
@@ -211,7 +213,7 @@ git commit -m "feat: implement pure Python Hamiltonian prepare with BIT.md algor
 ### Task 3: Test `_hamiltonian_prepare`
 
 **Files:**
-- Write: `tests/unit/hamiltonian/test_prepare.py`
+- Write: `tests/unit/hamiltonian/fermi_hamiltonian/test_prepare.py`
 
 - [ ] **Step 1: Write tests**
 
@@ -320,21 +322,21 @@ def test_prepare_four_op_term():
 
 ```bash
 cd /home/hzhangxyz/.local/share/opencode/worktree/27289db6f197bfc15851ba39a23a3acb917e4462/witty-mountain
-python -m pytest tests/unit/hamiltonian/test_prepare.py -v
+python -m pytest tests/unit/hamiltonian/fermi_hamiltonian/test_prepare.py -v
 ```
 Expected: ImportError or 0 collected (package not fully set up)
 
 - [ ] **Step 3: Run tests directly against the module**
 
 ```bash
-python -m pytest tests/unit/hamiltonian/test_prepare.py -v
+python -m pytest tests/unit/hamiltonian/fermi_hamiltonian/test_prepare.py -v
 ```
 Expected: all tests pass (direct import of `_hamiltonian_prepare`)
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add tests/unit/hamiltonian/test_prepare.py tests/unit/hamiltonian/__init__.py tests/unit/__init__.py
+git add tests/unit/hamiltonian/fermi_hamiltonian/test_prepare.py tests/unit/hamiltonian/fermi_hamiltonian/__init__.py tests/unit/hamiltonian/__init__.py tests/unit/__init__.py
 git commit -m "test: add bit-mask preparation correctness tests"
 ```
 
@@ -632,7 +634,7 @@ git commit -m "feat: implement pure JAX fallback for four Hamiltonian operations
 ### Task 5: Test JAX fallback
 
 **Files:**
-- Write: `tests/unit/hamiltonian/test_fallback.py`
+- Write: `tests/unit/hamiltonian/fermi_hamiltonian/test_fallback.py`
 
 - [ ] **Step 1: Write fallback tests**
 
@@ -712,13 +714,13 @@ def test_find_topk():
 - [ ] **Step 2: Run tests**
 
 ```bash
-python -m pytest tests/unit/hamiltonian/test_fallback.py -v
+python -m pytest tests/unit/hamiltonian/fermi_hamiltonian/test_fallback.py -v
 ```
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add tests/unit/hamiltonian/test_fallback.py
+git add tests/unit/hamiltonian/fermi_hamiltonian/test_fallback.py
 git commit -m "test: add JAX fallback end-to-end tests"
 ```
 
@@ -1212,7 +1214,7 @@ Full implementation — see the expanded `_hamiltonian_cuda.cu`.
 ### Task 9: CUDA regression tests
 
 **Files:**
-- Write: `tests/unit/hamiltonian/test_cuda.py`
+- Write: `tests/unit/hamiltonian/fermi_hamiltonian/test_cuda.py`
 
 - [ ] **Step 1: Write CUDA tests** (only runs when GPU + .so available)
 
@@ -1257,6 +1259,6 @@ def test_cuda_vs_fallback_diagonal():
 - [ ] **Step 2: Commit**
 
 ```bash
-git add tests/unit/hamiltonian/test_cuda.py
+git add tests/unit/hamiltonian/fermi_hamiltonian/test_cuda.py
 git commit -m "test: add CUDA vs JAX fallback regression tests"
 ```
