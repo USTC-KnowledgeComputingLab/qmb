@@ -10,12 +10,9 @@
 
 ---
 
-### Task 1: 清理旧文件 + 目录结构
+### Task 1: 目录结构 + 占位文件
 
 **Files:**
-- Delete: `src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian.cpp`
-- Delete: `src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian.py`
-- Delete: `src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian_cuda.cu`
 - Create placeholder: `src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian_prepare.py`
 - Create placeholder: `src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian_jax.py`
 - Create placeholder: `src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian_cuda_loader.py`
@@ -23,12 +20,10 @@
 - Create placeholder: `tests/unit/hamiltonian/__init__.py`
 - Create placeholder: `tests/unit/__init__.py`
 
-- [ ] **Step 1: Remove old files, create new empty files, update __init__.py**
+- [ ] **Step 1: Create directories and empty files**
 
 ```bash
-rm src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian.cpp
-rm src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian.py
-rm src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian_cuda.cu
+mkdir -p tests/unit/hamiltonian/fermi_hamiltonian
 touch src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian_prepare.py
 touch src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian_jax.py
 touch src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian_cuda_loader.py
@@ -37,22 +32,7 @@ touch tests/unit/hamiltonian/__init__.py
 touch tests/unit/__init__.py
 ```
 
-Update `src/qmp/hamiltonian/fermi_hamiltonian/__init__.py`:
-
-```python
-"""Fermi Hamiltonian module. Provides FermiHamiltonian."""
-
-from __future__ import annotations
-
-__all__: list[str] = []
-```
-
 - [ ] **Step 2: Commit**
-
-```bash
-git add -A
-git commit -m "Clear old hamiltonian files, create new empty files"
-```
 
 ---
 
