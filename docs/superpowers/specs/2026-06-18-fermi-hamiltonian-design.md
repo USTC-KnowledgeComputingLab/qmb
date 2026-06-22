@@ -225,55 +225,42 @@ return hash_table.collect_nonempty()  # 线性扫描
 
 #### 3.2.4 `find_topk_relative_configs` — Top-K 选择
 
-选出最重要的 K 个新 config。重要性度量 = `max |H_ij * psi_i|²`（单路径最强连接的权重）。
-
-**为何 `max` 足够——非 Gumbel 论证**:
-
-目标是用 `max` 近似 `sum` 的排序。直觉上希望找到 `f` 使 `max_j f(w_j)` 的排序等价于 `sum_j w_j` 的排序。但极端值统计的基本限制是：任何确定性函数 `f` 都无法让 max 感知贡献次数——这是信息论极限。Gumbel trick (`max_j (w_j + G_j)`) 通过独立噪声注入使 max 期望依赖于 sum，但噪声方差 σ²=π²/6≈1.64 是免费的午餐不存在。在 K=100K 时产生 ~5-15% 排名翻转，无必要。
-
-以下四点独立论证 `max` 在实战中已充分：
-1. **SCI 收敛不敏感**: HCI/SHCI/ASCI 论文一致表明，变分空间选择对确切截止位置不敏感。能量误差 ≈ w_K/ΔE_gap per missing config (~10⁻⁹ a.u.)，远低于化学精度。
-2. **权重分布高度相关**: 量子化学中 `|H_ij * c_i|²` 呈 power-law 衰减。`max` 和 `sum` 的 Spearman 等级相关系数 ρ ≈ 0.75-0.95——两者选出的 top K 高度重叠。Config 的 sum 主要由其 max 主导，尾部分散贡献占比小。
-3. **FCIQMC 先例**: FCIQMC 随机 spawning 天然是近似的，但依然收敛到精确 FCI 能量。
-4. **单调整合**: `atomicMax` 单调、确定、无精度损失，适合 GPU 流式聚合。`atomicAdd` 存在浮点非结合律导致非确定性。
-
-**流程**:
+选出最重要的 K 个新 config。
 
 ```
-           ┌──────────────────────────────────────────┐
-           │ init: hash table (capacity=2K, ~680 MB)   │
-           │       global_min_weight = 0.0              │
-           │       chunk_size = ~1000 terms             │
-           └───────────────────┬──────────────────────┘
-                               │
-           ┌───────────────────▼──────────────────────┐
-           │ for chunk in [0, 1000, 2000, ..., T-1]:  │
-           │                                          │
-           │  ┌────────────────────────────────────┐  │
-           │  │ CUDA kernel:                       │  │
-           │  │  for t in chunk:                   │  │
-           │  │   for each config_i:               │  │
-           │  │    applicable? weight? >threshold? │  │
-           │  │    hash.insert_or_atomicMax(...)   │  │
-           │  │       ← 10^6 线程并行插入          │  │
-           │  └───────────┬────────────────────────┘  │
-           │              │ kernel exit = 隐式屏障     │
-           │  ┌───────────▼────────────────────────┐  │
-           │  │ compact (独立 kernel):              │  │
-           │  │  1. collect_nonempty()             │  │
-           │  │  2. CUB::sort_desc(by weight)      │  │
-           │  │  3. unique_top_k(K)                │  │
-           │  │  4. hash.rebuild(top_K)            │  │
-           │  │  5. global_min = top_K[-1].weight  │  │
-           │  └───────────┬────────────────────────┘  │
-           │              │                            │
-           │  ~100 轮循环, compact 总开销 ~50ms       │
-           └──────────────┼──────────────────────────┘
-                          │
-           ┌──────────────▼──────────────────────────┐
-           │ final compact → return top_K configs     │
-           └──────────────────────────────────────────┘
+初始化 哈希表 (capacity = 2K, ~680 MB)  # K×2 overprovisioning
+global_min_weight = 0.0
+chunk_size = max_terms_per_launch       # ~1000, 按 GPU 能力动态确定
+
+for chunk_start in [0, chunk_size, 2*chunk_size, ..., T-1]:
+    # ── CUDA kernel ──
+    for t in chunk:
+        for each config_i:
+            if not is_applicable(config_i, create_mask[t], annihilate_mask[t]): continue
+            weight = |coef[t] * psi_i[i]|²
+            if weight <= global_min_weight: continue
+
+            new_config = config_i XOR flip_mask[t]
+            if in_exclude_set(new_config): continue
+
+            slot = hash_table.find(new_config)
+            if slot: atomicMax(slot.weight, weight)
+            else: hash_table.insert_cas(new_config, weight)
+    # kernel 退出 (隐式全局屏障)
+
+    # ── compact (独立 kernel) ──
+    entries = hash_table.collect_nonempty()
+    CUB::radix_sort_descending(entries, key=weight)
+    entries = unique_top_k(entries, K)
+    hash_table.rebuild(entries)
+    global_min_weight = entries[-1].weight
+
+# 最终 compact → 返回 top K configs
 ```
+
+**设计决策**: kernel 间 compact，compact 不在 2D grid 内部（无需中段全局同步）。每个 chunk 的 kernel 退出即隐式屏障，随后安全 sort → cutoff → rebuild → 下一轮。~100 轮 compact 总开销 ~50ms。
+
+**`max` 而非 `sum` 的理由**: (a) `atomicMax` 单调确定，而 `atomicAdd` 浮点非结合导致非确定性；(b) 量子化学中 `|H_ij*c_i|²` 近似 power-law，`max` 与 `sum` 高度相关（Spearman ρ≈0.75-0.95），max 足以选出最重要的 configs；(c) 无需 Gumbel 噪声——其对 K=100K 引入 ~5-15% 排名翻转，且每次额外 60+ cycles 计算成本。
 
 ### 3.3 `_hamiltonian_cuda_loader.py` — JIT 编译与缓存
 
