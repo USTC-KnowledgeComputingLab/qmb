@@ -66,7 +66,7 @@ parity     = parity_const[t] ^ (popcount(parity_mask[t] & config) & 1)
 
 ### compute_diagonal_within_subspace
 
-对每个 config 累加不改变构型的哈密顿项系数 (对角元)。`t == 0` 项才对对角有贡献。
+对每个 config 累加不改变构型的哈密顿项系数 (对角元)。`flip_mask[t] == 0` 项才对对角有贡献。
 
 ### apply_within_subspace
 
