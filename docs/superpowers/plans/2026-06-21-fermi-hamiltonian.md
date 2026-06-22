@@ -1055,36 +1055,36 @@ namespace ffi = xla::ffi;
 
 // ── device utilities ──
 
-template <int NQ>
+template <int N_QUBYTES>
 __device__ bool is_applicable(
     const uint8_t* config, const uint8_t* cm, const uint8_t* am)
 {
-    for (int q = 0; q < NQ; ++q) {
+    for (int q = 0; q < N_QUBYTES; ++q) {
         if ((config[q] & cm[q]) != 0) return false;
         if ((config[q] & am[q]) != am[q]) return false;
     }
     return true;
 }
 
-template <int NQ>
+template <int N_QUBYTES>
 __device__ void apply_flip(uint8_t* dst, const uint8_t* src, const uint8_t* fm)
 {
-    for (int q = 0; q < NQ; ++q) dst[q] = src[q] ^ fm[q];
+    for (int q = 0; q < N_QUBYTES; ++q) dst[q] = src[q] ^ fm[q];
 }
 
-template <int NQ>
+template <int N_QUBYTES>
 __device__ bool jw_parity(
     const uint8_t* config, const uint8_t* pm, uint8_t pc)
 {
     uint8_t p = pc;
-    for (int q = 0; q < NQ; ++q)
+    for (int q = 0; q < N_QUBYTES; ++q)
         p ^= __popc(static_cast<unsigned>(pm[q] & config[q])) & 1;
     return p & 1;
 }
 
 // ── diagonal_term kernel ──
 
-template <int NQ>
+template <int N_QUBYTES>
 __global__ void diagonal_term_kernel(
     int64_t B, int64_t T, int64_t total_pairs,
     const uint8_t* __restrict__ configs,
@@ -1101,14 +1101,14 @@ __global__ void diagonal_term_kernel(
     for (int64_t k = idx; k < total_pairs; k += stride) {
         int64_t t = k / B;
         int64_t i = k % B;
-        const uint8_t* cfg = configs + i * NQ;
-        if (!is_applicable<NQ>(cfg, create_mask + t * NQ, annihilate_mask + t * NQ))
+        const uint8_t* cfg = configs + i * Q;
+        if (!is_applicable<N_QUBYTES>(cfg, create_mask + t * Q, annihilate_mask + t * Q))
             continue;
-        const uint8_t* fm = flip_mask + t * NQ;
+        const uint8_t* fm = flip_mask + t * Q;
         bool is_diag = true;
-        for (int q = 0; q < NQ; ++q) { if (fm[q]) { is_diag = false; break; } }
+        for (int q = 0; q < N_QUBYTES; ++q) { if (fm[q]) { is_diag = false; break; } }
         if (!is_diag) continue;
-        bool parity = jw_parity<NQ>(cfg, parity_mask + t * NQ, parity_const[t]);
+        bool parity = jw_parity<N_QUBYTES>(cfg, parity_mask + t * Q, parity_const[t]);
         double sign = parity ? -1.0 : 1.0;
         atomicAdd(psi + i * 2,     sign * coef[t * 2]);
         atomicAdd(psi + i * 2 + 1, sign * coef[t * 2 + 1]);
@@ -1127,11 +1127,11 @@ ffi::Error ComputeDiagonalWithinSubspaceImpl(
     ffi::ResultBuffer<ffi::F64> psi)
 {
     auto cd = configs.dimensions();
-    int64_t B = cd[0], NQ = cd[1];
+    int64_t B = cd[0], Q = cd[1];
     int64_t T = create_mask.dimensions()[0];
     int64_t total = T * B;
     cudaMemsetAsync(psi->untyped_data(), 0, psi->size_bytes(), stream);
-    // launch with NQ template dispatch (TODO: add switch for common NQ values)
+    // launch with N_QUBYTES compile-time template (use switch for common values)
     int threads = 256, blocks = std::min<int64_t>((total + 255)/256, 65535L);
     diagonal_term_kernel<0><<<blocks, threads, 0, stream>>>(
         B, T, total, configs.typed_data(), create_mask.typed_data(),
@@ -1394,6 +1394,3 @@ Spec §5.1-5.3 要求但 plan 未包含的测试：
 
 `src/qmp/hamiltonian/fermi_hamiltonian/AGENTS.md` 中旧操作名（`diagonal_term`, `apply_within`, `list_relative`, `find_relative`）需更新为 spec 正式名。旧预处理引用 `_hamiltonian.cpp` 需改为 `_hamiltonian_prepare.py`。
 
-### 补充 6: `N_QUBYTES` 宏在 CUDA kernel 中的使用（Task 8a）
-
-Plan 中 CUDA 模板参数用 `NQ`，但 nvcc 编译时传的是 `N_QUBYTES` 宏。执行时需统一：要么 kernel 代码直接用 `N_QUBYTES` 宏，要么在 `if constexpr` 分支中按 `N_QUBYTES` 值选择模板实例化。
