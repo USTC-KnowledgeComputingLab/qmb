@@ -225,34 +225,48 @@ return hash_table.collect_nonempty()  # 线性扫描
 
 #### 3.2.4 `find_topk_relative_configs` — Top-K 选择
 
-选出最重要的 K 个新 config。重要性度量 = `|H_ij * psi_i|²`（单路径贡献权重）。
+选出最重要的 K 个新 config。重要性度量 = `max |H_ij * psi_i|²`（单路径最强连接的权重）。
 
 ```
-初始化 cuco::static_map (capacity = estimated_distinct / 0.6)
-     # 典型: 10^8 distinct → ~167M slots → ~5.7 GB
+初始化 哈希表 (capacity = 2K, ~680 MB, 驻留 HBM)
+global_min_weight = 0.0
+chunk_size = max_terms_per_launch  # 按 GPU 能力动态确定，通常 ~1000
 
-for each term_t:               # CUDA: grid-stride loop 并行
-    for each config_i:
-        if not is_applicable(config_i, create_mask[t], annihilate_mask[t]): continue
-        new_config = config_i XOR flip_mask[t]
-        if in_exclude_set(new_config): continue
+for chunk_start = 0; chunk_start < T; chunk_start += chunk_size:
+    # ── CUDA kernel: 处理 chunk 内的 terms × all configs ──
+    for t in terms[chunk_start : chunk_start + chunk_size]:
+        for each config_i:
+            if not is_applicable(config_i, create_mask[t], annihilate_mask[t]): continue
+            weight = |coef[t] * psi_i[i]|²
+            if weight <= global_min_weight: continue   # 阈值快速拒绝
 
-        weight = |coef[t] * psi_i[i]|²
-        slot = hash_table.find(new_config)
-        if slot: atomicMax(slot.weight, weight)
-        else: hash_table.insert_cas(new_config, weight)
+            new_config = config_i XOR flip_mask[t]
+            if in_exclude_set(new_config): continue
 
-# 最终: CUB radix sort 按 weight 降序排列 → 取前 K 个唯一 config
-entries = hash_table.collect_nonempty()
-CUB::radix_sort_descending(entries, key=weight)
-return unique_top_k(entries, K).configs
+            slot = hash_table.find(new_config)
+            if slot: atomicMax(slot.weight, weight)
+            else: hash_table.insert_cas(new_config, weight)
+    # ── kernel 退出 (隐式全局屏障) ──
+
+    # ── compact (独立 kernel 或 host 端) ──
+    compact():
+        entries = hash_table.collect_nonempty()
+        CUB::radix_sort_descending(entries, key=weight)
+        entries = unique_top_k(entries, K)
+        hash_table.rebuild(entries)             # 重建仅含 top K
+        global_min_weight = entries[-1].weight  # 更新阈值
+
+# 最终 compact
+final_compact(): CUB radix sort desc → unique top K → return top_K_configs
 ```
 
-**设计决策**: 全量哈希表 + 最终排序。实现与 `find_all_relative_configs` 共享哈希表基础设施，仅差异在于 (a) 存 weight（f64）而非振幅（complex128），(b) 最后多一次 CUB radix sort 取 top K。10^8 distinct → ~5.7 GB HBM，在 80 GB H100 上可接受。排序 10^8 entries (~2.5 GB) 约 0.5-2 秒。
+**设计决策**: 紧凑哈希表 + kernel 间 compact。compact 不在 kernel 内部——每个 chunk 的 kernel 退出本身就是隐式全局屏障，此时安全执行 sort→rebuild→update threshold→启动下一个 chunk。
 
-**为何不用 compact**: compact 需要 2D grid 内全局同步屏障（暂停所有线程 → 排序 → 重建哈希表 → 继续），CUDA 仅支持 block 级 `__syncthreads`，`cooperative_groups::grid_group::sync()` 无法在 T=10^5 × B=10^7 的 grid 上使用。多 kernel 分段 + checkpoint/restart 的复杂度远高于直接全量哈希表 + 后排序。
+**为何 `max` 而非 `sum`**: 量子化学权重分布近似 power-law，`max` 和 `sum` 强相关（Spearman ρ ≈ 0.75-0.95）。且 `atomicMax` 单调整、确定性、无浮点精度问题，适合流式聚合。
 
-**排除集**: 用第二个 `cuco::static_map` 代替 Bloom+二分查找。10^8 exclude entries → 额外 ~6 GB HBM，总计 ~12 GB。
+**容量**: 2K entries（K×2 overprovisioning）→ hash table ~680 MB（vs 全量 5.7 GB）。阈值单调上升，前几轮 compact 后 ~99.9% 条目被快速拒绝。
+
+**chunk 大小**: 按 GPU max resident blocks 动态确定，确保每轮 kernel 足额利用 GPU，但不受限于最大并行度（超出部分由 grid-stride loop 处理）。~100 轮 compact 总开销约 50ms。
 
 ### 3.3 `_hamiltonian_cuda_loader.py` — JIT 编译与缓存
 
@@ -345,5 +359,6 @@ class FermiHamiltonian:
 | 结构化 config bytes 导致 MurmurHash3 聚集 | 中 | 所有哈希表统一使用 xxHash64 |
 | L2 cache thrashing（configs 流驱逐 hash table 条目） | 中 | configs 用 `cudaAccessPropertyStreaming` 标记，`__ldg()` 走 read-only cache |
 | 重复 alloc/free 500 MB 哈希表导致 HBM 碎片化 | 中 | `cudaMemPool` 预分配；apply_within 哈希表跨调用缓存 |
+| find_topk 多 kernel 分段中 compact 开销（~100 轮 × 0.5ms） | 低 | 总开销 ~50ms，相对 10+ 分钟总体计算忽略不计 |
 | 纯 JAX fallback 与 CUDA 非 bit-exact (`atomicAdd` 顺序非确定) | 低 | 测试用 `allclose(rtol=1e-12)` |
 | `exclude_configs` 未排序传入 CUDA | 低 | Python 层预处理排序，或用第二哈希表替代 Bloom+二分查找
