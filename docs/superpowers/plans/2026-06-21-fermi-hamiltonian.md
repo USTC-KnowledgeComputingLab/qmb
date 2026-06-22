@@ -804,7 +804,6 @@ class FermiHamiltonian:
         self._diag_idx = jnp.where(fm_sum == 0)[0]
         self._offdiag_idx = jnp.where(fm_sum != 0)[0]
         self._use_cuda = _try_register_ffi(self._n_qubytes)
-        self._ffi_prefix = f"qmp_" if not self._use_cuda else ""
         logger.info("FermiHamiltonian: %d terms (%d diagonal), %d qubits, cuda=%s",
                      int(self._coef.shape[0]), int(len(self._diag_idx)),
                      n_qubits, self._use_cuda)
@@ -827,9 +826,10 @@ class FermiHamiltonian:
 
     def compute_diagonal_within_subspace(self, configs: jax.Array) -> jax.Array:
         B = configs.shape[0]
+        target = f"qmp_compute_diagonal_within_subspace_{self._n_qubytes}"
         if self._use_cuda:
             return jax.ffi.ffi_call(
-                "qmp_compute_diagonal_within_subspace",
+                target,
                 jax.ShapeDtypeStruct((B, 2), jnp.float64),
                 vmap_method="broadcast_all",
             )(self._to_dev(configs),
@@ -858,7 +858,7 @@ class FermiHamiltonian:
                   direction)
         if self._use_cuda:
             return jax.ffi.ffi_call(
-                "qmp_apply_within_subspace",
+                f"qmp_apply_within_subspace_{self._n_qubytes}",
                 jax.ShapeDtypeStruct((B_j, 2), jnp.float64),
                 vmap_method="broadcast_all",
             )(*inputs)
@@ -871,7 +871,7 @@ class FermiHamiltonian:
         Q = configs_i.shape[1]
         if self._use_cuda:
             return jax.ffi.ffi_call(
-                "qmp_find_all_relative_configs",
+                f"qmp_find_all_relative_configs_{self._n_qubytes}",
                 (jax.ShapeDtypeStruct((hash_capacity, Q), jnp.uint8),
                  jax.ShapeDtypeStruct((hash_capacity, 2), jnp.float64),
                  jax.ShapeDtypeStruct((), jnp.int32)),
@@ -897,11 +897,11 @@ class FermiHamiltonian:
         Q = configs_i.shape[1]
         if self._use_cuda:
             return jax.ffi.ffi_call(
-                "qmp_find_topk_relative_configs",
+                f"qmp_find_topk_relative_configs_{self._n_qubytes}",
                 jax.ShapeDtypeStruct((count_selected, Q), jnp.uint8),
                 vmap_method="broadcast_all",
             )(self._to_dev(configs_i), self._to_dev(psi_i),
-              np.int32(count_selected),
+              count_selected,
               self._to_dev(configs_exclude),
               self._to_dev(self._create_mask), self._to_dev(self._annihilate_mask),
               self._to_dev(self._flip_mask), self._to_dev(self._parity_mask),
