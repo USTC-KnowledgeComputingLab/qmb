@@ -223,42 +223,36 @@ return hash_table.collect_nonempty()  # 线性扫描
 
 **排除集哈希表**: 用第二个 `cuco::static_map` 代替 Bloom+二分查找。10^8 exclude entries → 额外 ~6 GB HBM，总计 ~12 GB——在 80 GB H100 上可行，且避免了 Bloom 假阳性带来的 O(log N) 二分查找回退。
 
-#### 3.2.4 `find_topk_relative_configs` — 流式 Top-K 选择
+#### 3.2.4 `find_topk_relative_configs` — Top-K 选择
 
 选出最重要的 K 个新 config。重要性度量 = `|H_ij * psi_i|²`（单路径贡献权重）。
 
 ```
-初始化 哈希表 (capacity = 2K, ~10 MB, 驻留 L2 cache)
-global_min_weight = 0.0
+初始化 cuco::static_map (capacity = estimated_distinct / 0.6)
+     # 典型: 10^8 distinct → ~167M slots → ~5.7 GB
 
-for each term_t:
+for each term_t:               # CUDA: grid-stride loop 并行
     for each config_i:
         if not is_applicable(config_i, create_mask[t], annihilate_mask[t]): continue
-
-        weight = |coef[t] * psi_i[i]|²
-        if weight <= global_min_weight: continue    # ~99.9% 快速拒绝
-
         new_config = config_i XOR flip_mask[t]
         if in_exclude_set(new_config): continue
 
+        weight = |coef[t] * psi_i[i]|²
         slot = hash_table.find(new_config)
         if slot: atomicMax(slot.weight, weight)
-        else:
-            if load_factor > 0.6:
-                compact(): CUB radix sort desc → unique top K → rebuild → update threshold
-            hash_table.insert_cas(new_config, weight)
+        else: hash_table.insert_cas(new_config, weight)
 
-final_compact(): CUB radix sort desc → unique top K
-return top_K_configs
+# 最终: CUB radix sort 按 weight 降序排列 → 取前 K 个唯一 config
+entries = hash_table.collect_nonempty()
+CUB::radix_sort_descending(entries, key=weight)
+return unique_top_k(entries, K).configs
 ```
 
-**`compact()`**: CUB radix sort 按 weight 降序排列 → 取前 K 个唯一 config → 重建哈希表 → 更新 `global_min_weight`。200K 条目排序约 0.3ms。阈值稳定后 compact 频率指数下降。
+**设计决策**: 全量哈希表 + 最终排序。实现与 `find_all_relative_configs` 共享哈希表基础设施，仅差异在于 (a) 存 weight（f64）而非振幅（complex128），(b) 最后多一次 CUB radix sort 取 top K。10^8 distinct → ~5.7 GB HBM，在 80 GB H100 上可接受。排序 10^8 entries (~2.5 GB) 约 0.5-2 秒。
 
-**设计决策**: compact 方案而非全量哈希表。原因: (a) 哈希表驻留 L2 cache (~10 MB vs ~5.7 GB)，避免与 `apply_within`/`list_relative` 争抢 HBM 带宽；(b) 阈值快速拒绝将 99.9%+ 条目挡在哈希表之外；(c) 周期性 compact 开销可忽略（~300ms 总计）。
+**为何不用 compact**: compact 需要 2D grid 内全局同步屏障（暂停所有线程 → 排序 → 重建哈希表 → 继续），CUDA 仅支持 block 级 `__syncthreads`，`cooperative_groups::grid_group::sync()` 无法在 T=10^5 × B=10^7 的 grid 上使用。多 kernel 分段 + checkpoint/restart 的复杂度远高于直接全量哈希表 + 后排序。
 
-**L2 驻留保护**: configs 数组用 `cudaAccessPropertyStreaming` 标记流式访问，跳过 L2 避免 evict 哈希表条目。掩码和 term 数据用 `__ldg()` 走 read-only cache。
-
-**Persistent buffer**: compact 时被淘汰的条目写入 HBM persistent buffer。最终 compact 时合并 persistent buffer + 当前哈希表 → 排序 → 取 top K。buffer 大小 = K × compact 次数，约 10^5 × 100 = 10 MB。
+**排除集**: 用第二个 `cuco::static_map` 代替 Bloom+二分查找。10^8 exclude entries → 额外 ~6 GB HBM，总计 ~12 GB。
 
 ### 3.3 `_hamiltonian_cuda_loader.py` — JIT 编译与缓存
 
