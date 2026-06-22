@@ -1398,3 +1398,7 @@ Spec §5.1-5.3 要求但 plan 未包含的测试：
 Spec §3.2.1: 仅遍历 flip_mask==0 的对角 term 子集。执行时在 FermiHamiltonian 中分离 diag_idx，compute_diagonal 只传对角 term 的 masks 给 kernel/JAX fallback，减少 90-99% 无用对。
 
 Spec §3.2: n_qubits ≤ 64 时走 `uint64_t` 单寄存器。执行 agent 须在 CUDA kernel 中实现两条编译期路径：`if constexpr (n_qubytes <= 8)` 用 `uint64_t` 批量 AND/POPCNT/XOR，else 逐字节循环。`n_qubytes` 是 template parameter，false 分支不参与编译。
+
+### 补充 8: JAX fallback JIT 兼容性 (Task 4)
+
+Plan 中 JAX fallback 函数使用 Python `if` 判断 traced JAX 值（如 `if not applicable: continue`），这将在 `@jax.jit` 编译时抛出 `ConcretizationTypeError`。执行 agent 须将所有 Python `if` 替换为 `jax.lax.cond`、`jnp.where`，或将循环体改为纯掩码式 `jnp.where(applicable, value, carry)` 模式。确保四个 fallback 函数在 `@jax.jit` 下正确编译和执行。
