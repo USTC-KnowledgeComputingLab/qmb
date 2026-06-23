@@ -31,6 +31,7 @@ from ._hamiltonian_cuda_loader import load_cuda_module  # optional: needs nvcc t
 
 logger = logging.getLogger(__name__)
 
+
 def _try_register_ffi(n_qubytes: int) -> bool:
     """Attempt to load and register CUDA FFI targets for the given n_qubytes."""
     try:
