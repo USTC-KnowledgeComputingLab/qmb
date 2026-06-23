@@ -79,9 +79,15 @@ class FermiHamiltonian:
         self._parity_mask = self._parity_mask[order]
         self._parity_const = self._parity_const[order]
         self._coef = self._coef[order]
+        # 预过滤: 分离对角 term (flip_mask == 0) 用于 compute_diagonal
+        fm_sum = jnp.sum(self._flip_mask, axis=1)
+        self._diag_idx = jnp.where(fm_sum == 0)[0]
         self._use_cuda = _try_register_ffi(self._n_qubytes)
-        logger.info("FermiHamiltonian: %d terms, %d qubits, cuda=%s",
-                     int(self._coef.shape[0]), n_qubits, self._use_cuda)
+        # 哈希表跨调用缓存: apply_within 在 configs_j 不变时复用
+        self._apply_hash_cache: tuple[int, Any] | None = None
+        logger.info("FermiHamiltonian: %d terms (%d diagonal), %d qubits, cuda=%s",
+                     int(self._coef.shape[0]), int(len(self._diag_idx)),
+                     n_qubits, self._use_cuda)
 
     @staticmethod
     def _parse_device(devices: list[str]) -> jax.Device:
