@@ -13,7 +13,7 @@ import platformdirs
 logger = logging.getLogger(__name__)
 
 _SOURCE_DIR = Path(__file__).resolve().parent
-_THIRD_PARTIES_DIR = Path(__file__).resolve().parents[4] / "third_parties"
+_THIRD_PARTIES_DIR = Path(__file__).resolve().parents[1] / "third_parties"
 
 
 def load_cuda_module(n_qubytes: int) -> ctypes.CDLL:

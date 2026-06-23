@@ -130,7 +130,7 @@ def prepare(operators, n_qubits):
 ### 3.2 `_hamiltonian_cuda.cu` — CUDA kernel
 
 **模板参数** (编译期宏):
-- `N_QUBYTES`: ceil(n_qubits/8)，同时作为静态分发键
+- `N_QUBYTES` (macro): ceil(n_qubits/8)，同时作为静态分发键
 
 **静态分发**: `N_QUBYTES` 决定内核使用哪种位运算路径。通过 `if constexpr (N_QUBYTES <= 8)` 在编译期选择:
 - **n_qubits ≤ 64** (N_QUBYTES ≤ 8): 所有掩码可装载为单个 `uint64_t` 寄存器。可作用性检查 `(config & create_mask) == 0` 是单条 AND+JZ 指令，JW 奇偶性是单条 POPCNT 指令。零循环开销。
@@ -321,7 +321,7 @@ class FermiHamiltonian:
 
 **编译 CUDA**: `nvcc` (用户机器上), `jaxlib` 的 XLA headers (`xla/ffi/api/ffi.h`)
 
-**第三方库** (git submodule, 置于 `/third_parties/`):
+**第三方库** (git submodule, 置于 `src/qmp/hamiltonian/third_parties/`):
 - `cuCollections`: GPU hash table (`cuco::static_map`), header-only, [github.com/NVIDIA/cuCollections](https://github.com/NVIDIA/cuCollections)
 - `wyhash`: 哈希函数, ~30 行 C inline 到 .cu 中, 无需编译
 

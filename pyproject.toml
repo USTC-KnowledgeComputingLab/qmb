@@ -19,7 +19,6 @@ classifiers = [
 dependencies = [
   "jax>=0.5.0",
   "jaxlib>=0.5.0",
-  "numpy>=2.4.6",
   "platformdirs>=4.10.0",
 ]
 

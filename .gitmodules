@@ -1,3 +1,6 @@
 [submodule "third_parties/cuco"]
 	path = third_parties/cuco
 	url = https://github.com/NVIDIA/cuCollections.git
+[submodule "src/qmp/hamiltonian/third_parties/cuco"]
+	path = src/qmp/hamiltonian/third_parties/cuco
+	url = https://github.com/NVIDIA/cuCollections.git
