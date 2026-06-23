@@ -100,6 +100,12 @@ def test_prepare_create_mask_h2() -> None:
     h: dict[tuple[tuple[int, int], ...], complex] = {((0, 1), (0, 0)): 0.715104 * (-1) + 0j}
     result = prepare(h, n_qubits=4)
     create_mask = result[0]
-    assert int(create_mask[0, 0]) == 0  # creation at 0 → no must-be-0 bits at first glance
-    # c_0^dag c_0: application: annihilate then create at same site → flip=0, cond[0]=1
-    assert int(create_mask[0, 0]) == 0
+    assert int(create_mask[0, 0]) == 0  # c_0^dag c_0 has no create bits
+
+
+def test_prepare_non_aligned_qubits() -> None:
+    """n_qubits=10 (not byte-aligned, Q=2). Should produce correct masks."""
+    h = {((1, 1), (0, 0)): -1.0 + 0j}
+    result = prepare(h, n_qubits=10)
+    assert result[0].shape == (1, 2)  # Q = ceil(10/8) = 2
+    assert int(result[0][0, 0]) & 2 == 2  # bit 1 in first byte
