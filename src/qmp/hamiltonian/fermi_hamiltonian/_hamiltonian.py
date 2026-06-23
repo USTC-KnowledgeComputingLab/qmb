@@ -176,7 +176,7 @@ class FermiHamiltonian:
         n_qubytes_dim = configs_i.shape[1]
         target = f"qmp_find_all_relative_configs_{self._n_qubytes}"
         if self._use_cuda:
-            return jax.ffi.ffi_call(
+            return jax.ffi.ffi_call(  # ty: ignore
                 target,
                 (
                     jax.ShapeDtypeStruct((hash_capacity, n_qubytes_dim), jnp.uint8),

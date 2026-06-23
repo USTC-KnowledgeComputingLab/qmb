@@ -42,7 +42,7 @@ def load_cuda_module(n_qubytes: int) -> ctypes.CDLL:
         try:
             import jaxlib  # noqa: PLC0415
 
-            jax_include = jaxlib.get_include_dir()
+            jax_include = jaxlib.get_include_dir()  # ty: ignore
         except ImportError:
             jax_include = os.path.join(os.path.dirname(os.path.dirname(os.__file__)), "jaxlib", "include")
             if not os.path.isdir(jax_include):

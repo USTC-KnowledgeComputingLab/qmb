@@ -269,7 +269,7 @@ def test_find_topk() -> None:
 
 def test_find_topk_max_semantics() -> None:
     """Same config from multiple terms: store max weight."""
-    h = {((1, 1), (0, 0)): -1.0 + 0j, ((2, 1), (1, 0)): -0.5 + 0j}
+    h: dict[tuple[tuple[int, int], ...], complex] = {((1, 1), (0, 0)): -1.0 + 0j, ((2, 1), (1, 0)): -0.5 + 0j}
     masks = prepare(h, n_qubits=4)
     configs = jnp.array([[0b010]], dtype=jnp.uint8)
     psi_i = jnp.ones((1, 2), dtype=jnp.float64)
