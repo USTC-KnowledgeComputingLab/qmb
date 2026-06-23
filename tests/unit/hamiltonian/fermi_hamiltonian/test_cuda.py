@@ -119,8 +119,7 @@ def test_cuda_apply_identity_configs() -> None:
                         jax_apply_within(ci, pi, ci, *m, direction=0), rtol=1e-12)
 
 def test_cuda_apply_complex_psi() -> None:
-    pytest.xfail(reason="CUDA apply_within sign bug for complex psi")
-    h = _hopping_h()
+    h = FermiHamiltonian({((1, 1), (0, 0)): 1.0 + 0.0j}, n_qubits=4, devices=["localhost:cuda:0"])
     ci = jnp.array([[1]], dtype=jnp.uint8)
     pi = jnp.array([[2.0, 3.0]], dtype=jnp.float64)
     cj = jnp.array([[2]], dtype=jnp.uint8)

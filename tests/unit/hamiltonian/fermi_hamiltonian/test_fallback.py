@@ -21,6 +21,7 @@ from qmp.hamiltonian.fermi_hamiltonian._hamiltonian_prepare import prepare
 
 # ---- helpers ----
 
+
 def _hopping_model() -> tuple[tuple, jax.Array]:
     """4-qubit hopping c_1^dag c_0 with 4 configs."""
     masks = prepare({((1, 1), (0, 0)): -1.0 + 0j}, n_qubits=4)
@@ -30,10 +31,13 @@ def _hopping_model() -> tuple[tuple, jax.Array]:
 
 def _model_with_diagonal() -> tuple[tuple, jax.Array]:
     """4-qubit: hopping + n_0 diagonal term."""
-    masks = prepare({
-        ((1, 1), (0, 0)): -1.0 + 0j,
-        ((0, 1), (0, 0)): 2.0 + 0j,
-    }, n_qubits=8)
+    masks = prepare(
+        {
+            ((1, 1), (0, 0)): -1.0 + 0j,
+            ((0, 1), (0, 0)): 2.0 + 0j,
+        },
+        n_qubits=8,
+    )
     configs = jnp.array([[0b10], [0b01], [0b11], [0b00]], dtype=jnp.uint8)
     return masks, configs
 
@@ -52,6 +56,7 @@ def _configs_4() -> jax.Array:
 
 
 # ---- diagonal_term ----
+
 
 def test_diagonal_exact() -> None:
     """Diagonal values: config with bit0=1 gets 2.0 from n_0, others 0."""
@@ -94,6 +99,7 @@ def test_diagonal_only_hamiltonian() -> None:
 
 # ---- apply_within_subspace ----
 
+
 def test_apply_within_forward_backward() -> None:
     """Forward and backward should produce non-trivial consistent results."""
     masks, configs = _hopping_model()
@@ -113,6 +119,7 @@ def test_apply_within_numerical_hopping() -> None:
     cj = jnp.array([[2]], dtype=jnp.uint8)  # site 1 occupied
     pj = apply_within_subspace(ci, pi, cj, *masks, direction=0)
     assert abs(float(pj[0, 0]) - (-1.0)) < 1e-10  # coefficient -1, JW sign +
+
 
 def test_apply_within_hermitian() -> None:
     """H|10⟩ = -|01⟩."""
@@ -210,6 +217,7 @@ def test_apply_within_complex_coef() -> None:
 
 # ---- find_all_relative_configs ----
 
+
 def test_find_all_dedup() -> None:
     """find_all should return at least 1 new config from hopping."""
     masks, configs = _hopping_model()
@@ -248,6 +256,7 @@ def test_find_all_single_config_input() -> None:
 
 
 # ---- find_topk_relative_configs ----
+
 
 def test_find_topk() -> None:
     """find_topk should return K configs."""
