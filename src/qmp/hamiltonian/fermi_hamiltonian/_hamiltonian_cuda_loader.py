@@ -39,7 +39,7 @@ def load_cuda_module(n_qubytes: int) -> ctypes.CDLL:
 
     if not so_path.exists():
         cache_dir.mkdir(parents=True, exist_ok=True)
-        jax_include = jaxlib.get_include_dir()  # ty: ignore[unresolved-attribute] — jaxlib stubs do not declare get_include_dir
+        jax_include = str(Path(jaxlib.__file__).parent / "include")
 
         source = _SOURCE_DIR / "_hamiltonian_cuda.cu"
         include_cuco = _THIRD_PARTIES_DIR / "cuco" / "include"
