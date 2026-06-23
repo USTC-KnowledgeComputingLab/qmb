@@ -17,8 +17,7 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
-  "jax>=0.5.0",
-  "jaxlib>=0.5.0",
+  "jax[cuda12]>=0.5.0",
   "platformdirs>=4.10.0",
 ]
 
