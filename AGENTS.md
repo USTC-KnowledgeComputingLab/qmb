@@ -62,6 +62,14 @@ old/                     # 旧 main 分支参考代码 (如存在)
 
 输出通过返回值传递，不通过可变引用参数。`const` 输入 + 纯输出 = 更安全、更易测试。
 
+### 零抑制原则
+
+不堆 `# noqa`，不堆 `# ty: ignore`。代码本身应符合 lint 和类型检查规则。仅在以下情况允许 suppress：
+- 第三方库无类型 stubs（如 `jaxlib.get_include_dir`）
+- try/except 中的延迟 import（可选依赖）
+
+每条 suppress 必须附带注释说明理由。
+
 ### 性能选择需有可解释的理由
 
 不是"这样更快"，而是"这样更快，因为..."。关键设计决策必须记录原因（参考 `src/qmp/hamiltonian/AGENTS.md` 中的性能说明）。
