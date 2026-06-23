@@ -1,0 +1,3 @@
+[submodule "third_parties/cuco"]
+	path = third_parties/cuco
+	url = https://github.com/NVIDIA/cuCollections.git
