@@ -6,6 +6,8 @@
 
 **Architecture:** Pure Python `prepare` → 位掩码 JAX arrays → `FermiHamiltonian` 类路由 (CUDA FFI or JAX fallback) → 四个操作。CUDA kernel 通过 nvcc JIT 编译，`XLA_FFI_DEFINE_HANDLER_SYMBOL` 导出，`jax.ffi` 注册。
 
+> **伪代码命名**: Plan 中的 `B`/`T`/`Q`/`K` 等单字母符号仅作伪代码示意。实现代码必须使用 `batch_size`/`term_count`/`n_qubytes`/`count_selected`。见 AGENTS.md。
+
 **Tech Stack:** jax, jaxlib, cuCollections, CUB, nvcc, pytest, wyhash
 
 ---

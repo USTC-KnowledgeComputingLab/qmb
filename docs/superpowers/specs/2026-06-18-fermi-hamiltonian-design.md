@@ -64,6 +64,8 @@ tests/
 
 T = 有效 term 数量, Q = ceil(n_qubits/8)。
 
+> **伪代码命名**: 本文使用 `B`/`T`/`Q`/`K` 等单字母大写符号仅作伪代码示意。实际代码中必须使用描述性名称: `batch_size`/`term_count`/`n_qubytes`/`count_selected`。见 AGENTS.md 命名约定。
+
 **算法**（伪码级别）:
 
 ```python
