@@ -63,10 +63,10 @@ def prepare(
         parity_const_list.append(pc)
         coef_list.append((coef_val.real, coef_val.imag))
 
-    T = len(create_mask_list)
+    term_count = len(create_mask_list)
 
     def _to_array(values: list[int]) -> Array:
-        arr = jnp.zeros((T, n_qubytes), dtype=jnp.uint8)
+        arr = jnp.zeros((term_count, n_qubytes), dtype=jnp.uint8)
         for t, val in enumerate(values):
             for q in range(n_qubytes):
                 arr = arr.at[t, q].set(jnp.uint8((val >> (q * 8)) & 0xFF))

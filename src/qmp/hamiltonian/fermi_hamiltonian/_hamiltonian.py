@@ -109,12 +109,12 @@ class FermiHamiltonian:
         raise ValueError(f"Invalid device: {device_str}")
 
     def compute_diagonal_within_subspace(self, configs: jax.Array) -> jax.Array:
-        B = configs.shape[0]
+        batch_size = configs.shape[0]
         target = f"qmp_compute_diagonal_within_subspace_{self._n_qubytes}"
         if self._use_cuda:
             return jax.ffi.ffi_call(
                 target,
-                jax.ShapeDtypeStruct((B, 2), jnp.float64),
+                jax.ShapeDtypeStruct((batch_size, 2), jnp.float64),
                 vmap_method="broadcast_all",
             )(
                 self._to_dev(configs),
@@ -143,7 +143,7 @@ class FermiHamiltonian:
         *,
         direction: int = 0,
     ) -> jax.Array:
-        B_j = configs_j.shape[0]
+        batch_size_j = configs_j.shape[0]
         target = f"qmp_apply_within_subspace_{self._n_qubytes}"
         inputs = (
             self._to_dev(configs_i),
@@ -160,7 +160,7 @@ class FermiHamiltonian:
         if self._use_cuda:
             return jax.ffi.ffi_call(
                 target,
-                jax.ShapeDtypeStruct((B_j, 2), jnp.float64),
+                jax.ShapeDtypeStruct((batch_size_j, 2), jnp.float64),
                 vmap_method="broadcast_all",
             )(*inputs)
         return _jax_apply_within_subspace(*inputs)
@@ -173,13 +173,13 @@ class FermiHamiltonian:
         *,
         hash_capacity: int,
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
-        Q = configs_i.shape[1]
+        n_qubytes_dim = configs_i.shape[1]
         target = f"qmp_find_all_relative_configs_{self._n_qubytes}"
         if self._use_cuda:
             return jax.ffi.ffi_call(
                 target,
                 (
-                    jax.ShapeDtypeStruct((hash_capacity, Q), jnp.uint8),
+                    jax.ShapeDtypeStruct((hash_capacity, n_qubytes_dim), jnp.uint8),
                     jax.ShapeDtypeStruct((hash_capacity, 2), jnp.float64),
                     jax.ShapeDtypeStruct((), jnp.int32),
                 ),
@@ -216,12 +216,12 @@ class FermiHamiltonian:
         count_selected: int,
         configs_exclude: jax.Array,
     ) -> jax.Array:
-        Q = configs_i.shape[1]
+        n_qubytes_dim = configs_i.shape[1]
         target = f"qmp_find_topk_relative_configs_{self._n_qubytes}"
         if self._use_cuda:
             return jax.ffi.ffi_call(
                 target,
-                jax.ShapeDtypeStruct((count_selected, Q), jnp.uint8),
+                jax.ShapeDtypeStruct((count_selected, n_qubytes_dim), jnp.uint8),
                 vmap_method="broadcast_all",
             )(
                 self._to_dev(configs_i),

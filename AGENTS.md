@@ -40,6 +40,7 @@ old/                     # 旧 main 分支参考代码 (如存在)
 - `X | None` 而非 `Optional[X]`
 - `list[X]` 而非 `List[X]`
 - 禁止 `from typing import Any` 后使用 raw `Any`——始终 `typing.Any`
+- 局部变量使用描述性全小写名称 (`batch_size`, `term_count`, `count_selected`, `n_qubytes`)，禁止单字母大写变量名 (`B`, `T`, `Q`, `K` 等)
 
 ## 字符串与格式约定
 
