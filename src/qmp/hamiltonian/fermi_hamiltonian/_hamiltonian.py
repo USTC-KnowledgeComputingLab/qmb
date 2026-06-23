@@ -26,14 +26,14 @@ from ._hamiltonian_prepare import prepare
 if TYPE_CHECKING:
     pass
 
-logger = logging.getLogger(__name__)
 
+from ._hamiltonian_cuda_loader import load_cuda_module  # optional: needs nvcc to compile .so
+
+logger = logging.getLogger(__name__)
 
 def _try_register_ffi(n_qubytes: int) -> bool:
     """Attempt to load and register CUDA FFI targets for the given n_qubytes."""
     try:
-        from ._hamiltonian_cuda_loader import load_cuda_module  # noqa: PLC0415
-
         lib = load_cuda_module(n_qubytes=n_qubytes)
         targets = {
             f"qmp_compute_diagonal_within_subspace_{n_qubytes}": "ComputeDiagonalWithinSubspace",
@@ -176,7 +176,7 @@ class FermiHamiltonian:
         n_qubytes_dim = configs_i.shape[1]
         target = f"qmp_find_all_relative_configs_{self._n_qubytes}"
         if self._use_cuda:
-            return jax.ffi.ffi_call(  # ty: ignore
+            return jax.ffi.ffi_call(  # ty: ignore[invalid-return-type] — ffi_call returns Sequence[Array], actual is tuple
                 target,
                 (
                     jax.ShapeDtypeStruct((hash_capacity, n_qubytes_dim), jnp.uint8),

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import ctypes
 import logging
-import os
 import subprocess
 from pathlib import Path
 
+import jaxlib
 import platformdirs
 
 logger = logging.getLogger(__name__)
@@ -39,14 +39,7 @@ def load_cuda_module(n_qubytes: int) -> ctypes.CDLL:
 
     if not so_path.exists():
         cache_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            import jaxlib  # noqa: PLC0415
-
-            jax_include = jaxlib.get_include_dir()  # ty: ignore
-        except ImportError:
-            jax_include = os.path.join(os.path.dirname(os.path.dirname(os.__file__)), "jaxlib", "include")
-            if not os.path.isdir(jax_include):
-                raise RuntimeError("jaxlib include directory not found. Is jaxlib installed?") from None
+        jax_include = jaxlib.get_include_dir()  # ty: ignore[unresolved-attribute] — jaxlib stubs do not declare get_include_dir
 
         source = _SOURCE_DIR / "_hamiltonian_cuda.cu"
         include_cuco = _THIRD_PARTIES_DIR / "cuco" / "include"
