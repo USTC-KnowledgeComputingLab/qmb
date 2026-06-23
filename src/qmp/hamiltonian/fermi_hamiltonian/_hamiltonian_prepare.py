@@ -22,7 +22,7 @@ def prepare(
         Keys are tuples of (site_index, kind) where kind=1 for creation,
         kind=0 for annihilation. Values are complex coefficients.
     n_qubits : int
-        Number of qubits (orbitals × 2 for fermions).
+        Number of qubits (orbitals * 2 for fermions).
 
     Returns
     -------
@@ -77,16 +77,13 @@ def prepare(
     flip_mask = _to_array(flip_mask_list)
     parity_mask = _to_array(parity_mask_list)
     parity_const = jnp.array(parity_const_list, dtype=jnp.uint8)
-    reals, imags = zip(*coef_list) if coef_list else ([], [])
-    coef = jnp.stack([jnp.array(reals, dtype=jnp.float64),
-                       jnp.array(imags, dtype=jnp.float64)], axis=1)
+    reals, imags = zip(*coef_list, strict=True) if coef_list else ([], [])
+    coef = jnp.stack([jnp.array(reals, dtype=jnp.float64), jnp.array(imags, dtype=jnp.float64)], axis=1)
 
     return create_mask, annihilate_mask, flip_mask, parity_mask, parity_const, coef
 
 
-def _process_term(
-    ops: list[tuple[int, bool]], n_qubits: int
-) -> tuple[int, int, int, int, int] | None:
+def _process_term(ops: list[tuple[int, bool]], n_qubits: int) -> tuple[int, int, int, int, int] | None:
     """Process one term's operator sequence.
 
     Application order = reverse of writing order.
@@ -113,7 +110,7 @@ def _process_term(
         known_mask = 0
         for i in range(n_qubits):
             if known[i]:
-                known_mask |= (1 << i)
+                known_mask |= 1 << i
         unknown_mask = lo & ~known_mask
         contrib = 0
         for i in range(s):
@@ -122,14 +119,14 @@ def _process_term(
         p_const ^= contrib & 1
         p_mask ^= unknown_mask
 
-        flip ^= (1 << s)
+        flip ^= 1 << s
 
     create_mask = 0
     annihilate_mask = 0
     for i in range(n_qubits):
         if known[i] and initial[i] == 0:
-            create_mask |= (1 << i)
+            create_mask |= 1 << i
         if known[i] and initial[i] == 1:
-            annihilate_mask |= (1 << i)
+            annihilate_mask |= 1 << i
 
     return (create_mask, annihilate_mask, int(flip), int(p_mask), p_const)

@@ -40,27 +40,30 @@ def load_cuda_module(n_qubytes: int) -> ctypes.CDLL:
     if not so_path.exists():
         cache_dir.mkdir(parents=True, exist_ok=True)
         try:
-            import jaxlib
+            import jaxlib  # noqa: PLC0415
+
             jax_include = jaxlib.get_include_dir()
         except ImportError:
-            jax_include = os.path.join(
-                os.path.dirname(os.path.dirname(os.__file__)),
-                "jaxlib", "include")
+            jax_include = os.path.join(os.path.dirname(os.path.dirname(os.__file__)), "jaxlib", "include")
             if not os.path.isdir(jax_include):
-                raise RuntimeError(
-                    "jaxlib include directory not found. Is jaxlib installed?"
-                ) from None
+                raise RuntimeError("jaxlib include directory not found. Is jaxlib installed?") from None
 
         source = _SOURCE_DIR / "_hamiltonian_cuda.cu"
         include_cuco = _THIRD_PARTIES_DIR / "cuco" / "include"
         cmd = [
-            "nvcc", "-shared", "-Xcompiler", "-fPIC",
+            "nvcc",
+            "-shared",
+            "-Xcompiler",
+            "-fPIC",
             f"-I{jax_include}",
             f"-I{include_cuco}",
             f"-DN_QUBYTES={n_qubytes}",
-            "-std=c++20", "-O3", "--use_fast_math",
+            "-std=c++20",
+            "-O3",
+            "--use_fast_math",
             "-arch=native",
-            "-o", str(so_path),
+            "-o",
+            str(so_path),
             str(source),
         ]
         logger.info("Compiling CUDA kernel: %s", " ".join(cmd))

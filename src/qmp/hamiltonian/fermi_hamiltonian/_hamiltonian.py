@@ -24,7 +24,7 @@ from ._hamiltonian_jax import (
 from ._hamiltonian_prepare import prepare
 
 if TYPE_CHECKING:
-    from jax import Array
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 def _try_register_ffi(n_qubytes: int) -> bool:
     """Attempt to load and register CUDA FFI targets for the given n_qubytes."""
     try:
-        from ._hamiltonian_cuda_loader import load_cuda_module
+        from ._hamiltonian_cuda_loader import load_cuda_module  # noqa: PLC0415
 
         lib = load_cuda_module(n_qubytes=n_qubytes)
         targets = {
@@ -68,11 +68,15 @@ class FermiHamiltonian:
         self._n_qubytes = (n_qubits + 7) // 8
         self._device = self._parse_device(devices)
         arrays = prepare(hamiltonian, n_qubits)
-        (self._create_mask, self._annihilate_mask, self._flip_mask,
-         self._parity_mask, self._parity_const, self._coef) = arrays
-        order = jnp.argsort(
-            self._coef[:, 0] ** 2 + self._coef[:, 1] ** 2
-        )[::-1]
+        (
+            self._create_mask,
+            self._annihilate_mask,
+            self._flip_mask,
+            self._parity_mask,
+            self._parity_const,
+            self._coef,
+        ) = arrays
+        order = jnp.argsort(self._coef[:, 0] ** 2 + self._coef[:, 1] ** 2)[::-1]
         self._create_mask = self._create_mask[order]
         self._annihilate_mask = self._annihilate_mask[order]
         self._flip_mask = self._flip_mask[order]
@@ -85,9 +89,13 @@ class FermiHamiltonian:
         self._use_cuda = _try_register_ffi(self._n_qubytes)
         # 哈希表跨调用缓存: apply_within 在 configs_j 不变时复用
         self._apply_hash_cache: tuple[int, Any] | None = None
-        logger.info("FermiHamiltonian: %d terms (%d diagonal), %d qubits, cuda=%s",
-                     int(self._coef.shape[0]), int(len(self._diag_idx)),
-                     n_qubits, self._use_cuda)
+        logger.info(
+            "FermiHamiltonian: %d terms (%d diagonal), %d qubits, cuda=%s",
+            int(self._coef.shape[0]),
+            len(self._diag_idx),
+            n_qubits,
+            self._use_cuda,
+        )
 
     @staticmethod
     def _parse_device(devices: list[str]) -> jax.Device:
@@ -108,31 +116,47 @@ class FermiHamiltonian:
                 target,
                 jax.ShapeDtypeStruct((B, 2), jnp.float64),
                 vmap_method="broadcast_all",
-            )(self._to_dev(configs),
-              self._to_dev(self._create_mask),
-              self._to_dev(self._annihilate_mask),
-              self._to_dev(self._flip_mask),
-              self._to_dev(self._parity_mask),
-              self._to_dev(self._parity_const),
-              self._to_dev(self._coef))
+            )(
+                self._to_dev(configs),
+                self._to_dev(self._create_mask),
+                self._to_dev(self._annihilate_mask),
+                self._to_dev(self._flip_mask),
+                self._to_dev(self._parity_mask),
+                self._to_dev(self._parity_const),
+                self._to_dev(self._coef),
+            )
         return _jax_compute_diagonal_within_subspace(
-            self._to_dev(configs), self._to_dev(self._create_mask),
-            self._to_dev(self._annihilate_mask), self._to_dev(self._flip_mask),
-            self._to_dev(self._parity_mask), self._to_dev(self._parity_const),
-            self._to_dev(self._coef))
+            self._to_dev(configs),
+            self._to_dev(self._create_mask),
+            self._to_dev(self._annihilate_mask),
+            self._to_dev(self._flip_mask),
+            self._to_dev(self._parity_mask),
+            self._to_dev(self._parity_const),
+            self._to_dev(self._coef),
+        )
 
     def apply_within_subspace(
-        self, configs_i: jax.Array, psi_i: jax.Array,
-        configs_j: jax.Array, *, direction: int = 0,
+        self,
+        configs_i: jax.Array,
+        psi_i: jax.Array,
+        configs_j: jax.Array,
+        *,
+        direction: int = 0,
     ) -> jax.Array:
         B_j = configs_j.shape[0]
         target = f"qmp_apply_within_subspace_{self._n_qubytes}"
-        inputs = (self._to_dev(configs_i), self._to_dev(psi_i),
-                  self._to_dev(configs_j),
-                  self._to_dev(self._create_mask), self._to_dev(self._annihilate_mask),
-                  self._to_dev(self._flip_mask), self._to_dev(self._parity_mask),
-                  self._to_dev(self._parity_const), self._to_dev(self._coef),
-                  direction)
+        inputs = (
+            self._to_dev(configs_i),
+            self._to_dev(psi_i),
+            self._to_dev(configs_j),
+            self._to_dev(self._create_mask),
+            self._to_dev(self._annihilate_mask),
+            self._to_dev(self._flip_mask),
+            self._to_dev(self._parity_mask),
+            self._to_dev(self._parity_const),
+            self._to_dev(self._coef),
+            direction,
+        )
         if self._use_cuda:
             return jax.ffi.ffi_call(
                 target,
@@ -142,35 +166,55 @@ class FermiHamiltonian:
         return _jax_apply_within_subspace(*inputs)
 
     def find_all_relative_configs(
-        self, configs_i: jax.Array, psi_i: jax.Array,
-        configs_exclude: jax.Array, *, hash_capacity: int,
+        self,
+        configs_i: jax.Array,
+        psi_i: jax.Array,
+        configs_exclude: jax.Array,
+        *,
+        hash_capacity: int,
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
         Q = configs_i.shape[1]
         target = f"qmp_find_all_relative_configs_{self._n_qubytes}"
         if self._use_cuda:
             return jax.ffi.ffi_call(
                 target,
-                (jax.ShapeDtypeStruct((hash_capacity, Q), jnp.uint8),
-                 jax.ShapeDtypeStruct((hash_capacity, 2), jnp.float64),
-                 jax.ShapeDtypeStruct((), jnp.int32)),
+                (
+                    jax.ShapeDtypeStruct((hash_capacity, Q), jnp.uint8),
+                    jax.ShapeDtypeStruct((hash_capacity, 2), jnp.float64),
+                    jax.ShapeDtypeStruct((), jnp.int32),
+                ),
                 vmap_method="broadcast_all",
-            )(self._to_dev(configs_i), self._to_dev(psi_i),
-              self._to_dev(configs_exclude),
-              self._to_dev(self._create_mask), self._to_dev(self._annihilate_mask),
-              self._to_dev(self._flip_mask), self._to_dev(self._parity_mask),
-              self._to_dev(self._parity_const), self._to_dev(self._coef),
-              hash_capacity)
+            )(
+                self._to_dev(configs_i),
+                self._to_dev(psi_i),
+                self._to_dev(configs_exclude),
+                self._to_dev(self._create_mask),
+                self._to_dev(self._annihilate_mask),
+                self._to_dev(self._flip_mask),
+                self._to_dev(self._parity_mask),
+                self._to_dev(self._parity_const),
+                self._to_dev(self._coef),
+                hash_capacity,
+            )
         return _jax_find_all_relative_configs(
-            self._to_dev(configs_i), self._to_dev(psi_i),
+            self._to_dev(configs_i),
+            self._to_dev(psi_i),
             self._to_dev(configs_exclude),
-            self._to_dev(self._create_mask), self._to_dev(self._annihilate_mask),
-            self._to_dev(self._flip_mask), self._to_dev(self._parity_mask),
-            self._to_dev(self._parity_const), self._to_dev(self._coef),
-            hash_capacity)
+            self._to_dev(self._create_mask),
+            self._to_dev(self._annihilate_mask),
+            self._to_dev(self._flip_mask),
+            self._to_dev(self._parity_mask),
+            self._to_dev(self._parity_const),
+            self._to_dev(self._coef),
+            hash_capacity,
+        )
 
     def find_topk_relative_configs(
-        self, configs_i: jax.Array, psi_i: jax.Array,
-        count_selected: int, configs_exclude: jax.Array,
+        self,
+        configs_i: jax.Array,
+        psi_i: jax.Array,
+        count_selected: int,
+        configs_exclude: jax.Array,
     ) -> jax.Array:
         Q = configs_i.shape[1]
         target = f"qmp_find_topk_relative_configs_{self._n_qubytes}"
@@ -179,15 +223,27 @@ class FermiHamiltonian:
                 target,
                 jax.ShapeDtypeStruct((count_selected, Q), jnp.uint8),
                 vmap_method="broadcast_all",
-            )(self._to_dev(configs_i), self._to_dev(psi_i),
-              count_selected,
-              self._to_dev(configs_exclude),
-              self._to_dev(self._create_mask), self._to_dev(self._annihilate_mask),
-              self._to_dev(self._flip_mask), self._to_dev(self._parity_mask),
-              self._to_dev(self._parity_const), self._to_dev(self._coef))
+            )(
+                self._to_dev(configs_i),
+                self._to_dev(psi_i),
+                count_selected,
+                self._to_dev(configs_exclude),
+                self._to_dev(self._create_mask),
+                self._to_dev(self._annihilate_mask),
+                self._to_dev(self._flip_mask),
+                self._to_dev(self._parity_mask),
+                self._to_dev(self._parity_const),
+                self._to_dev(self._coef),
+            )
         return _jax_find_topk_relative_configs(
-            self._to_dev(configs_i), self._to_dev(psi_i),
-            count_selected, self._to_dev(configs_exclude),
-            self._to_dev(self._create_mask), self._to_dev(self._annihilate_mask),
-            self._to_dev(self._flip_mask), self._to_dev(self._parity_mask),
-            self._to_dev(self._parity_const), self._to_dev(self._coef))
+            self._to_dev(configs_i),
+            self._to_dev(psi_i),
+            count_selected,
+            self._to_dev(configs_exclude),
+            self._to_dev(self._create_mask),
+            self._to_dev(self._annihilate_mask),
+            self._to_dev(self._flip_mask),
+            self._to_dev(self._parity_mask),
+            self._to_dev(self._parity_const),
+            self._to_dev(self._coef),
+        )

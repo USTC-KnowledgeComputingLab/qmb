@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import jax.numpy as jnp
 from qmp.hamiltonian.fermi_hamiltonian._hamiltonian_prepare import prepare
 
 
@@ -32,13 +31,13 @@ def test_prepare_number_operator() -> None:
     """c_0^dag c_0 = n_0: annihilate_mask={0}, flip_mask=0, parity_mask=0."""
     h = {((0, 1), (0, 0)): 1.0 + 0j}  # create at 0, annihilate at 0
     result = prepare(h, n_qubits=8)
-    create_mask, annihilate_mask, flip_mask, parity_mask, parity_const, coef = result
+    _cm, _am, _fm, _pm, _pc, _coef = result
     assert int(result[0].shape[0]) == 1
-    assert int(annihilate_mask[0, 0]) == 1
-    assert int(create_mask[0, 0]) == 0
-    assert int(flip_mask[0, 0]) == 0
-    assert int(parity_mask[0, 0]) == 0
-    assert int(parity_const[0]) == 0
+    assert int(_am[0, 0]) == 1
+    assert int(_cm[0, 0]) == 0
+    assert int(_fm[0, 0]) == 0
+    assert int(_pm[0, 0]) == 0
+    assert int(_pc[0]) == 0
 
 
 def test_prepare_conflict_zero() -> None:
@@ -57,20 +56,20 @@ def test_prepare_hubbard_2site_masks() -> None:
     """c_1^dag c_0: create_mask={1}, annihilate_mask={0}, flip_mask={0,1}."""
     h = _make_simple_hubbard_2site()
     result = prepare(h, n_qubits=4)
-    create_mask, annihilate_mask, flip_mask, parity_mask, parity_const, coef = result
+    _cm, _am, _fm, _pm, _pc, _coef = result
     assert int(result[0].shape[0]) == 1
-    assert int(create_mask[0, 0]) & 2 == 2  # bit 1 set
-    assert int(annihilate_mask[0, 0]) & 1 == 1  # bit 0 set
-    assert (int(flip_mask[0, 0]) & 3) == 3  # both bits set
+    assert int(_cm[0, 0]) & 2 == 2  # bit 1 set
+    assert int(_am[0, 0]) & 1 == 1  # bit 0 set
+    assert (int(_fm[0, 0]) & 3) == 3  # both bits set
 
 
 def test_prepare_coef_preserved() -> None:
     """Coefficients should be preserved through prepare."""
     h = {((0, 1), (0, 0)): 3.5 - 2.0j}
     result = prepare(h, n_qubits=4)
-    coef = result[5]
-    assert abs(float(coef[0, 0]) - 3.5) < 1e-10
-    assert abs(float(coef[0, 1]) - (-2.0)) < 1e-10
+    _coef = result[5]
+    assert abs(float(_coef[0, 0]) - 3.5) < 1e-10
+    assert abs(float(_coef[0, 1]) - (-2.0)) < 1e-10
 
 
 def test_prepare_four_op_term() -> None:
@@ -78,10 +77,10 @@ def test_prepare_four_op_term() -> None:
     ops = ((3, 1), (1, 1), (5, 0), (7, 0))
     h = {ops: 1.0 + 0j}
     result = prepare(h, n_qubits=8)
-    create_mask, annihilate_mask, flip_mask, parity_mask, parity_const, coef = result
+    _cm, _am, _fm, _pm, _pc, _coef = result
     assert int(result[0].shape[0]) == 1
-    cm = int(create_mask[0, 0])
-    am = int(annihilate_mask[0, 0])
+    cm = int(_cm[0, 0])
+    am = int(_am[0, 0])
     assert cm == 10  # bits 1,3
     assert am == 160  # bits 5,7
 
@@ -90,17 +89,16 @@ def test_prepare_parity_mask_jw() -> None:
     """c_2^dag c_0 on 4 qubits: JW parity should depend on qubit 1."""
     h = {((2, 1), (0, 0)): 1.0 + 0j}  # create at 2, annihilate at 0
     result = prepare(h, n_qubits=4)
-    parity_mask = result[3]
-    parity_const = result[4]
-    assert int(parity_mask[0, 0]) == 2  # bit 1 set (parity depends on qubit 1)
+    _pm = result[3]
+    assert int(_pm[0, 0]) == 2  # bit 1 set (parity depends on qubit 1)
 
 
 def test_prepare_create_mask_h2() -> None:
     """H2 Hamiltonian: verify create_mask for c_0^dag c_0 term."""
     h: dict[tuple[tuple[int, int], ...], complex] = {((0, 1), (0, 0)): 0.715104 * (-1) + 0j}
     result = prepare(h, n_qubits=4)
-    create_mask = result[0]
-    assert int(create_mask[0, 0]) == 0  # c_0^dag c_0 has no create bits
+    _cm = result[0]
+    assert int(_cm[0, 0]) == 0  # c_0^dag c_0 has no create bits
 
 
 def test_prepare_non_aligned_qubits() -> None:

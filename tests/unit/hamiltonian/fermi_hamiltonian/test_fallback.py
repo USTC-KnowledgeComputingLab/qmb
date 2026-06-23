@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+
 from qmp.hamiltonian.fermi_hamiltonian._hamiltonian_jax import (
     apply_within_subspace,
     compute_diagonal_within_subspace,
@@ -17,12 +18,15 @@ def _small_hamiltonian_and_configs() -> tuple[tuple, jax.Array]:
     """4-qubit hopping model + 4 configs."""
     h = {((1, 1), (0, 0)): -1.0 + 0j}
     masks = prepare(h, n_qubits=4)
-    configs = jnp.array([
-        [0b00000010],
-        [0b00000001],
-        [0b00000011],
-        [0b00000000],
-    ], dtype=jnp.uint8)
+    configs = jnp.array(
+        [
+            [0b00000010],
+            [0b00000001],
+            [0b00000011],
+            [0b00000000],
+        ],
+        dtype=jnp.uint8,
+    )
     return masks, configs
 
 
@@ -33,12 +37,15 @@ def _h_with_diagonal() -> tuple[tuple, jax.Array]:
         ((0, 1), (0, 0)): 2.0 + 0j,  # n_0 operator (diagonal)
     }
     masks = prepare(h, n_qubits=8)
-    configs = jnp.array([
-        [0b00000010],
-        [0b00000001],
-        [0b00000011],
-        [0b00000000],
-    ], dtype=jnp.uint8)
+    configs = jnp.array(
+        [
+            [0b00000010],
+            [0b00000001],
+            [0b00000011],
+            [0b00000000],
+        ],
+        dtype=jnp.uint8,
+    )
     return masks, configs
 
 
@@ -73,8 +80,7 @@ def test_find_all_dedup() -> None:
     masks, configs = _small_hamiltonian_and_configs()
     psi_i = jnp.ones((4, 2), dtype=jnp.float64)
     exclude = jnp.zeros((0, 1), dtype=jnp.uint8)
-    new_c, new_p, cnt = find_all_relative_configs(
-        configs, psi_i, exclude, *masks, hash_capacity=100)
+    _new_c, _new_p, cnt = find_all_relative_configs(configs, psi_i, exclude, *masks, hash_capacity=100)
     assert int(cnt) >= 0
     # with a hopping term, should produce some new configs
     assert int(cnt) > 0

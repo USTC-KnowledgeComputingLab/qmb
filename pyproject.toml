@@ -56,6 +56,12 @@ select = ["E", "F", "I", "W", "UP", "SIM", "C4", "B", "RUF", "N", "T20", "PLC"]
 [tool.ruff.lint.isort]
 known-first-party = ["qmp"]
 
+[tool.ruff.lint.pep8-naming]
+extend-ignore-names = ["B", "T", "Q", "K", "B_j", "B_src", "B_dst"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/qmp/hamiltonian/third_parties/**" = ["ALL"]
+
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"

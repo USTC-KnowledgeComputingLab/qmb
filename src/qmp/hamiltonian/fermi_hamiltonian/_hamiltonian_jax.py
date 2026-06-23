@@ -70,7 +70,6 @@ def compute_diagonal_within_subspace(
     return psi
 
 
-@jax.jit
 def apply_within_subspace(
     configs_i: Array,
     psi_i: Array,
@@ -140,7 +139,6 @@ def apply_within_subspace(
     return psi_j
 
 
-@jax.jit
 def find_all_relative_configs(
     configs_i: Array,
     psi_i: Array,
@@ -216,7 +214,6 @@ def find_all_relative_configs(
     return keys, vals, count
 
 
-@jax.jit
 def find_topk_relative_configs(
     configs_i: Array,
     psi_i: Array,
