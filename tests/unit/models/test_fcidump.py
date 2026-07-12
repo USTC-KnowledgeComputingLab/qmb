@@ -294,3 +294,18 @@ def test_fcidump_config_fields_passed_to_network(tmp_path) -> None:
     )
     assert isinstance(network, TransformersWaveFunctionElectron)
     assert network.embedding_dim == 16
+
+
+def test_fcidump_create_network_dispatch(tmp_path) -> None:
+    """create_network on this model file dispatches by name and builds a network."""
+    model = Model(ModelConfig(model_path=_write_fcidump(tmp_path)))
+    network = model.create_network("mlp/u1", {"hidden_size": [8]}, rngs=nnx.Rngs(0))
+    psi = network(_all_configs(model.n_qubits))
+    assert jnp.allclose(jnp.sum(jnp.abs(psi) ** 2), 1.0)
+
+
+def test_fcidump_create_network_unknown_name(tmp_path) -> None:
+    """create_network with an unregistered name raises KeyError."""
+    model = Model(ModelConfig(model_path=_write_fcidump(tmp_path)))
+    with pytest.raises(KeyError):
+        model.create_network("does-not-exist", {}, rngs=nnx.Rngs(0))

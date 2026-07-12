@@ -208,3 +208,18 @@ def test_openfermion_network_prng_determinism(h2_molecule_file: str) -> None:
     second = MlpElectronConfig(hidden_size=[8]).create(model, rngs=nnx.Rngs(5))
     configs = _all_configs(model.n_qubits)
     assert jnp.allclose(first(configs), second(configs))
+
+
+def test_openfermion_create_network_dispatch(h2_molecule_file: str) -> None:
+    """create_network on this model file dispatches by name and builds a network."""
+    model = Model(ModelConfig(model_path=h2_molecule_file))
+    network = model.create_network("mlp/u1", {"hidden_size": [8]}, rngs=nnx.Rngs(0))
+    psi = network(_all_configs(model.n_qubits))
+    assert jnp.allclose(jnp.sum(jnp.abs(psi) ** 2), 1.0)
+
+
+def test_openfermion_create_network_unknown_name(h2_molecule_file: str) -> None:
+    """create_network with an unregistered name raises KeyError."""
+    model = Model(ModelConfig(model_path=h2_molecule_file))
+    with pytest.raises(KeyError):
+        model.create_network("does-not-exist", {}, rngs=nnx.Rngs(0))
