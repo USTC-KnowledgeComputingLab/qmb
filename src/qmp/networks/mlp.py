@@ -15,6 +15,7 @@ stored internally as integer state indices ``[batch_size, sites]`` in the range
 
 from __future__ import annotations
 
+import functools
 from typing import TYPE_CHECKING
 
 import jax
@@ -187,13 +188,19 @@ class _MLPWaveFunctionBase(nnx.Module):
     def _ordering_reversed_array(self) -> Array:
         return jnp.asarray(self._ordering_reversed, dtype=jnp.int32)
 
+    @functools.partial(nnx.jit, static_argnums=(2,))
     def _conditional_log_amplitude(self, prefix_values: Array, site_index: int) -> Array:
-        """Normalised conditional log-amplitude ``[batch, states_per_site]`` at ``site_index``."""
+        """Normalised conditional log-amplitude ``[batch, states_per_site]`` at ``site_index``.
+
+        JIT-compiled per ``site_index`` (static): the amplitude MLP for each site differs,
+        so each site compiles once and is cached across generate / generate_unique steps.
+        """
         features = self._site_values_to_features(prefix_values)
         raw = self.amplitude[site_index](features)
         masked = apply_mask(raw, self._local_mask(prefix_values, site_index))
         return normalize_log_amplitude(masked, axis=-1)
 
+    @nnx.jit
     def __call__(self, configs: Array) -> Array:
         site_values = self._config_to_site_values(configs)
         batch_size = site_values.shape[0]

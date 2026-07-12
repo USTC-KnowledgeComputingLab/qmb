@@ -47,7 +47,12 @@ Networks 子系统提供**变分波函数 ansatz**（神经量子态，NQS）。
 
 sites 数在构造时静态已知，生成循环逐 site 展开。各步形状虽不同但都是具体常量。这也是 MLP 变体唯一可行方式（每 site 是独立模块，输入维度随 i 增长，无法 scan）。
 
-注意可 jit 性：`__call__`（估值）可以 jit。但 `generate` / `generate_unique` 末尾用 `jnp.unique` / 布尔过滤产生**动态形状**，因此**整体不可 jit**，按 eager 执行——unrolled 循环只是让每步以具体形状运行，并非把整个函数塞进一次 jit。
+### JIT 边界
+
+- `__call__`（估值）用 `@nnx.jit` 修饰：整段静态形状，直接调用与 `generate*` 末尾的振幅重算都受益。
+- 生成循环的**每步前向**是热点：MLP 的 `_conditional_log_amplitude`、Transformer 的 `_decode_step` 用 `functools.partial(nnx.jit, static_argnums=...)` 修饰，`site_index` 作为**静态参数**（各 site 的 amplitude 子网 / 位置嵌入不同，按 site 各编译一次并跨调用缓存）。实测 generate_unique 因此提速一到两个数量级。
+- `generate` / `generate_unique` **整体不可 jit**：末尾用 `jnp.unique` / 布尔过滤产生动态形状。它们保持 eager，只把内部静态形状的重活交给上述被 jit 的方法。batch_size / beam_width 改变会触发这些方法按新形状重新编译（正常 jit 行为）。
+- Transformer 的 `_decode_step` 原地更新 KV-cache；`nnx.jit` 会将 cache 状态穿引进出，跨步保留更新。
 
 ### Transformer 的 KV-cache 增量解码
 

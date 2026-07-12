@@ -21,6 +21,7 @@ near-uniform (maximum entropy), which is a neutral starting point for VMC.
 
 from __future__ import annotations
 
+import functools
 from typing import TYPE_CHECKING
 
 import jax
@@ -218,6 +219,7 @@ class _TransformerWaveFunctionBase(nnx.Module):
         mask = self._local_mask(prefix_values, site_index)
         return normalize_log_amplitude(apply_mask(raw_amplitude, mask), axis=-1)
 
+    @nnx.jit
     def __call__(self, configs: Array) -> Array:
         site_values = self._config_to_site_values(configs)
         batch_size = site_values.shape[0]
@@ -265,8 +267,13 @@ class _TransformerWaveFunctionBase(nnx.Module):
             attention.cached_key = nnx.Cache(cached_key[...][parents])
             attention.cached_value = nnx.Cache(cached_value[...][parents])
 
+    @functools.partial(nnx.jit, static_argnums=(2,))
     def _decode_step(self, token: Array, site_index: int) -> tuple[Array, Array]:
-        """Feed one token ``[batch, 1]`` at ``site_index``; return ``(raw_amplitude, phase)`` ``[batch, states]``."""
+        """Feed one token ``[batch, 1]`` at ``site_index``; return ``(raw_amplitude, phase)`` ``[batch, states]``.
+
+        JIT-compiled per ``site_index`` (static). The key/value cache is updated in place;
+        ``nnx.jit`` threads the cache state through so the mutation is preserved across steps.
+        """
         embedded = self.embedding(token, position=site_index)
         hidden = self.transformers(embedded, decode=True)
         raw_amplitude, phase = self._split_tail(hidden)

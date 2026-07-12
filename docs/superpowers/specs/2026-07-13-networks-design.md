@@ -28,7 +28,7 @@
 2. Transformer decoder 使用 **dense FeedForward**，不含 DeepSeekMoE（无 shared/routed experts、centroid、负载均衡 bias）
 3. `generate` 与 `generate_unique` **显式接收 PRNG key**（随机性无内部状态；注意 Transformer 生成会在模块上留下 KV-cache 变量，见 §9）
 4. 顺带实现 **JAX 版 `utility/bitspack.py`**
-5. 生成循环使用 **unrolled Python for**（sites 数在构造时静态已知，逐 site 展开）。注意 `__call__`（估值）可 jit；`generate` / `generate_unique` 因末尾用 `jnp.unique` / 布尔过滤产生动态形状，**整体不可 jit**，按 eager 执行
+5. 生成循环使用 **unrolled Python for**（sites 数在构造时静态已知，逐 site 展开）。`__call__`（估值）用 `@nnx.jit` 修饰；每步前向（MLP `_conditional_log_amplitude` / Transformer `_decode_step`）用 `nnx.jit` + 静态 `site_index` 修饰并跨步缓存。`generate` / `generate_unique` 因末尾用 `jnp.unique` / 布尔过滤产生动态形状，**整体不可 jit**，保持 eager 并调用上述被 jit 的静态方法
 6. Normal 变体支持**任意 physical_dim**（qudit）
 7. 测试为**内部自洽 unit test**，不与旧 PyTorch 实现数值对拍
 
@@ -249,7 +249,7 @@ building blocks（均为 `nnx.Module`）：
 | 风险 | 等级 | 缓解 |
 |------|------|------|
 | Gumbel 条件截断 `inf - inf = NaN` | 高 | 有限 sentinel -1e30 + `jnp.where` 护栏 |
-| unrolled 循环在大 sites 编译时间长 | 中 | `__call__` 目标 sites ≲ 100；`generate*` 不整体 jit，按 eager 逐步执行 |
+| unrolled 循环在大 sites 编译时间长 | 中 | 每步前向按 site 各编译一次并缓存；`generate*` 不整体 jit，动态形状部分保持 eager |
 | x64 全局启用影响其他子系统 | 低 | 包级策略，Hamiltonian 亦用 float64；文档记录 |
 | 任意 physical_dim 的 bitspack size 仅支持 {1,2,4,8} | 低 | physical_dim 状态编码 bit 数取 {1,2,4,8}；spec 限定 physical_dim ≤ 256 |
 | Transformer `generate*` 在模块留下 KV-cache 变量（side effect） | 低 | Cache 属 `nnx.Cache` 非 `nnx.Param`，优化器/梯度不受影响；每次调用重建 |
