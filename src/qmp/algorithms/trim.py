@@ -76,6 +76,56 @@ class TrimConfig:
     max_cycles: int = -1
 
 
+# ==============================================================================
+# TrimCI stages
+# ==============================================================================
+
+
+def _unique_configs(configs: Array) -> Array:
+    """Deduplicate bit-packed configs, preserving first-occurrence order.
+
+    Mirrors the 4-byte alignment trick in ``haar._merge_pools`` so the uint8
+    rows can be viewed as uint32 for ``jnp.unique``.
+    """
+    n_bytes = configs.shape[1]
+    padded = n_bytes if n_bytes % 4 == 0 else ((n_bytes // 4) + 1) * 4
+    work = configs
+    if n_bytes < padded:
+        work = jnp.pad(work, ((0, 0), (0, padded - n_bytes)))
+    flat = work.reshape(work.shape[0], -1).view(jnp.uint32)
+    _, idx = jnp.unique(flat, axis=0, return_index=True)
+    return configs[jnp.sort(idx)]
+
+
+def _expand_pool(
+    model: object,
+    core_configs: Array,
+    core_psi: Array,
+    max_rounds: int,
+    pool_core_ratio: int,
+) -> tuple[Array, Array]:
+    """Multi-hop global top-K expansion.
+
+    Each hop selects the top-K new configs by |H_ij c_j|^2, then propagates
+    amplitudes one hop via H·psi to weight the next hop (true graph diffusion).
+    The pool is deduplicated each hop (top-K may return zero-padded rows on
+    small systems). Returns (pool_configs, pool_psi) where pool_psi is the
+    last-hop H·psi projected onto the pool.
+    """
+    pool_configs, pool_psi = core_configs, core_psi
+    for _ in range(max_rounds):
+        psi_real = jnp.stack([pool_psi.real, pool_psi.imag], axis=1)
+        count = pool_core_ratio * pool_configs.shape[0]
+        new_c = model.find_topk_relative_configs(pool_configs, psi_real, count, pool_configs)  # ty: ignore — model dynamic
+        if new_c.shape[0] == 0:
+            break
+        new_pool = _unique_configs(jnp.concatenate([pool_configs, new_c], axis=0))
+        hpsi = model.apply_within_subspace(pool_configs, psi_real, new_pool)  # ty: ignore — model dynamic
+        pool_configs = new_pool
+        pool_psi = hpsi[:, 0] + 1j * hpsi[:, 1]
+    return pool_configs, pool_psi
+
+
 def _init_state() -> dict[str, typing.Any]:
     return {
         "trim": {

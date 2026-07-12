@@ -22,3 +22,28 @@ def test_trim_registration() -> None:
 
     assert action_config_dict["trim"] is TrimConfig
     assert action_class_dict["trim"] is Trim
+
+
+import jax
+import jax.numpy as jnp
+from flax import nnx
+
+from qmp.algorithms.trim import _expand_pool
+from qmp.models.hubbard import Model, ModelConfig
+
+
+def _small_hubbard() -> Model:
+    return Model(ModelConfig(m=2, n=1, t=1.0, u=4.0, electron_number=2))
+
+
+def test_expand_pool_grows_and_unique() -> None:
+    model = _small_hubbard()
+    net = model.create_network("mlp/u1u1", {"hidden_size": [8]}, rngs=nnx.Rngs(0))
+    core_c, core_p = net.generate_unique(4, key=jax.random.key(1))
+    pool_c, pool_p = _expand_pool(model, core_c, core_p, max_rounds=2, pool_core_ratio=3)
+
+    assert pool_c.shape[0] >= core_c.shape[0]
+    assert pool_c.shape[0] == pool_p.shape[0]
+    flat = pool_c.reshape(pool_c.shape[0], -1)
+    unique = jnp.unique(flat, axis=0)
+    assert unique.shape[0] == pool_c.shape[0]  # no duplicate configs
