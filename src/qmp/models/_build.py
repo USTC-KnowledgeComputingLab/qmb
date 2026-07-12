@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 
 import dacite
 
-from qmp.models._model import model_config_dict, model_dict
+from ._model import model_config_dict, model_dict
 
 logger = logging.getLogger(__name__)
 

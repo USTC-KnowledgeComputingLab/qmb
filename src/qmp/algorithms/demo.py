@@ -10,7 +10,7 @@ import jax.numpy as jnp
 from flax import nnx
 
 from qmp.algorithms._registry import action_class_dict, action_config_dict
-from qmp.utility._build import SubConfigRef, build_model
+from qmp.models._build import SubConfigRef, build_model
 
 logger = logging.getLogger(__name__)
 
