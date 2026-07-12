@@ -126,6 +126,59 @@ def _expand_pool(
     return pool_configs, pool_psi
 
 
+def _local_trim(
+    model: object,
+    pool_configs: Array,
+    pool_psi: Array,
+    num_groups: int,
+    keep_count: int,
+    lanczos_steps: int,
+    stop_norm: float,
+    random_period: int,
+    key: Array,
+) -> tuple[Array, Array]:
+    """Random block partition + per-block Lanczos + per-block top-K by |c|.
+
+    The pool is randomly permuted and split into ``num_groups`` blocks; each
+    block is diagonalized independently (cheap, unbiased, diversity-preserving)
+    and its top ``keep_count`` configs by |c| survive. Returns merged,
+    deduplicated surviving (configs, psi).
+    """
+    n = pool_configs.shape[0]
+    perm = jax.random.permutation(key, n)
+    groups = jnp.array_split(perm, num_groups)
+
+    survived_c: Array | None = None
+    survived_p: Array | None = None
+    for group_idx in groups:
+        if group_idx.shape[0] == 0:
+            continue
+        block_c = pool_configs[group_idx]
+        block_p = pool_psi[group_idx]
+        lanczos = _DynamicLanczos(
+            model=model,
+            configs=block_c,
+            psi=block_p,
+            max_steps=lanczos_steps,
+            stop_norm=stop_norm,
+            random_period=random_period,
+            extend_count=0,
+            strategy=KrylovBasisStrategy.FIXED,
+            state_count=1,
+        )
+        results = list(lanczos.run())
+        _e, cfg, ritz = results[-1][0]
+        k = min(keep_count, cfg.shape[0])
+        top = jnp.argsort((ritz.conj() * ritz).real)[::-1][:k]
+        kept_c, kept_p = cfg[top], ritz[top]
+        if survived_c is None:
+            survived_c, survived_p = kept_c, kept_p
+        else:
+            survived_c, survived_p = _merge_pools(survived_c, survived_p, kept_c, kept_p)
+    assert survived_c is not None and survived_p is not None
+    return survived_c, survived_p
+
+
 def _init_state() -> dict[str, typing.Any]:
     return {
         "trim": {
