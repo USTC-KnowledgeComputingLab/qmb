@@ -98,6 +98,20 @@ __device__ uint64_t wyhash64(const uint8_t* key, uint64_t seed) {
     return a;
 }
 
+/* atomic max on double via CAS loop (valid for all doubles, unlike a raw
+   bit-pattern atomicMax which only works for non-negative values). */
+__device__ inline void atomic_max_double(double* addr, double val)
+{
+    unsigned long long* a = reinterpret_cast<unsigned long long*>(addr);
+    unsigned long long old = *a, assumed;
+    do {
+        double cur = __longlong_as_double(old);
+        if (cur >= val) break;
+        assumed = old;
+        old = atomicCAS(a, assumed, __double_as_longlong(val));
+    } while (assumed != old);
+}
+
 /* ── diagonal_term kernel with block-level reduction ── */
 
 template <int n_qubytes>
@@ -371,25 +385,27 @@ __global__ void find_all_kernel(
         int64_t slot_idx = h % cap;
         for (int64_t p = 0; p < cap && p < 100; ++p) {
             auto& slot = table[slot_idx];
-            if (!slot.occupied) {
-                if (atomicCAS(&slot.occupied, 0, 1) == 0) {
-                    for (int q = 0; q < n_qubytes; ++q) slot.key[q] = new_c[q];
-                    __threadfence();
-                    slot.claimed = 1;
+            if (atomicCAS(&slot.occupied, 0, 1) == 0) {
+                // Claimed empty slot: publish key, then accumulate value.
+                for (int q = 0; q < n_qubytes; ++q) slot.key[q] = new_c[q];
+                __threadfence();
+                slot.claimed = 1;
+                atomicAdd(&slot.real_val, vr);
+                atomicAdd(&slot.imag_val, vi);
+                break;
+            }
+            // Occupied by another thread. If it is still mid-publish (claimed==0)
+            // we cannot yet compare keys; skip to the next slot instead of
+            // spin-waiting (a warp-divergent spin deadlocks under SIMT).
+            if (slot.claimed) {
+                bool match = true;
+                for (int q = 0; q < n_qubytes; ++q)
+                    if (slot.key[q] != new_c[q]) { match = false; break; }
+                if (match) {
                     atomicAdd(&slot.real_val, vr);
                     atomicAdd(&slot.imag_val, vi);
                     break;
                 }
-            }
-            // Wait until the claiming thread has published the key.
-            while (slot.occupied && !slot.claimed) { __threadfence(); }
-            bool match = true;
-            for (int q = 0; q < n_qubytes; ++q)
-                if (slot.key[q] != new_c[q]) { match = false; break; }
-            if (match) {
-                atomicAdd(&slot.real_val, vr);
-                atomicAdd(&slot.imag_val, vi);
-                break;
             }
             slot_idx = (slot_idx + 1) % cap;
             if (p == 99) { *overflow = 1; }
@@ -482,7 +498,8 @@ template <int n_qubytes>
 struct __align__(8) topk_slot {
     uint8_t key[n_qubytes];
     double  weight;
-    bool    occupied;
+    int     occupied;
+    int     claimed;
 };
 
 template <int n_qubytes>
@@ -524,22 +541,42 @@ __global__ void find_topk_kernel(
         int64_t slot_idx = h % cap;
         for (int64_t p = 0; p < cap && p < 100; ++p) {
             auto& slot = table[slot_idx];
-            if (!slot.occupied) {
-                if (atomicCAS((int*)&slot.occupied, 0, 1) == 0) {
-                    for (int q = 0; q < n_qubytes; ++q) slot.key[q] = new_c[q];
-                    slot.weight = weight;
-                    break;
-                }
+            if (atomicCAS(&slot.occupied, 0, 1) == 0) {
+                // We claimed an empty slot: publish key then weight.
+                for (int q = 0; q < n_qubytes; ++q) slot.key[q] = new_c[q];
+                __threadfence();
+                atomic_max_double(&slot.weight, weight);
+                break;
             }
+            // Slot already claimed by someone. It may still be mid-publish; the
+            // key compare below can spuriously fail, in which case we probe on.
+            // A duplicate insertion at worst wastes a slot (cap = 2*K covers it)
+            // and does not change the top-K weights after collection.
             bool match = true;
             for (int q = 0; q < n_qubytes; ++q)
                 if (slot.key[q] != new_c[q]) { match = false; break; }
             if (match) {
-                atomicMax((unsigned long long*)&slot.weight, __double_as_longlong(weight));
+                atomic_max_double(&slot.weight, weight);
                 break;
             }
             slot_idx = (slot_idx + 1) % cap;
         }
+    }
+}
+
+template <int n_qubytes>
+__global__ void find_topk_collect_kernel(
+    const topk_slot<n_qubytes>* table, int64_t cap,
+    uint8_t* out_keys, double* out_weights)
+{
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t stride = blockDim.x * gridDim.x;
+    for (int64_t s = idx; s < cap; s += stride) {
+        const topk_slot<n_qubytes>& slot = table[s];
+        // Unoccupied slots keep weight 0 and zero key; they sort to the bottom.
+        out_weights[s] = slot.occupied ? slot.weight : 0.0;
+        for (int q = 0; q < n_qubytes; ++q)
+            out_keys[s * n_qubytes + q] = slot.occupied ? slot.key[q] : 0;
     }
 }
 
@@ -550,7 +587,7 @@ ffi::Error FindTopKRelativeConfigsImpl(
     ffi::Buffer<ffi::U8> create_mask, ffi::Buffer<ffi::U8> annihilate_mask,
     ffi::Buffer<ffi::U8> flip_mask, ffi::Buffer<ffi::U8> parity_mask,
     ffi::Buffer<ffi::U8> parity_const, ffi::Buffer<ffi::F64> coef,
-    ffi::ResultBuffer<ffi::U8> new_configs)
+    ffi::ResultBuffer<ffi::U8> table_keys, ffi::ResultBuffer<ffi::F64> table_weights)
 {
     auto cd = configs_i.dimensions();
     int64_t B = cd[0], Q = cd[1]; (void)Q;
@@ -558,7 +595,8 @@ ffi::Error FindTopKRelativeConfigsImpl(
     int64_t K = count_selected;
     int64_t cap = K * 2;
     int64_t total = T * B;
-    cudaMemsetAsync(new_configs->untyped_data(), 0, new_configs->size_bytes(), stream);
+    cudaMemsetAsync(table_keys->untyped_data(), 0, table_keys->size_bytes(), stream);
+    cudaMemsetAsync(table_weights->untyped_data(), 0, table_weights->size_bytes(), stream);
     // allocate table + weight
     topk_slot<N_QUBYTES>* d_table = nullptr;
     double* d_min = nullptr;
@@ -568,6 +606,7 @@ ffi::Error FindTopKRelativeConfigsImpl(
     double zero = 0.0;
     cudaMemcpyAsync(d_min, &zero, sizeof(double), cudaMemcpyHostToDevice, stream);
     int threads = 256, blocks = static_cast<int>(std::min<int64_t>((total + 255) / 256, 65535LL));
+    if (blocks < 1) blocks = 1;
     find_topk_kernel<N_QUBYTES><<<blocks, threads, 0, stream>>>(
         B, T, 0, total,
         configs_i.typed_data(), reinterpret_cast<const double*>(psi_i.typed_data()),
@@ -576,6 +615,12 @@ ffi::Error FindTopKRelativeConfigsImpl(
         parity_const.typed_data(), reinterpret_cast<const double*>(coef.typed_data()),
         configs_exclude.typed_data(), configs_exclude.dimensions()[0],
         d_table, cap, d_min);
+    int cblocks = static_cast<int>(std::min<int64_t>((cap + 255) / 256, 65535LL));
+    if (cblocks < 1) cblocks = 1;
+    find_topk_collect_kernel<N_QUBYTES><<<cblocks, 256, 0, stream>>>(
+        d_table, cap,
+        reinterpret_cast<uint8_t*>(table_keys->untyped_data()),
+        reinterpret_cast<double*>(table_weights->untyped_data()));
     cudaFreeAsync(d_table, stream);
     cudaFreeAsync(d_min, stream);
     return ffi::Error::Success();
@@ -588,4 +633,4 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FindTopKRelativeConfigs, FindTopKRelativeConfigsIm
     .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::U8>>()
     .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::U8>>()
     .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::F64>>()
-    .Ret<ffi::Buffer<ffi::U8>>());
+    .Ret<ffi::Buffer<ffi::U8>>().Ret<ffi::Buffer<ffi::F64>>());

@@ -222,14 +222,20 @@ class FermiHamiltonian:
         n_qubytes_dim = configs_i.shape[1]
         target = f"qmp_find_topk_relative_configs_{self._n_qubytes}"
         if self._use_cuda:
-            return jax.ffi.ffi_call(
+            # The kernel fills a hash table of capacity 2*count_selected keyed by
+            # config, then returns the raw (keys, weights) table. The top-K
+            # selection (argsort) happens here to match the JAX fallback exactly.
+            capacity = count_selected * 2
+            table_keys, table_weights = jax.ffi.ffi_call(
                 target,
-                jax.ShapeDtypeStruct((count_selected, n_qubytes_dim), jnp.uint8),
+                (
+                    jax.ShapeDtypeStruct((capacity, n_qubytes_dim), jnp.uint8),
+                    jax.ShapeDtypeStruct((capacity,), jnp.float64),
+                ),
                 vmap_method="broadcast_all",
             )(
                 self._to_dev(configs_i),
                 self._to_dev(psi_i),
-                count_selected,
                 self._to_dev(configs_exclude),
                 self._to_dev(self._create_mask),
                 self._to_dev(self._annihilate_mask),
@@ -237,7 +243,10 @@ class FermiHamiltonian:
                 self._to_dev(self._parity_mask),
                 self._to_dev(self._parity_const),
                 self._to_dev(self._coef),
+                count_selected=int(count_selected),
             )
+            order = jnp.argsort(table_weights)[::-1][:count_selected]
+            return table_keys[order]
         return _jax_find_topk_relative_configs(
             self._to_dev(configs_i),
             self._to_dev(psi_i),
