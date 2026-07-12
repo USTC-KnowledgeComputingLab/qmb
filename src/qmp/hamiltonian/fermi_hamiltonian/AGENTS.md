@@ -89,4 +89,4 @@ Top-K 选择。使用哈希表 + CUB radix sort 最终排序。
 
 ## 其他子系统引用
 
-各模型 (FCIDUMP, Hubbard 等) 的 Hamiltonian 通过 `Hamiltonian.from_fcidump()` 等工厂方法构建，返回统一的 `Hamiltonian` 实例。不同模型只负责将自身格式转换为 `{term: complex_coefficient}` 字典，其余逻辑全部复用。
+各模型 (FCIDUMP, Hubbard, OpenFermion 等) 在 `models/` 子系统中直接构造 `FermiHamiltonian(hamiltonian_dict, n_qubits=..., devices=...)`。不同模型只负责将自身格式转换为 `{term: complex_coefficient}` 字典，其余逻辑全部复用。

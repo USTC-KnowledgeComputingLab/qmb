@@ -53,7 +53,7 @@ class Model(ModelProto[ModelConfig]):
             self.ref_energy,
         )
 
-        fermion_operator = openfermion.transforms.get_fermion_operator(molecule.get_molecular_hamiltonian())
+        fermion_operator = openfermion.get_fermion_operator(molecule.get_molecular_hamiltonian())
         hamiltonian_dict = {key: complex(value) for key, value in fermion_operator.terms.items()}
         self.hamiltonian = FermiHamiltonian(
             hamiltonian_dict,
