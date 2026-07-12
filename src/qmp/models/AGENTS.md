@@ -8,7 +8,7 @@ Models 子系统是**物理问题的定义层**：把某个具体的量子多体
 
 1. **构造哈密顿量**：把系统特有的输入格式转成统一的 `{term: complex_coefficient}` 字典，交给 `FermiHamiltonian`
 2. **暴露统一算符接口**：转发 `FermiHamiltonian` 的四个核心操作 + `show_config` + 元数据
-3. **注册可用网络**：`network_dict` 把物理系统与兼容的 ansatz 配对（本轮留空，待 networks 子系统迁移）
+3. **注册可用网络**：`network_dict` 把物理系统与兼容的 ansatz 配对（每个 model 文件内定义网络配置 dataclass 并注册）
 
 ## 目录结构
 
@@ -35,7 +35,7 @@ src/qmp/models/
 
 - 全局 `model_dict[name] = ModelClass`：配置驱动的 CLI 按名字动态查找 model
 - 全局 `model_config_dict[name] = ModelConfigClass`：CLI 层 `dacite.from_dict` 按名字查找 config dataclass 类型
-- 每个 model 类的 `network_dict`：把物理系统与兼容 ansatz 配对（本轮为空 `{}`）
+- 每个 model 类的 `network_dict`：把物理系统与兼容 ansatz 配对（见下节「网络注册」）
 
 model 通过在模块底部执行 `model_dict[name] = Model` 和 `model_config_dict[name] = ModelConfig` 完成自注册；上层通过 `importlib.import_module` 动态导入触发注册。
 
@@ -49,7 +49,7 @@ model 通过在模块底部执行 `model_dict[name] = Model` 和 `model_config_d
 | `find_topk_relative_configs(configs_i, psi_i, count_selected, configs_exclude=None)` | Top-K 最重要新构型 |
 | `show_config(config) -> str` | 位编码构型渲染为可读字符串 |
 | `ref_energy: float` | 参考能量 |
-| `network_dict: ClassVar[dict]` | 兼容网络注册表 (本轮空) |
+| `network_dict: ClassVar[dict]` | 兼容网络注册表 (见「网络注册」) |
 
 `configs_exclude` 为 `None` 时，转发层填入空数组 `jnp.zeros((0, n_qubytes), uint8)`；`FermiHamiltonian` 的这两个方法要求该参数非可选。
 
@@ -77,6 +77,30 @@ model 通过在模块底部执行 `model_dict[name] = Model` 和 `model_config_d
 - MolecularData: `n_spins = multiplicity − 1`
 
 网络阶段据此拆分 `spin_up = (n_electrons + n_spins) // 2`, `spin_down = (n_electrons − n_spins) // 2`。
+
+## 网络注册
+
+沿用旧代码组织方式：**网络的构造参数写在具体 model 文件里**（因为参数与物理系统紧密耦合）。每个 model 文件在底部定义若干网络配置 dataclass 并注册进 `Model.network_dict`：
+
+| 注册名 | 配置类 | 网络 | 守恒 |
+|--------|--------|------|------|
+| `mlp/u1u1` | `MlpUpDownConfig` | MLP | 自旋上/下分别守恒 |
+| `mlp/u1` | `MlpElectronConfig` | MLP | 总电子数守恒 |
+| `transformers/u1u1` | `TransformersUpDownConfig` | Transformer | 自旋上/下分别守恒 |
+| `transformers/u1` | `TransformersElectronConfig` | Transformer | 总电子数守恒 |
+
+每个配置类：
+- 是 `@dataclass`，字段为该网络的超参（MLP: `hidden_size`, `ordering`；Transformer: `embedding_dim`, `heads_num`, `feed_forward_dim`, `depth`, `tail_hidden_dim`, `ordering`），带默认值。
+- 有 `create(self, model, *, rngs: nnx.Rngs) -> NetworkProto` 方法：从 model 元数据（`n_qubits`、电子数、`n_spins`）导出网络的 site/spin 参数，用配置字段填充超参，显式传入 `rngs`（nnx 网络需要 PRNG）。
+
+**与旧代码的差异**（因架构迁移）：
+- `create` 显式接收 `rngs`（旧 torch 版无此需求）。
+- Transformer 配置去掉了 MoE 参数（shared/routed/selected experts），改用 dense FFN 的 `tail_hidden_dim`。
+- 去掉 `physical_dim`/`is_complex`（新网络 Electron/UpDown 变体不需要）。
+- 未迁移 MPS 网络（networks 子系统暂未实现）。
+- hubbard 无 `n_spins` 概念，直接 `spin_up = electron_number // 2`。
+
+网络配置类刻意在各 model 文件内重复（不抽公共模块），与「转发样板刻意不抽基类」同理，保留各 model 独立演化自由度。
 
 ## 缓存
 
