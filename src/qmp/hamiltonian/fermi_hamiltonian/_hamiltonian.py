@@ -27,24 +27,26 @@ from ._hamiltonian_prepare import prepare
 logger = logging.getLogger(__name__)
 
 
-def _try_register_ffi(n_qubytes: int) -> bool:
-    """Attempt to load and register CUDA FFI targets for the given n_qubytes."""
-    try:
-        lib = load_cuda_module(n_qubytes=n_qubytes)
-        targets = {
-            f"qmp_compute_diagonal_within_subspace_{n_qubytes}": "ComputeDiagonalWithinSubspace",
-            f"qmp_apply_within_subspace_{n_qubytes}": "ApplyWithinSubspace",
-            f"qmp_find_all_relative_configs_{n_qubytes}": "FindAllRelativeConfigs",
-            f"qmp_find_topk_relative_configs_{n_qubytes}": "FindTopKRelativeConfigs",
-        }
-        for name, sym in targets.items():
-            handler = getattr(lib, sym)
-            jax.ffi.register_ffi_target(name, jax.ffi.pycapsule(handler), platform="CUDA")
-        logger.info("CUDA FFI targets registered for n_qubytes=%d.", n_qubytes)
-        return True
-    except Exception:
-        logger.info("CUDA FFI targets not available; using pure JAX fallback.")
-        return False
+def _register_ffi(n_qubytes: int) -> None:
+    """Compile and register the CUDA FFI targets for the given n_qubytes.
+
+    Raises on failure (missing nvcc, compile error, registration error). The
+    caller decides whether to invoke this — it is only called when the target
+    device is a CUDA GPU, so any failure here is a real environment error and
+    must not be silently downgraded to the (orders-of-magnitude slower) JAX
+    fallback.
+    """
+    lib = load_cuda_module(n_qubytes=n_qubytes)
+    targets = {
+        f"qmp_compute_diagonal_within_subspace_{n_qubytes}": "ComputeDiagonalWithinSubspace",
+        f"qmp_apply_within_subspace_{n_qubytes}": "ApplyWithinSubspace",
+        f"qmp_find_all_relative_configs_{n_qubytes}": "FindAllRelativeConfigs",
+        f"qmp_find_topk_relative_configs_{n_qubytes}": "FindTopKRelativeConfigs",
+    }
+    for name, sym in targets.items():
+        handler = getattr(lib, sym)
+        jax.ffi.register_ffi_target(name, jax.ffi.pycapsule(handler), platform="CUDA")
+    logger.info("CUDA FFI targets registered for n_qubytes=%d.", n_qubytes)
 
 
 class FermiHamiltonian:
@@ -82,7 +84,11 @@ class FermiHamiltonian:
         # 预过滤: 分离对角 term (flip_mask == 0) 用于 compute_diagonal
         fm_sum = jnp.sum(self._flip_mask, axis=1)
         self._diag_idx = jnp.where(fm_sum == 0)[0]
-        self._use_cuda = _try_register_ffi(self._n_qubytes)
+        # 后端选择由目标设备平台决定: CUDA 设备 → CUDA kernel; 其余 → 纯 JAX。
+        # CUDA 设备下若编译/注册失败则抛错; 绝不静默退化到跑不动的 fallback。
+        self._use_cuda = self._device.platform == "gpu"
+        if self._use_cuda:
+            _register_ffi(self._n_qubytes)
         # 哈希表跨调用缓存: apply_within 在 configs_j 不变时复用
         self._apply_hash_cache: tuple[int, typing.Any] | None = None
         logger.info(
