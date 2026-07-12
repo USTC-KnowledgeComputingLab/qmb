@@ -293,14 +293,14 @@ def load_cuda_module(n_qubytes: int) -> ctypes.CDLL:
 
 ### 3.4 `_hamiltonian_jax.py` — 纯 JAX fallback
 
-四个函数，算法与 3.2.1-3.2.4 完全一致。JIT 策略因函数而异:
+四个函数全部 JIT 兼容，算法与 3.2.1-3.2.4 完全一致:
 
 | 函数 | JIT 方式 | 原因 |
 |------|---------|------|
-| `compute_diagonal_within_subspace` | `@jax.jit` | 纯算术无控制流分支，无动态形状 |
-| `apply_within_subspace` | `@partial(jax.jit, static_argnums=(9,))` + `jnp.where` masking | `direction` 用 `static_argnums`（`lax.cond` 要求两分支返回同形状，在 super/subspace 下不可行）；内层查表向量化消除 `if/break` |
-| `find_all_relative_configs` | 无 JIT | 哈希表 probe/compare/accumulate 是固有顺序操作，无法在 traced 值上使用 Python `if/continue`。`static_argnums` 仅解决 `hash_capacity` 形状问题，但内层条件仍不兼容 |
-| `find_topk_relative_configs` | 无 JIT | 同上，`count_selected` 形状问题可通过 `static_argnums` 解决，但内层哈希表条件分支无法向量化 |
+| `compute_diagonal_within_subspace` | `@jax.jit` | 纯算术向量化，无控制流分支 |
+| `apply_within_subspace` | `@partial(jax.jit, static_argnums=(9,))` + `jnp.where` masking | `direction` 用 `static_argnums`；内层查表向量化 |
+| `find_all_relative_configs` | `@partial(jax.jit, static_argnums=(9,))` + `lax.fori_loop` + `lax.cond` | 哈希表 probe/accumulate 用 `fori_loop` 携带可变状态 + `lax.cond` 分支；`hash_capacity` 编译期固定 |
+| `find_topk_relative_configs` | `@partial(jax.jit, static_argnums=(2,))` + `lax.fori_loop` + `lax.cond` | 同上，`count_selected` 编译期固定 |
 
 ### 3.5 `_hamiltonian.py` — FermiHamiltonian 类 + FFI 路由
 
