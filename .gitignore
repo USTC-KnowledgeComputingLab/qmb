@@ -17,3 +17,5 @@ src/qmp/_version.py
 *.o
 CMakeCache.txt
 CMakeFiles/
+refact-models/
+refact-network/
