@@ -9,8 +9,11 @@ Implementation notes (see spec 3.2 for the full design, incl. planned items):
   (loaded via __builtin_memcpy — config/mask rows are only 1-byte aligned, so a
   reinterpret_cast to uint64_t* would be a misaligned/UB load).
 - inline wyhash64 + custom linear-probing hash tables (no cuCollections).
-- __ldg() read-only cache: partially applied (coef/psi/parity_const and the
-  n_qubytes>8 byte-loop path). Full coverage of all read-only inputs is planned.
+- __ldg() read-only cache: used for coef/psi/parity_const and the n_qubytes>8
+  byte-loop path. The n_qubytes<=8 packed-uint64 fast path deliberately does NOT
+  use __ldg: config/mask rows are only 1-byte aligned, so a 64-bit __ldg would
+  be a misaligned load; a byte-wise __ldg would defeat the single-register load.
+  (This is a design exclusion, not a pending optimization.)
 - diagonal_term: currently accumulates directly to global psi via atomicAdd.
   Shared-memory block reduction (spec 3.2.1) is planned, not yet implemented.
 */
@@ -242,23 +245,57 @@ __global__ void apply_build_table_kernel(
     }
 }
 
+// Applies H (direction 0) or H^dagger (direction 1) as a sparse matvec.
+//
+// The physical semantics are fixed by `direction` (which side is src/dst and
+// whether coef is conjugated). Orthogonally, we may traverse EITHER side to
+// minimise thread count (T * traversed_size): we always traverse the smaller
+// of {src, dst} and build the linear-probe table over the other (looked-up)
+// side. Because flip is self-inverse, both traversal modes enumerate exactly
+// the same set of connected (src_config, dst_config) pairs, so psi_j is
+// identical. `src_psi` is always indexed by the src-side position.
+//
+//   traverse_dst == 0: iterate src side (index m = src pos);
+//       new_c = src XOR flip; out_idx = lookup(new_c in dst table); psi_idx = m
+//   traverse_dst == 1: iterate dst side (index m = dst pos);
+//       src_c = dst XOR flip; psi_idx = lookup(src_c in src table); out_idx = m
 template <int n_qubytes>
 __global__ void apply_within_kernel(
-    int64_t B_src, int64_t B_dst, int64_t T, int64_t total,
-    const uint8_t* src_configs, const double* src_psi,
+    int64_t B_trav, int64_t T, int64_t total,
+    const uint8_t* traversed_configs, const double* src_psi,
     const uint8_t* create_mask, const uint8_t* annihilate_mask,
     const uint8_t* flip_mask, const uint8_t* parity_mask,
     const uint8_t* parity_const, const double* coef,
-    const apply_hash_slot<n_qubytes>* hash_table, int64_t hash_cap,
-    int direction, double* psi_j)
+    const apply_hash_slot<n_qubytes>* lookup_table, int64_t lookup_cap,
+    int direction, int traverse_dst, double* psi_j)
 {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t stride = blockDim.x * gridDim.x;
     for (int64_t k = idx; k < total; k += stride) {
-        int64_t t = k / B_src;
-        int64_t i = k % B_src;
-        const uint8_t* sc = src_configs + i * n_qubytes;
+        int64_t t = k / B_trav;
+        int64_t m = k % B_trav;
+        const uint8_t* tc = traversed_configs + m * n_qubytes;
         const uint8_t* fm = flip_mask + t * n_qubytes;
+
+        // src config bytes (sc) and the two indices, depending on traversal side.
+        uint8_t sc[n_qubytes];
+        int64_t out_idx;
+        int64_t psi_idx;
+        if (traverse_dst == 0) {
+            for (int q = 0; q < n_qubytes; ++q) sc[q] = tc[q];
+            uint8_t new_c[n_qubytes];
+            apply_flip<n_qubytes>(new_c, sc, fm);
+            out_idx = apply_hash_lookup<n_qubytes>(new_c, lookup_table, lookup_cap);
+            if (out_idx < 0) continue;
+            psi_idx = m;
+        } else {
+            apply_flip<n_qubytes>(sc, tc, fm);  // sc = dst XOR flip
+            psi_idx = apply_hash_lookup<n_qubytes>(sc, lookup_table, lookup_cap);
+            if (psi_idx < 0) continue;
+            out_idx = m;
+        }
+
+        // check config: forward uses sc, backward (H^dagger) uses sc XOR flip.
         uint8_t check_c[n_qubytes];
         if (direction == 1) {
             apply_flip<n_qubytes>(check_c, sc, fm);
@@ -267,19 +304,15 @@ __global__ void apply_within_kernel(
         }
         if (!is_applicable<n_qubytes>(check_c, create_mask + t * n_qubytes, annihilate_mask + t * n_qubytes))
             continue;
-        uint8_t new_c[n_qubytes];
-        apply_flip<n_qubytes>(new_c, sc, fm);
-        int64_t dst_idx = apply_hash_lookup<n_qubytes>(new_c, hash_table, hash_cap);
-        if (dst_idx < 0) continue;
         bool parity = jw_parity<n_qubytes>(check_c, parity_mask + t * n_qubytes, __ldg(parity_const + t));
         double sign = parity ? -1.0 : 1.0;
         double cr = __ldg(coef + t * 2);
         double ci = __ldg(coef + t * 2 + 1);
         if (direction == 1) ci = -ci;
-        double pr = __ldg(src_psi + i * 2);
-        double pi = __ldg(src_psi + i * 2 + 1);
-        atomicAdd(psi_j + dst_idx * 2,     sign * (cr * pr - ci * pi));
-        atomicAdd(psi_j + dst_idx * 2 + 1, sign * (cr * pi + ci * pr));
+        double pr = __ldg(src_psi + psi_idx * 2);
+        double pi = __ldg(src_psi + psi_idx * 2 + 1);
+        atomicAdd(psi_j + out_idx * 2,     sign * (cr * pr - ci * pi));
+        atomicAdd(psi_j + out_idx * 2 + 1, sign * (cr * pi + ci * pr));
     }
 }
 
@@ -303,28 +336,36 @@ ffi::Error ApplyWithinSubspaceImpl(
     const uint8_t* dst_configs = (direction == 0) ? configs_j.typed_data() : configs_i.typed_data();
     int64_t B_src = (direction == 0) ? B_i : B_j;
     int64_t B_dst = (direction == 0) ? B_j : B_i;
-    // Build linear-probe hash table over dst configs (key -> dst index).
-    int64_t hash_cap = static_cast<int64_t>(B_dst / 0.6) + 1;
+    const double* src_psi = reinterpret_cast<const double*>(psi_i.typed_data());
+
+    // Traverse the smaller side (minimise T * traversed_size); build the
+    // linear-probe table over the other (looked-up) side.
+    int traverse_dst = (B_dst < B_src) ? 1 : 0;
+    const uint8_t* traversed_configs = traverse_dst ? dst_configs : src_configs;
+    const uint8_t* lookup_configs = traverse_dst ? src_configs : dst_configs;
+    int64_t B_trav = traverse_dst ? B_dst : B_src;
+    int64_t B_lookup = traverse_dst ? B_src : B_dst;
+
+    int64_t hash_cap = static_cast<int64_t>(B_lookup / 0.6) + 1;
     apply_hash_slot<N_QUBYTES>* d_table = nullptr;
     cudaMallocAsync(&d_table, hash_cap * sizeof(apply_hash_slot<N_QUBYTES>), stream);
     cudaMemsetAsync(d_table, 0, hash_cap * sizeof(apply_hash_slot<N_QUBYTES>), stream);
     {
-        int bt = 256, bb = static_cast<int>(std::min<int64_t>((B_dst + 255) / 256, 65535LL));
+        int bt = 256, bb = static_cast<int>(std::min<int64_t>((B_lookup + 255) / 256, 65535LL));
         if (bb < 1) bb = 1;
-        apply_build_table_kernel<N_QUBYTES><<<bb, bt, 0, stream>>>(B_dst, dst_configs, d_table, hash_cap);
+        apply_build_table_kernel<N_QUBYTES><<<bb, bt, 0, stream>>>(B_lookup, lookup_configs, d_table, hash_cap);
     }
     cudaMemsetAsync(psi_j->untyped_data(), 0, psi_j->size_bytes(), stream);
-    int64_t total = T * B_src;
+    int64_t total = T * B_trav;
     int threads = 256, blocks = static_cast<int>(std::min<int64_t>((total + 255) / 256, 65535LL));
     if (blocks < 1) blocks = 1;
-    const double* src_psi = reinterpret_cast<const double*>(psi_i.typed_data());
     apply_within_kernel<N_QUBYTES><<<blocks, threads, 0, stream>>>(
-        B_src, B_dst, T, total,
-        src_configs, src_psi,
+        B_trav, T, total,
+        traversed_configs, src_psi,
         create_mask.typed_data(), annihilate_mask.typed_data(),
         flip_mask.typed_data(), parity_mask.typed_data(),
         parity_const.typed_data(), reinterpret_cast<const double*>(coef.typed_data()),
-        d_table, hash_cap, direction,
+        d_table, hash_cap, direction, traverse_dst,
         reinterpret_cast<double*>(psi_j->typed_data()));
     cudaFreeAsync(d_table, stream);
     return ffi::Error::Success();
@@ -340,6 +381,63 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(ApplyWithinSubspace, ApplyWithinSubspaceImpl,
     .Ret<ffi::Buffer<ffi::F64>>());
 
 /* ── find_all_relative_configs handler ── */
+
+/* Exclude-set membership hash table (shared by find_all and find_topk).
+   Replaces the O(exclude_size) linear scan per (term, config) pair with an
+   O(1) linear-probe lookup. Built once per call over configs_exclude. */
+template <int n_qubytes>
+struct __align__(8) exclude_slot {
+    uint8_t key[n_qubytes];
+    int     occupied;
+};
+
+template <int n_qubytes>
+__global__ void exclude_build_kernel(
+    int64_t exclude_size, const uint8_t* exclude_configs,
+    exclude_slot<n_qubytes>* table, int64_t cap)
+{
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t stride = blockDim.x * gridDim.x;
+    for (int64_t e = idx; e < exclude_size; e += stride) {
+        const uint8_t* cfg = exclude_configs + e * n_qubytes;
+        uint64_t h = wyhash64<n_qubytes>(cfg, 3);
+        int64_t slot_idx = h % cap;
+        for (int64_t p = 0; p < cap; ++p) {
+            exclude_slot<n_qubytes>& slot = table[slot_idx];
+            if (slot.occupied && [&] {
+                    for (int q = 0; q < n_qubytes; ++q)
+                        if (slot.key[q] != cfg[q]) return false;
+                    return true;
+                }()) {
+                break;  // already present (duplicate exclude entry)
+            }
+            if (atomicCAS(&slot.occupied, 0, 1) == 0) {
+                for (int q = 0; q < n_qubytes; ++q) slot.key[q] = cfg[q];
+                break;
+            }
+            slot_idx = (slot_idx + 1) % cap;
+        }
+    }
+}
+
+template <int n_qubytes>
+__device__ bool exclude_contains(
+    const uint8_t* config, const exclude_slot<n_qubytes>* table, int64_t cap)
+{
+    if (cap == 0) return false;
+    uint64_t h = wyhash64<n_qubytes>(config, 3);
+    int64_t idx = h % cap;
+    for (int64_t p = 0; p < cap; ++p) {
+        const exclude_slot<n_qubytes>& slot = table[idx];
+        if (!slot.occupied) return false;
+        bool match = true;
+        for (int q = 0; q < n_qubytes; ++q)
+            if (slot.key[q] != config[q]) { match = false; break; }
+        if (match) return true;
+        idx = (idx + 1) % cap;
+    }
+    return false;
+}
 
 template <int n_qubytes>
 struct __align__(8) findall_slot {
@@ -357,7 +455,7 @@ __global__ void find_all_kernel(
     const uint8_t* create_mask, const uint8_t* annihilate_mask,
     const uint8_t* flip_mask, const uint8_t* parity_mask,
     const uint8_t* parity_const, const double* coef,
-    const uint8_t* exclude_configs, int64_t exclude_size,
+    const exclude_slot<n_qubytes>* exclude_table, int64_t exclude_cap,
     findall_slot<n_qubytes>* table, int64_t cap, int* overflow)
 {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -370,15 +468,8 @@ __global__ void find_all_kernel(
             continue;
         uint8_t new_c[n_qubytes];
         apply_flip<n_qubytes>(new_c, cfg, flip_mask + t * n_qubytes);
-        // exclude check
-        bool excluded = false;
-        for (int64_t e = 0; e < exclude_size; ++e) {
-            bool match = true;
-            for (int q = 0; q < n_qubytes; ++q)
-                if (__ldg(exclude_configs + e * n_qubytes + q) != new_c[q]) { match = false; break; }
-            if (match) { excluded = true; break; }
-        }
-        if (excluded) continue;
+        // exclude check: O(1) hash-table membership
+        if (exclude_contains<n_qubytes>(new_c, exclude_table, exclude_cap)) continue;
         bool parity = jw_parity<n_qubytes>(cfg, parity_mask + t * n_qubytes, __ldg(parity_const + t));
         double sign = parity ? -1.0 : 1.0;
         double cr = __ldg(coef + t * 2), ci = __ldg(coef + t * 2 + 1);
@@ -443,13 +534,14 @@ ffi::Error FindAllRelativeConfigsImpl(
     ffi::Buffer<ffi::U8> parity_const, ffi::Buffer<ffi::F64> coef,
     int64_t hash_capacity,
     ffi::ResultBuffer<ffi::U8> new_configs, ffi::ResultBuffer<ffi::F64> psi_j,
-    ffi::ResultBuffer<ffi::S32> count)
+    ffi::ResultBuffer<ffi::S32> count, ffi::ResultBuffer<ffi::S32> overflow)
 {
     auto cd = configs_i.dimensions();
     int64_t B = cd[0], Q = cd[1]; (void)Q;
     int64_t T = create_mask.dimensions()[0];
     int64_t cap = hash_capacity;
     int64_t total = T * B;
+    int64_t exclude_size = configs_exclude.dimensions()[0];
     // allocate hash table
     findall_slot<N_QUBYTES>* d_table = nullptr;
     int* d_overflow = nullptr;
@@ -462,6 +554,17 @@ ffi::Error FindAllRelativeConfigsImpl(
     cudaMemsetAsync(d_count, 0, sizeof(int), stream);
     cudaMemsetAsync(new_configs->untyped_data(), 0, new_configs->size_bytes(), stream);
     cudaMemsetAsync(psi_j->untyped_data(), 0, psi_j->size_bytes(), stream);
+    // Build exclude-set membership hash table (empty when exclude_size == 0).
+    int64_t exclude_cap = exclude_size > 0 ? static_cast<int64_t>(exclude_size / 0.6) + 1 : 0;
+    exclude_slot<N_QUBYTES>* d_exclude = nullptr;
+    if (exclude_cap > 0) {
+        cudaMallocAsync(&d_exclude, exclude_cap * sizeof(exclude_slot<N_QUBYTES>), stream);
+        cudaMemsetAsync(d_exclude, 0, exclude_cap * sizeof(exclude_slot<N_QUBYTES>), stream);
+        int eb = static_cast<int>(std::min<int64_t>((exclude_size + 255) / 256, 65535LL));
+        if (eb < 1) eb = 1;
+        exclude_build_kernel<N_QUBYTES><<<eb, 256, 0, stream>>>(
+            exclude_size, configs_exclude.typed_data(), d_exclude, exclude_cap);
+    }
     int threads = 256, blocks = static_cast<int>(std::min<int64_t>((total + 255) / 256, 65535LL));
     if (blocks < 1) blocks = 1;
     find_all_kernel<N_QUBYTES><<<blocks, threads, 0, stream>>>(
@@ -470,7 +573,7 @@ ffi::Error FindAllRelativeConfigsImpl(
         create_mask.typed_data(), annihilate_mask.typed_data(),
         flip_mask.typed_data(), parity_mask.typed_data(),
         parity_const.typed_data(), reinterpret_cast<const double*>(coef.typed_data()),
-        configs_exclude.typed_data(), configs_exclude.dimensions()[0],
+        d_exclude, exclude_cap,
         d_table, cap, d_overflow);
     // Compact non-empty slots into the output buffers and count distinct configs.
     int cblocks = static_cast<int>(std::min<int64_t>((cap + 255) / 256, 65535LL));
@@ -481,9 +584,11 @@ ffi::Error FindAllRelativeConfigsImpl(
         reinterpret_cast<double*>(psi_j->untyped_data()),
         d_count);
     cudaMemcpyAsync(count->untyped_data(), d_count, sizeof(int), cudaMemcpyDeviceToDevice, stream);
+    cudaMemcpyAsync(overflow->untyped_data(), d_overflow, sizeof(int), cudaMemcpyDeviceToDevice, stream);
     cudaFreeAsync(d_table, stream);
     cudaFreeAsync(d_overflow, stream);
     cudaFreeAsync(d_count, stream);
+    if (d_exclude) cudaFreeAsync(d_exclude, stream);
     return ffi::Error::Success();
 }
 
@@ -494,7 +599,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FindAllRelativeConfigs, FindAllRelativeConfigsImpl
     .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::U8>>()
     .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::U8>>()
     .Arg<ffi::Buffer<ffi::F64>>().Attr<int64_t>("hash_capacity")
-    .Ret<ffi::Buffer<ffi::U8>>().Ret<ffi::Buffer<ffi::F64>>().Ret<ffi::Buffer<ffi::S32>>());
+    .Ret<ffi::Buffer<ffi::U8>>().Ret<ffi::Buffer<ffi::F64>>().Ret<ffi::Buffer<ffi::S32>>()
+    .Ret<ffi::Buffer<ffi::S32>>());
 
 /* ── find_topk_relative_configs handler ── */
 
@@ -513,7 +619,7 @@ __global__ void find_topk_kernel(
     const uint8_t* create_mask, const uint8_t* annihilate_mask,
     const uint8_t* flip_mask, const uint8_t* parity_mask,
     const uint8_t* parity_const, const double* coef,
-    const uint8_t* exclude_configs, int64_t exclude_size,
+    const exclude_slot<n_qubytes>* exclude_table, int64_t exclude_cap,
     topk_slot<n_qubytes>* table, int64_t cap, double* global_min_weight)
 {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -532,15 +638,8 @@ __global__ void find_topk_kernel(
         if (weight <= local_min) continue;
         uint8_t new_c[n_qubytes];
         apply_flip<n_qubytes>(new_c, cfg, flip_mask + t * n_qubytes);
-        // exclude check
-        bool excluded = false;
-        for (int64_t e = 0; e < exclude_size; ++e) {
-            bool match = true;
-            for (int q = 0; q < n_qubytes; ++q)
-                if (__ldg(exclude_configs + e * n_qubytes + q) != new_c[q]) { match = false; break; }
-            if (match) { excluded = true; break; }
-        }
-        if (excluded) continue;
+        // exclude check: O(1) hash-table membership
+        if (exclude_contains<n_qubytes>(new_c, exclude_table, exclude_cap)) continue;
         uint64_t h = wyhash64<n_qubytes>(new_c, 2);
         int64_t slot_idx = h % cap;
         for (int64_t p = 0; p < cap && p < 100; ++p) {
@@ -599,6 +698,7 @@ ffi::Error FindTopKRelativeConfigsImpl(
     int64_t K = count_selected;
     int64_t cap = K * 2;
     int64_t total = T * B;
+    int64_t exclude_size = configs_exclude.dimensions()[0];
     cudaMemsetAsync(table_keys->untyped_data(), 0, table_keys->size_bytes(), stream);
     cudaMemsetAsync(table_weights->untyped_data(), 0, table_weights->size_bytes(), stream);
     // allocate table + weight
@@ -609,6 +709,17 @@ ffi::Error FindTopKRelativeConfigsImpl(
     cudaMemsetAsync(d_table, 0, cap * sizeof(topk_slot<N_QUBYTES>), stream);
     double zero = 0.0;
     cudaMemcpyAsync(d_min, &zero, sizeof(double), cudaMemcpyHostToDevice, stream);
+    // Build exclude-set membership hash table (empty when exclude_size == 0).
+    int64_t exclude_cap = exclude_size > 0 ? static_cast<int64_t>(exclude_size / 0.6) + 1 : 0;
+    exclude_slot<N_QUBYTES>* d_exclude = nullptr;
+    if (exclude_cap > 0) {
+        cudaMallocAsync(&d_exclude, exclude_cap * sizeof(exclude_slot<N_QUBYTES>), stream);
+        cudaMemsetAsync(d_exclude, 0, exclude_cap * sizeof(exclude_slot<N_QUBYTES>), stream);
+        int eb = static_cast<int>(std::min<int64_t>((exclude_size + 255) / 256, 65535LL));
+        if (eb < 1) eb = 1;
+        exclude_build_kernel<N_QUBYTES><<<eb, 256, 0, stream>>>(
+            exclude_size, configs_exclude.typed_data(), d_exclude, exclude_cap);
+    }
     int threads = 256, blocks = static_cast<int>(std::min<int64_t>((total + 255) / 256, 65535LL));
     if (blocks < 1) blocks = 1;
     find_topk_kernel<N_QUBYTES><<<blocks, threads, 0, stream>>>(
@@ -617,7 +728,7 @@ ffi::Error FindTopKRelativeConfigsImpl(
         create_mask.typed_data(), annihilate_mask.typed_data(),
         flip_mask.typed_data(), parity_mask.typed_data(),
         parity_const.typed_data(), reinterpret_cast<const double*>(coef.typed_data()),
-        configs_exclude.typed_data(), configs_exclude.dimensions()[0],
+        d_exclude, exclude_cap,
         d_table, cap, d_min);
     int cblocks = static_cast<int>(std::min<int64_t>((cap + 255) / 256, 65535LL));
     if (cblocks < 1) cblocks = 1;
@@ -627,6 +738,7 @@ ffi::Error FindTopKRelativeConfigsImpl(
         reinterpret_cast<double*>(table_weights->untyped_data()));
     cudaFreeAsync(d_table, stream);
     cudaFreeAsync(d_min, stream);
+    if (d_exclude) cudaFreeAsync(d_exclude, stream);
     return ffi::Error::Success();
 }
 

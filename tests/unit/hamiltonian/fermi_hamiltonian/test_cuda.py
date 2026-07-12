@@ -226,6 +226,19 @@ def test_cuda_overflow_retry() -> None:
     assert int(cnt) >= 0
 
 
+def test_cuda_overflow_retry_matches_large_capacity() -> None:
+    # Force the hash table to overflow with a deliberately tiny capacity, then
+    # confirm the Python-side capacity-doubling retry recovers the same result
+    # as a run that starts with ample capacity (no config silently dropped).
+    h = _hopping_h()
+    c = _c4()
+    pi = jnp.ones((4, 2), dtype=jnp.float64)
+    exclude = jnp.zeros((0, 1), dtype=jnp.uint8)
+    _, _, cnt_small = h.find_all_relative_configs(c, pi, exclude, hash_capacity=1)
+    _, _, cnt_large = h.find_all_relative_configs(c, pi, exclude, hash_capacity=256)
+    assert int(cnt_small) == int(cnt_large)
+
+
 # ---- find_topk ----
 
 
