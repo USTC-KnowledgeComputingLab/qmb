@@ -19,7 +19,6 @@ import pytest
 from flax import nnx
 
 from qmp.algorithms.haar import Haar, HaarConfig, KrylovBasisStrategy, _DynamicLanczos, _merge_pools
-from qmp.models._build import SubConfigRef
 from qmp.models.openfermion import Model, ModelConfig
 from qmp.networks.mlp import WaveFunctionElectron as MlpElectron
 from qmp.utility._losses import sum_filtered_angle_scaled_log
@@ -28,14 +27,14 @@ from qmp.utility._losses import sum_filtered_angle_scaled_log
 def _make_h2_molecule(path: str) -> None:
     """Generate real H2/STO-3G data, falling back to pre-computed if PySCF unavailable."""
     try:
-        from openfermion.chem import MolecularData
-        from openfermionpyscf import run_pyscf
+        from openfermion.chem import MolecularData  # noqa: PLC0415
+        from openfermionpyscf import run_pyscf  # ty: ignore[unresolved-import] — optional dependency
 
         geom = [("H", (0.0, 0.0, 0.0)), ("H", (0.0, 0.0, 0.7414))]
         mol = MolecularData(geom, "sto-3g", multiplicity=1, charge=0, filename=path)
         run_pyscf(mol, run_fci=True)
     except ImportError:
-        import numpy as np
+        import numpy as np  # noqa: PLC0415
 
         geom = [("H", (0.0, 0.0, 0.0)), ("H", (0.0, 0.0, 0.7414))]
         mol = openfermion.MolecularData(geom, basis="sto-3g", multiplicity=1, charge=0, filename=path)
@@ -114,7 +113,7 @@ def test_krylov_vs_exact_diagonalization(h2_model: Model, h2_network: MlpElectro
         h_col = h2_model.apply_within_subspace(cfg_j, psi_one, all_configs)
         h_mat = h_mat.at[:, j].set(h_col[:, 0])
 
-    # exact electronic ground state energy （电子哈密顿量，不含核排斥）
+    # exact electronic ground state (no nuclear repulsion)
     exact_electronic = float(jnp.linalg.eigh(h_mat)[0][0])
 
     # Krylov in the same config space
@@ -195,7 +194,7 @@ def test_merge_pools_dedup_prefers_first(h2_network: MlpElectron) -> None:
 
 def test_loss_gradient(h2_network: MlpElectron) -> None:
     """Gradient of loss with respect to network parameters is non-zero for different target."""
-    from flax import nnx
+
 
     key = jax.random.key(42)
     configs, psi = h2_network.generate_unique(16, key=key)

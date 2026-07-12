@@ -19,7 +19,7 @@ def test_krylov_strategy_enum_values() -> None:
 
 
 def test_haar_config_registration() -> None:
-    from qmp.algorithms._registry import action_class_dict, action_config_dict
+    from qmp.algorithms._registry import action_class_dict, action_config_dict  # noqa: PLC0415
 
     assert action_config_dict["haar"] is HaarConfig
     assert action_class_dict["haar"] is Haar

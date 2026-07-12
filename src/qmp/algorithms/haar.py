@@ -170,7 +170,7 @@ class _DynamicLanczos:
         results: list[tuple[float, Array]] = []
         for i in range(k):
             psi = sum(float(vecs[j, i]) * v[j] for j in range(n))
-            results.append((float(vals[i]), psi))
+            results.append((float(vals[i]), psi))  # ty: ignore — dynamic types
         return results
 
     def run(self) -> typing.Iterator[list[tuple[float, Array, Array]]]:
@@ -303,9 +303,11 @@ class Haar:
         loss_fn = _AVAILABLE_LOSSES[config.loss_name]
 
         state: dict[str, typing.Any]
-        state = _load_checkpoint(config.checkpoint_path) if config.checkpoint_path else _init_state()
-        if state is None:
-            state = _init_state()
+        state: dict[str, typing.Any] = _init_state()
+        if config.checkpoint_path:
+            loaded = _load_checkpoint(config.checkpoint_path)
+            if loaded is not None:
+                state = loaded
 
         cycle = state["haar"]["global"]
         max_cycles = config.max_cycles
@@ -359,6 +361,8 @@ class Haar:
             # --- local optimization
             logger.info("Starting local optimization...")
             _new_params, _opt, _step = _local_optimize(
+                typing.cast(object, self._network),
+                configs,
                 self._network,
                 configs,
                 target_psi,
@@ -392,7 +396,7 @@ def _init_state() -> dict[str, typing.Any]:
 
 
 def _local_optimize(
-    network: object,
+    network: typing.Any,
     configs: Array,
     target_psi: Array,
     max_idx: int,
