@@ -73,6 +73,27 @@ def test_fcidump_cache_hit(tmp_path) -> None:
     assert jnp.allclose(diag_a, diag_b)
 
 
+def test_fcidump_diagonal_matches_hand_computation(tmp_path) -> None:
+    """The parsed Hamiltonian yields the expected diagonal for the closed-shell config.
+
+    Both electrons occupy spatial orbital 0 (spin-orbitals 0 and 1, config 0b0011).
+    Diagonal = 2 * h_00 + <00|00> = 2*(-1.2524) + 0.6746 = -1.8302.
+    """
+    model = Model(ModelConfig(model_path=_write_fcidump(tmp_path)))
+    config = jnp.array([[0b00000011]], dtype=jnp.uint8)
+    diagonal = model.compute_diagonal_within_subspace(config)
+    assert float(diagonal[0, 0]) == pytest.approx(-1.8302, abs=1e-4)
+    assert float(diagonal[0, 1]) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_fcidump_empty_config_diagonal_zero(tmp_path) -> None:
+    """The vacuum config has zero diagonal (the constant term is not a fermionic operator)."""
+    model = Model(ModelConfig(model_path=_write_fcidump(tmp_path)))
+    config = jnp.array([[0b00000000]], dtype=jnp.uint8)
+    diagonal = model.compute_diagonal_within_subspace(config)
+    assert float(diagonal[0, 0]) == pytest.approx(0.0, abs=1e-6)
+
+
 def test_fcidump_cache_file_written(tmp_path) -> None:
     """Constructing a model writes exactly one .pkl cache file into models/fcidump."""
     Model(ModelConfig(model_path=_write_fcidump(tmp_path)))

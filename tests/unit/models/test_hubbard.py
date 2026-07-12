@@ -125,3 +125,50 @@ def test_hubbard_show_config_all_occupations() -> None:
 def test_hubbard_network_dict_empty() -> None:
     """network_dict is empty this round."""
     assert Model.network_dict == {}
+
+
+def test_hubbard_diagonal_on_site_interaction() -> None:
+    """Diagonal element of a single site equals U only when doubly occupied (U=3, mu=0)."""
+    model = Model(ModelConfig(m=1, n=1, u=3.0, mu=0.0))
+    configs = jnp.array([[0b00], [0b01], [0b10], [0b11]], dtype=jnp.uint8)
+    diagonal = model.compute_diagonal_within_subspace(configs)
+    assert [float(value) for value in diagonal[:, 0]] == [0.0, 0.0, 0.0, 3.0]
+
+
+def test_hubbard_diagonal_chemical_potential() -> None:
+    """Diagonal element counts occupied orbitals times -mu (mu=0.5, U=0)."""
+    model = Model(ModelConfig(m=1, n=1, u=0.0, mu=0.5))
+    configs = jnp.array([[0b00], [0b01], [0b10], [0b11]], dtype=jnp.uint8)
+    diagonal = model.compute_diagonal_within_subspace(configs)
+    assert [float(value) for value in diagonal[:, 0]] == [0.0, -0.5, -0.5, -1.0]
+
+
+def test_hubbard_apply_within_hopping_amplitude() -> None:
+    """Hopping moves an up electron site0->site1 with amplitude -t (t=1)."""
+    model = Model(ModelConfig(m=2, n=1, t=1.0, u=0.0, mu=0.0))
+    configs_i = jnp.array([[0b0001]], dtype=jnp.uint8)  # site0 spin-up (qubit 0)
+    configs_j = jnp.array([[0b0100]], dtype=jnp.uint8)  # site1 spin-up (qubit 2)
+    psi_i = jnp.array([[1.0, 0.0]], dtype=jnp.float64)
+    result = model.apply_within_subspace(configs_i, psi_i, configs_j)
+    assert float(result[0, 0]) == pytest.approx(-1.0)
+    assert float(result[0, 1]) == pytest.approx(0.0)
+
+
+def test_hubbard_find_all_relative_configs_forwarding() -> None:
+    """find_all_relative_configs forwards with exclude=None and returns padded arrays."""
+    model = Model(ModelConfig(m=2, n=1, t=1.0, u=0.0, mu=0.0))
+    configs_i = jnp.array([[0b0001]], dtype=jnp.uint8)
+    psi_i = jnp.array([[1.0, 0.0]], dtype=jnp.float64)
+    keys, values, count = model.find_all_relative_configs(configs_i, psi_i, hash_capacity=16)
+    assert keys.shape == (16, 1)
+    assert values.shape == (16, 2)
+    assert int(count) == 2  # hopping to site1 for both directions from the single occupied config
+
+
+def test_hubbard_find_topk_relative_configs_forwarding() -> None:
+    """find_topk_relative_configs forwards with exclude=None and returns count_selected rows."""
+    model = Model(ModelConfig(m=2, n=1, t=1.0, u=0.0, mu=0.0))
+    configs_i = jnp.array([[0b0001]], dtype=jnp.uint8)
+    psi_i = jnp.array([[1.0, 0.0]], dtype=jnp.float64)
+    selected = model.find_topk_relative_configs(configs_i, psi_i, 2)
+    assert selected.shape == (2, 1)
