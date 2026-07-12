@@ -142,6 +142,13 @@ def test_main_unknown_action() -> None:
         main(argv=["--action.name", "nonexistent"])
 
 
+def test_main_importable_module_without_registration() -> None:
+    """main() with a name that imports but registers no action → KeyError."""
+    # ``qmp.algorithms._registry`` imports fine but registers no action called "_registry".
+    with pytest.raises(KeyError, match="Unknown action"):
+        main(argv=["--action.name", "_registry"])
+
+
 def test_main_action_params_int_override() -> None:
     """CLI --action.params.sample_count=10 overrides YAML value."""
     yaml_content = """action:
