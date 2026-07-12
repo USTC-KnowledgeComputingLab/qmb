@@ -1,8 +1,8 @@
-"""SubConfigRef and model construction helper.
+"""Model construction helper.
 
-``SubConfigRef`` is an (name, params) pair that action configs embed to
-declare which model they need. ``build_model`` uses the global model
-registry to construct instances from these refs.
+``SubConfigRef`` is an (name, params) pair that action configs embed
+to declare which model they need. ``build_model`` uses the global
+``model_config_dict`` + ``model_dict`` registries to construct instances.
 """
 
 from __future__ import annotations
