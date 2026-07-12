@@ -59,8 +59,8 @@ def main(argv: list[str] | None = None) -> None:
     cfg_cls = action_config_dict[cli.action.name]
     cfg = dacite.from_dict(cfg_cls, cli.action.params)
     impl_cls = action_class_dict[cli.action.name]
-    instance = impl_cls(cfg)  # ty: ignore — dynamic dispatch from registry dict
-    instance.run()  # ty: ignore — dynamic dispatch from registry dict
+    instance = impl_cls(cfg)
+    instance.run()
 
 
 if __name__ == "__main__":
