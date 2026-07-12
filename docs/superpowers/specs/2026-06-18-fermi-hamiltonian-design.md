@@ -157,7 +157,7 @@ for each term_t:
 
 **并行度**: grid-stride loop，grid 大小按 SM 数量 × 最大 occupancy 设定（~10^5 blocks 级别，而非 T×B = 10^12）。每个 block 内循环处理多个 term × config 对。
 
-**预过滤** (planned, not yet in active path): Python 层预处理阶段将 term 按 `flip_mask[t] == 0` 分为对角 term 和非对角 term。`compute_diagonal_within_subspace` 可仅遍历对角 term 子集（diagonal terms 通常只占 1-10% 总 term 数），减少 90-99% 无用线程。当前实现中 `_diag_idx` 已计算并写入日志，但 kernel 仍遍历全部 terms 并在运行时检查 `flip_mask[t] == 0`。
+**预过滤** (implemented): `FermiHamiltonian` 初始化时按 `flip_mask[t] == 0` 切出对角 term 子集 (`_diag_*` 数组)。`compute_diagonal_within_subspace` 只把该子集传给 kernel/fallback，跳过绝大多数非对角 term (对角 term 通常仅占 1-10%)。kernel 内仍保留 `flip_mask[t]==0` 检查作为冗余保险。
 
 **块级归约** (planned, not yet implemented): 每个 block 的多个线程可能对同一个 `psi[i]` 累加贡献。设计上先用 shared memory 做 intra-block 归约，最后每个 block 只发一次 `atomicAdd`，在 diagonal term 密集时（多 term 对应同一 config）显著减少 L2 原子争用。当前实现为求正确性简单起见，每个 (term, config) 对直接 `atomicAdd` 到全局 `psi[i]`（初版的 `s_re[i % 256]` shared-mem 归约在 `B > 256` / 多 block 时有 slot 串号 bug，已移除）。
 
@@ -187,9 +187,9 @@ for each term_t:
         atomicAdd(psi_j[idx,1], contribution.imag)
 ```
 
-**方向选择**: `direction` 由调用方指定语义 (forward = H, backward = H^†)，据此固定 src/dst——forward: src=configs_i、dst=configs_j、输出 `[B_j,2]`；backward: src=configs_j、dst=configs_i、输出 `[B_i,2]`，系数取共轭。规划中可进一步在 forward/backward 内部选 B_i/B_j 中较小侧遍历以最小化总线程数 (planned, not yet implemented——当前按 direction 固定 src 侧遍历)。
+**方向选择与择小侧遍历** (implemented): `direction` 由调用方指定语义 (forward = H, backward = H^†)，据此固定 src/dst——forward: src=configs_i、dst=configs_j、输出 `[B_j,2]`；backward: src=configs_j、dst=configs_i、输出 `[B_i,2]`，系数取共轭。在此语义之上，kernel 总是遍历 `min(B_src, B_dst)` 较小侧、把哈希表建在被查找的另一侧以最小化总线程数 (`T × 较小侧`)。因 flip 自逆，两种遍历模式枚举的 (src, dst) 连接对集合相同，`psi_j` 逐位一致；`src_psi` 始终按 src 侧下标索引。
 
-- **`__ldg()` 读取** (partially implemented): 设计上所有只读输入 (configs, 各 mask, parity_const, coef) 都通过 `__ldg()` 走 read-only cache 减少 L1 压力。当前实现中 coef / psi / parity_const 及 n_qubytes>8 的逐字节路径已用 `__ldg()`；config 字节与 n_qubytes≤8 的 uint64 快路径 (`load_u64` 经 `__builtin_memcpy`) 仍为普通读取，尚未全面覆盖。
+- **`__ldg()` 读取**: coef / psi / parity_const 及 n_qubytes>8 的逐字节路径通过 `__ldg()` 走 read-only cache。**n_qubytes≤8 的打包 uint64 快路径不使用 `__ldg`**（设计排除，非待办优化）：config/mask 行仅 1 字节对齐，64 位 `__ldg` 会是错位加载；逐字节 `__ldg` 又会抵消单寄存器加载的初衷，二者互斥。
 - **哈希表跨调用缓存** (planned, placeholder only): 若 `configs_j` 在多轮迭代中不变（Lanczos 内循环常见），复用哈希表省 50-200ms 构建时间。`FermiHamiltonian` 中已预留 `_apply_hash_cache` 字段，但 CUDA kernel 当前每次调用均重新构建哈希表。
 - **哈希函数**: 使用 wyhash。config bytes 非随机（受占据数、自旋守恒约束），wyhash 使用 multiply-and-xor 链 (wymum) 对结构化 occupation-number 字节有良好扩散。
 
@@ -206,8 +206,8 @@ for each term_t:
         if not is_applicable(config_i, create_mask[t], annihilate_mask[t]): continue
         new_config = config_i XOR flip_mask[t]
 
-        # 排除已知构型: 线性扫描 configs_exclude
-        if linear_scan_match(exclude_configs, new_config) >= 0: continue
+        # 排除已知构型: O(1) 查询排除集哈希表 (exclude_slot)
+        if exclude_table.contains(new_config): continue
 
         # 计算贡献
         parity = parity_const[t] XOR popcount(parity_mask[t] & config_i) & 1
@@ -219,14 +219,14 @@ for each term_t:
         if slot: atomicAdd(slot, contribution)
         else: hash_table.insert_cas(new_config, contribution)
 
-# kernel 退出后 → host 端线性扫描收集非空 slots
+# kernel 退出后 → collect kernel 线性扫描收集非空 slots (回填 new_configs/psi_j/count)
 ```
 
 **容量**: 10^7 distinct → ~600 MB; 10^8 → ~6 GB。预分配，零运行时分配。
 
-**溢出保护**: 插入时 probe 超硬上限 100 → 标记 overflow → 不可静默丢弃 config。Python 层尚未读取 overflow 标志以 retry。
+**溢出保护** (implemented): 插入时 probe 超硬上限 100 → 置 overflow 标志。kernel 通过额外的 `overflow` 结果返回给 Python；Python 层检测到 overflow 即将 `hash_capacity` 翻倍重试 (最多 `_MAX_HASH_RETRIES=8` 次)，绝不静默丢弃 config。
 
-**排除集**: 对 `configs_exclude` 进行线性扫描排除已知构型（terms × configs 数量级不高时可行）。规划中可用第二个 `cuco::static_map` 替代线性扫描以支持更大排除集。
+**排除集** (implemented): 每次调用先对 `configs_exclude` 构建第二个自定义线性探测哈希表 (`exclude_slot`, wyhash64)，kernel 内以 O(1) 查询替代原线性扫描。exclude 为空时不建表。
 
 #### 3.2.4 `find_topk_relative_configs` — Top-K 选择
 
@@ -251,7 +251,7 @@ for each term_t:
 # kernel 退出后 → Python/JAX 层 argsort → top K
 ```
 
-**实现**: 当前为单次 kernel 启动。规划中的 between-kernel compaction（chunking + CUB radix sort + rebuild）可在 terms 数量极大时降低内存占用，尚未实现。
+**实现**: 当前为单次 kernel 启动。排除集与 find_all 一致，用第二个哈希表 (`exclude_slot`) 做 O(1) 查询 (implemented)。规划中的 between-kernel compaction（chunking + CUB radix sort + rebuild + `global_min_weight` 剪枝）可在 terms 数量极大时降低内存占用，尚未实现。
 
 **`max` 而非 `sum` 的理由**: (a) `atomicMax` 单调确定，而 `atomicAdd` 浮点非结合导致非确定性；(b) 量子化学中 `|H_ij*c_i|²` 近似 power-law，`max` 与 `sum` 高度相关（Spearman ρ≈0.75-0.95），max 足以选出最重要的 configs；(c) 无需 Gumbel 噪声——其对 K=100K 引入 ~5-15% 排名翻转，且每次额外 60+ cycles 计算成本。
 

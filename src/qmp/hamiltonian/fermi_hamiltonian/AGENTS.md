@@ -80,19 +80,19 @@ CUDA kernel 与纯 JAX fallback 两套实现，输出语义一致 (`allclose` �
 
 ### compute_diagonal_within_subspace
 
-对每个 config 累加不改变构型的哈密顿项系数 (对角元)。`flip_mask[t] == 0` 项才对对角有贡献。CUDA: grid-stride 遍历 (term, config) 对，直接 `atomicAdd` 到全局 `psi`(shared-memory 块级归约见 spec §3.2.1，计划中未实现)。
+对每个 config 累加不改变构型的哈密顿项系数 (对角元)。`flip_mask[t] == 0` 项才对对角有贡献。`FermiHamiltonian` 初始化时预切对角 term 子集 (`_diag_*`)，只把该子集传给 kernel/fallback，跳过 90-99% 非对角 term。CUDA: grid-stride 遍历 (对角 term, config) 对，直接 `atomicAdd` 到全局 `psi`(shared-memory 块级归约见 spec §3.2.1，计划中未实现)。
 
 ### apply_within_subspace
 
-稀疏矩阵乘向量: H · psi_i 投影到 configs_j 张成的子空间。支持 forward/backward 双向 (`direction`，backward 即 H^†，交换 src/dst 且系数取共轭)。CUDA: 先用一个 build kernel 把目标子空间 configs 插入线性探测哈希表 (key=config, value=index)，再由主 kernel 查表 O(1) 定位并 `atomicAdd`。
+稀疏矩阵乘向量: H · psi_i 投影到 configs_j 张成的子空间。支持 forward/backward 双向 (`direction`，backward 即 H^†，交换 src/dst 且系数取共轭)。CUDA: 总是遍历 `min(B_src, B_dst)` 较小侧、把线性探测哈希表建在被查找的另一侧以最小化线程数 (flip 自逆，两种遍历结果逐位一致)；主 kernel 查表 O(1) 定位并 `atomicAdd`。
 
 ### find_all_relative_configs
 
-全部列举新构型 + 去重 + 振幅累加。CUDA: 自定义 CAS 哈希表 (`findall_slot`, wyhash64)，claim-then-publish 插入 (无自旋，避免 SIMT 死锁)，probe 上限 100 触发 overflow 标记; 随后 collect kernel 线性扫描把非空 slot 压缩回填到 `new_configs`/`psi_j` 并计数。排除集线性扫描。
+全部列举新构型 + 去重 + 振幅累加。CUDA: 自定义 CAS 哈希表 (`findall_slot`, wyhash64)，claim-then-publish 插入 (无自旋，避免 SIMT 死锁)，probe 上限 100 触发 overflow → kernel 返回 overflow 标志，Python 层翻倍 `hash_capacity` 重试 (≤8 次)，不丢构型; collect kernel 压缩非空 slot 回填 `new_configs`/`psi_j` 并计数。排除集用第二哈希表 (`exclude_slot`) O(1) 查询。
 
 ### find_topk_relative_configs
 
-Top-K 选择。CUDA: 容量 2K 的哈希表按构型聚合权重 (`atomicMax`，double 用 CAS-loop 实现)；collect kernel 导出完整 (keys, weights) 表，Python 层 `argsort` 取 top-K——与 fallback 完全一致。
+Top-K 选择。CUDA: 容量 2K 的哈希表按构型聚合权重 (`atomicMax`，double 用 CAS-loop 实现)；排除集同样用第二哈希表 O(1) 查询; collect kernel 导出完整 (keys, weights) 表，Python 层 `argsort` 取 top-K——与 fallback 完全一致。
 
 ## 多节点多卡 (计划中)
 

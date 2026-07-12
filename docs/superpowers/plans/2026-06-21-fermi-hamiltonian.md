@@ -1374,9 +1374,9 @@ git commit -m "test: add CUDA vs JAX fallback regression tests"
 
 Spec §3.2.1 的设计: `compute_diagonal_within_subspace` 用 shared memory 做 intra-block 归约，每个 block 只发一次 `atomicAdd`（block 内 `__shared__ double2 accum[256]` warp-level reduction，thread 0 写回 global），以减少 diagonal term 密集时的 L2 原子争用。**尚未实现**: 当前每个 (term, config) 对直接 `atomicAdd` 到全局 `psi`。初版尝试的 `s_re[i % 256]` shared-mem 归约在 `B > 256` / 多 block 时有 slot 串号 bug，修复时移除，改直接原子累加以保正确性；shared-mem 归约作为未来优化保留。
 
-### 补充 2: `__ldg()` 读取优化（Task 8a-8d）— partially implemented
+### 补充 2: `__ldg()` 读取优化（Task 8a-8d）— 设计范围已定
 
-Spec §3.2.2 的设计: 所有只读输入（configs, create_mask, annihilate_mask, flip_mask, parity_mask, parity_const, coef）通过 `__ldg()` 走 read-only cache。**部分实现**: coef / psi / parity_const 以及 n_qubytes>8 的逐字节路径已用 `__ldg()`；config 字节与 n_qubytes≤8 的 uint64 快路径 (`load_u64` 经 `__builtin_memcpy`) 仍为普通读取，全面覆盖待后续完成。
+`__ldg()` 用于 coef / psi / parity_const 以及 n_qubytes>8 的逐字节路径。**n_qubytes≤8 的打包 uint64 快路径 (`load_u64` 经 `__builtin_memcpy`) 设计上不使用 `__ldg`**: config/mask 行仅 1 字节对齐，64 位 `__ldg` 是错位加载，逐字节 `__ldg` 又抵消单寄存器加载初衷——二者互斥，故快路径永久豁免，非待办项。
 
 ### 补充 3: 哈希表跨调用缓存（Task 8b）— 预留未启用
 
@@ -1402,9 +1402,9 @@ Spec §5.1-5.3 要求但 plan 初始未包含的测试（均已添加）:
 
 ### 补充 6: `if constexpr (n_qubytes <= 8)` 静态分发 (Task 8a-8d)
 
-### 补充 7: compute_diagonal 预过滤 (Task 6, Task 8a) — 索引已计算，未用于传参
+### 补充 7: compute_diagonal 预过滤 (Task 6, Task 8a) — 已实现
 
-Spec §3.2.1: 仅遍历 flip_mask==0 的对角 term 子集。`FermiHamiltonian` 已计算 `_diag_idx`（flip_mask==0 的 term 索引）并写入日志，但 `compute_diagonal_within_subspace` 的 CUDA 和 JAX 路径仍接收全部 term masks，在 kernel 内部运行时检查 `flip_mask[t]==0`。将 `_diag_idx` 用于传参过滤可减少 90-99% 无用遍历，但需注意 JIT trace 下索引切片（非静态 shape）可能额外触发 re-trace。
+Spec §3.2.1: 仅遍历 flip_mask==0 的对角 term 子集。`FermiHamiltonian` 初始化时按 `flip_mask==0` 切出对角 term 子集数组 (`_diag_create_mask` 等)，`compute_diagonal_within_subspace` 只把该子集传给 CUDA/JAX 路径，跳过 90-99% 非对角 term。切片在 eager 的 `__init__` 中完成 (非 jit)，无 re-trace 问题。
 
 Spec §3.2: n_qubits ≤ 64 时走 `uint64_t` 单寄存器。执行 agent 须在 CUDA kernel 中实现两条编译期路径：`if constexpr (n_qubytes <= 8)` 用 `uint64_t` 批量 AND/POPCNT/XOR，else 逐字节循环。`n_qubytes` 是 template parameter，false 分支不参与编译。
 
@@ -1416,3 +1416,21 @@ Spec §3.2: n_qubits ≤ 64 时走 `uint64_t` 单寄存器。执行 agent 须在
 - `apply_within_subspace`: `@partial(jax.jit, static_argnums=(9,))` + `jnp.where` masking — `direction` 编译期固定，内层查表向量化。已通过。
 - `find_all_relative_configs`: `@partial(jax.jit, static_argnums=(9,))` + `lax.fori_loop` + `lax.cond` — 哈希表操作用 `fori_loop` 携带可变状态，每个分支决策用 `lax.cond`。已通过。
 - `find_topk_relative_configs`: `@partial(jax.jit, static_argnums=(2,))` + `lax.fori_loop` + `lax.cond` — 同上。已通过。
+
+### 补充 9: CUDA 优化项对齐 (设计目标 vs 代码) — 状态汇总
+
+对 spec §3.2 列出的优化项逐一核对，本轮 (CUDA 修复后的对齐轮次) 完成情况:
+
+**已实现:**
+- #2 `__ldg` 范围: 设计范围已定 (打包 uint64 快路径因对齐永久豁免，非待办)。
+- #3 apply_within 择小侧遍历: 总是遍历 `min(B_src, B_dst)`、建表于另一侧; flip 自逆保证逐位一致。
+- #4 compute_diagonal 对角 term 预过滤: init 切子集，只传对角 term。
+- #6 find_all overflow retry: kernel 返回 overflow 标志，Python 翻倍 capacity 重试 (≤8 次)。
+- #8 排除集第二哈希表: find_all/find_topk 用 `exclude_slot` O(1) 查询替代线性扫描。
+
+**仍为 planned (未实现，见对应补充):**
+- #1 diagonal 块级 shared-mem 归约 (补充 1)。
+- #5 apply_within 哈希表跨调用缓存 (补充 3；`_apply_hash_cache` 占位)。
+- #7 find_topk chunked compaction + `global_min_weight` 剪枝 (spec §3.2.4)。
+- 多节点多卡 shard_map (spec §6 非目标)。
+- find_all 高冲突并发去重的严格性 (claim-then-probe 去死锁改法下，极端并发理论上可能重复 slot；当前测试规模内精确)。
