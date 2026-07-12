@@ -159,7 +159,7 @@ for each term_t:
 
 **预过滤** (implemented): `FermiHamiltonian` 初始化时按 `flip_mask[t] == 0` 切出对角 term 子集 (`_diag_*` 数组)。`compute_diagonal_within_subspace` 只把该子集传给 kernel/fallback，跳过绝大多数非对角 term (对角 term 通常仅占 1-10%)。kernel 内仍保留 `flip_mask[t]==0` 检查作为冗余保险。
 
-**块级归约** (planned, not yet implemented): 每个 block 的多个线程可能对同一个 `psi[i]` 累加贡献。设计上先用 shared memory 做 intra-block 归约，最后每个 block 只发一次 `atomicAdd`，在 diagonal term 密集时（多 term 对应同一 config）显著减少 L2 原子争用。当前实现为求正确性简单起见，每个 (term, config) 对直接 `atomicAdd` 到全局 `psi[i]`（初版的 `s_re[i % 256]` shared-mem 归约在 `B > 256` / 多 block 时有 slot 串号 bug，已移除）。
+**归约** (implemented, one-thread-per-config): 对角元 `psi[i]` 互相独立，因此分配一个线程负责一个 config，在寄存器里累加所有对角 term 的贡献，最后一次性写回 `psi[i]`（无 atomicAdd、无 shared-memory 归约、无需 memset）。这比原设计的 shared-memory 块级归约更彻底地消除了 L2 原子争用。配合上面的对角 term 预过滤，每线程只遍历对角 term 子集。
 
 #### 3.2.2 `apply_within_subspace` — 稀疏 H·psi 投影
 
@@ -219,8 +219,10 @@ for each term_t:
         if slot: atomicAdd(slot, contribution)
         else: hash_table.insert_cas(new_config, contribution)
 
-# kernel 退出后 → collect kernel 线性扫描收集非空 slots (回填 new_configs/psi_j/count)
+# kernel 退出后 → 两趟 collect (canonical-slot 归并) 回填 new_configs/psi_j/count
 ```
+
+**并发去重** (implemented): 为避免 SIMT 自旋死锁，插入时遇到 mid-publish 的 slot 会跳到下一槽，极端并发下同一 config 可能落在多个 slot。collect 分两趟按"规范首槽"归并：趟1 每个 key 的规范首槽 (其探测链上第一个持有该 key 的 slot) 领一个输出下标并写 key；趟2 每个 slot 把振幅 `atomicAdd` 到其规范首槽的输出。因插入从不跳过空槽，同一 key 的所有 slot 落在从 `hash(key)` 起的连续 occupied 段内，所有重复都归约到同一规范槽，故 count 与累加振幅精确。
 
 **容量**: 10^7 distinct → ~600 MB; 10^8 → ~6 GB。预分配，零运行时分配。
 
@@ -248,10 +250,10 @@ for each term_t:
         if slot: atomicMax(slot.weight, weight)
         else: hash_table.insert_cas(new_config, weight)
 
-# kernel 退出后 → Python/JAX 层 argsort → top K
+# kernel 退出后 → collect (canonical-slot 去重) → Python/JAX 层 argsort → top K
 ```
 
-**实现**: 当前为单次 kernel 启动。排除集与 find_all 一致，用第二个哈希表 (`exclude_slot`) 做 O(1) 查询 (implemented)。规划中的 between-kernel compaction（chunking + CUB radix sort + rebuild + `global_min_weight` 剪枝）可在 terms 数量极大时降低内存占用，尚未实现。
+**实现**: 当前为单次 kernel 启动。排除集与 find_all 一致，用第二个哈希表 (`exclude_slot`) 做 O(1) 查询 (implemented)。**并发去重** (implemented): collect kernel 对每个 key 只让其规范首槽输出、并取该 key 所有重复 slot 的 max 权重，非规范 slot 输出权重 0，保证同一 config 不占用多个 top-K 名额。规划中的 between-kernel compaction（chunking + CUB radix sort + rebuild + `global_min_weight` 剪枝）可在 terms 数量极大时降低内存占用，尚未实现 (planned)——`global_min_weight` 当前恒为 0 (无剪枝)。
 
 **`max` 而非 `sum` 的理由**: (a) `atomicMax` 单调确定，而 `atomicAdd` 浮点非结合导致非确定性；(b) 量子化学中 `|H_ij*c_i|²` 近似 power-law，`max` 与 `sum` 高度相关（Spearman ρ≈0.75-0.95），max 足以选出最重要的 configs；(c) 无需 Gumbel 噪声——其对 K=100K 引入 ~5-15% 排名翻转，且每次额外 60+ cycles 计算成本。
 

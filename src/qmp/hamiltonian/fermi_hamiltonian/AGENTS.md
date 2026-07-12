@@ -80,7 +80,7 @@ CUDA kernel 与纯 JAX fallback 两套实现，输出语义一致 (`allclose` �
 
 ### compute_diagonal_within_subspace
 
-对每个 config 累加不改变构型的哈密顿项系数 (对角元)。`flip_mask[t] == 0` 项才对对角有贡献。`FermiHamiltonian` 初始化时预切对角 term 子集 (`_diag_*`)，只把该子集传给 kernel/fallback，跳过 90-99% 非对角 term。CUDA: grid-stride 遍历 (对角 term, config) 对，直接 `atomicAdd` 到全局 `psi`(shared-memory 块级归约见 spec §3.2.1，计划中未实现)。
+对每个 config 累加不改变构型的哈密顿项系数 (对角元)。`flip_mask[t] == 0` 项才对对角有贡献。`FermiHamiltonian` 初始化时预切对角 term 子集 (`_diag_*`)，只把该子集传给 kernel/fallback，跳过 90-99% 非对角 term。CUDA: 一个线程负责一个 config，寄存器累加所有对角 term 后一次性写回 `psi[i]`(对角元互相独立，无 atomicAdd、无 shared-mem 归约)。
 
 ### apply_within_subspace
 
@@ -88,11 +88,11 @@ CUDA kernel 与纯 JAX fallback 两套实现，输出语义一致 (`allclose` �
 
 ### find_all_relative_configs
 
-全部列举新构型 + 去重 + 振幅累加。CUDA: 自定义 CAS 哈希表 (`findall_slot`, wyhash64)，claim-then-publish 插入 (无自旋，避免 SIMT 死锁)，probe 上限 100 触发 overflow → kernel 返回 overflow 标志，Python 层翻倍 `hash_capacity` 重试 (≤8 次)，不丢构型; collect kernel 压缩非空 slot 回填 `new_configs`/`psi_j` 并计数。排除集用第二哈希表 (`exclude_slot`) O(1) 查询。
+全部列举新构型 + 去重 + 振幅累加。CUDA: 自定义 CAS 哈希表 (`findall_slot`, wyhash64)，claim-then-probe 插入 (无自旋，避免 SIMT 死锁)，probe 上限 100 触发 overflow → kernel 返回 overflow 标志，Python 层翻倍 `hash_capacity` 重试 (≤8 次)，不丢构型; 两趟 collect 按"规范首槽"归并并发产生的重复 slot，count 与累加振幅精确。排除集用第二哈希表 (`exclude_slot`) O(1) 查询。
 
 ### find_topk_relative_configs
 
-Top-K 选择。CUDA: 容量 2K 的哈希表按构型聚合权重 (`atomicMax`，double 用 CAS-loop 实现)；排除集同样用第二哈希表 O(1) 查询; collect kernel 导出完整 (keys, weights) 表，Python 层 `argsort` 取 top-K——与 fallback 完全一致。
+Top-K 选择。CUDA: 容量 2K 的哈希表按构型聚合权重 (`atomicMax`，double 用 CAS-loop 实现)；排除集同样用第二哈希表 O(1) 查询; collect kernel 按"规范首槽"去重 (每 key 只输出一次、取其重复 slot 的 max 权重)，Python 层 `argsort` 取 top-K——保证 top-K 无重复构型，与 fallback 一致。chunked compaction + `global_min_weight` 剪枝为计划中 (spec §3.2.4)。
 
 ## 多节点多卡 (计划中)
 

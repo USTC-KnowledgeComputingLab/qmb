@@ -1370,9 +1370,9 @@ git commit -m "test: add CUDA vs JAX fallback regression tests"
 
 以下事项 spec 有明确要求，但 plan 中未完整展开。执行 agent 必须在对应任务中补全：
 
-### 补充 1: 块级归约（Task 8a）— planned, not yet implemented
+### 补充 1: diagonal 归约（Task 8a）— 已实现 (one-thread-per-config)
 
-Spec §3.2.1 的设计: `compute_diagonal_within_subspace` 用 shared memory 做 intra-block 归约，每个 block 只发一次 `atomicAdd`（block 内 `__shared__ double2 accum[256]` warp-level reduction，thread 0 写回 global），以减少 diagonal term 密集时的 L2 原子争用。**尚未实现**: 当前每个 (term, config) 对直接 `atomicAdd` 到全局 `psi`。初版尝试的 `s_re[i % 256]` shared-mem 归约在 `B > 256` / 多 block 时有 slot 串号 bug，修复时移除，改直接原子累加以保正确性；shared-mem 归约作为未来优化保留。
+Spec §3.2.1 初版设想用 shared memory 做 intra-block 归约。实际采用更优方案: 对角元互相独立，故一个线程负责一个 config、寄存器累加所有对角 term、一次性写回 `psi[i]`，彻底消除 atomicAdd 与 L2 争用，且无需 shared memory 或 memset。初版的 `s_re[i % 256]` shared-mem 归约在 `B > 256` / 多 block 时有 slot 串号 bug，已弃用。
 
 ### 补充 2: `__ldg()` 读取优化（Task 8a-8d）— 设计范围已定
 
@@ -1422,15 +1422,16 @@ Spec §3.2: n_qubits ≤ 64 时走 `uint64_t` 单寄存器。执行 agent 须在
 对 spec §3.2 列出的优化项逐一核对，本轮 (CUDA 修复后的对齐轮次) 完成情况:
 
 **已实现:**
+- #1 diagonal 归约: one-thread-per-config 寄存器累加，零 atomicAdd (补充 1)。
 - #2 `__ldg` 范围: 设计范围已定 (打包 uint64 快路径因对齐永久豁免，非待办)。
 - #3 apply_within 择小侧遍历: 总是遍历 `min(B_src, B_dst)`、建表于另一侧; flip 自逆保证逐位一致。
 - #4 compute_diagonal 对角 term 预过滤: init 切子集，只传对角 term。
 - #6 find_all overflow retry: kernel 返回 overflow 标志，Python 翻倍 capacity 重试 (≤8 次)。
 - #8 排除集第二哈希表: find_all/find_topk 用 `exclude_slot` O(1) 查询替代线性扫描。
+- #10 find_all 并发去重严格性: 两趟 canonical-slot 归并，count/振幅精确 (高冲突对拍测试验证)。
+- find_topk 并发去重: collect 按 canonical slot 去重，top-K 无重复构型。
 
-**仍为 planned (未实现，见对应补充):**
-- #1 diagonal 块级 shared-mem 归约 (补充 1)。
+**仍为 planned (未实现):**
 - #5 apply_within 哈希表跨调用缓存 (补充 3；`_apply_hash_cache` 占位)。
-- #7 find_topk chunked compaction + `global_min_weight` 剪枝 (spec §3.2.4)。
+- #7 find_topk chunked compaction + `global_min_weight` 剪枝 (spec §3.2.4；`global_min_weight` 当前恒 0 无剪枝)。零可测收益 + 高复杂度，仅为超大 term 数预留。
 - 多节点多卡 shard_map (spec §6 非目标)。
-- find_all 高冲突并发去重的严格性 (claim-then-probe 去死锁改法下，极端并发理论上可能重复 slot；当前测试规模内精确)。
