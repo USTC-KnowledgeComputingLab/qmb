@@ -2,4 +2,7 @@
 
 from __future__ import annotations
 
-__all__: list[str] = []
+from . import mlp
+from ._protocol import NetworkProto
+
+__all__ = ["NetworkProto", "mlp"]
