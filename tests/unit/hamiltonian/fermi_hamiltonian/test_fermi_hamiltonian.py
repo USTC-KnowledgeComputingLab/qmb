@@ -8,7 +8,10 @@ is otherwise only touched on GPU:
 - backend selection (cpu device -> fallback, never compiles nvcc);
 - diagonal-term pre-filtering (only flip_mask==0 terms are kept/passed);
 - operator forwarding + output shapes for all four operations;
-- the find_all overflow/return contract and find_topk argsort wrapper.
+- the find_all (configs, psi, count) return contract and find_topk row count.
+
+Note: the find_all overflow-retry loop lives in the CUDA branch only and is
+covered by test_cuda.py (test_cuda_overflow_retry*), not here.
 """
 
 from __future__ import annotations
