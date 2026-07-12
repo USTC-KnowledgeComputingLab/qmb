@@ -1391,7 +1391,7 @@ Spec §5.1-5.3 要求但 plan 初始未包含的测试（均已添加）:
 - `test_diagonal_hand_calculated`: ✓ `test_diagonal_exact`, `test_diagonal_all_hopping`, `test_diagonal_complex_coef`, `test_diagonal_only_hamiltonian`
 - `test_hash_table_overflow_retry`: ✓ `test_cuda_overflow_retry`
 - `test_cuda_apply_within`, `test_cuda_find_all`, `test_cuda_find_topk`: ✓ 全部 30 个 CUDA 测试
-- 总计: fermi_hamiltonian 子系统 prepare 32 + fallback 40 + cuda 30 = 102; 全仓库 149
+- 总计: fermi_hamiltonian 子系统 prepare 32 + fallback 40 + cuda 30 + FermiHamiltonian 类(CPU 路径) 7 = 109; 全仓库 156。注: `test_fermi_hamiltonian.py` 在 CPU 上驱动 `FermiHamiltonian` 类 (routes to fallback)，覆盖 CUDA 测试因无 GPU 被跳过时仍需验证的 Python 层逻辑 (后端选择、#4 对角预过滤、转发/形状、find_all/find_topk 包装)。
 
 > **CUDA 状态更新 (后续修复轮次)**: Task 8 初版的 CUDA kernel 无法编译且三个操作为未完成 stub，`_try_register_ffi` 的 try/except 静默吞掉编译失败使 GPU 上实际跑的是 fallback (测试形同虚设)。后续修复轮次已让 CUDA 完整可用: 修全部编译错误、补 apply/find_all/find_topk 的哈希表构建与结果回填、修 misaligned uint64 读取 (改 `__builtin_memcpy`)、去除 SIMT 自旋死锁、atomicMax-double 改 CAS-loop。30 个 CUDA 测试现在真正在 GPU 上执行并与 fallback `allclose` 对拍通过 (需 `jax_enable_x64`, 见 `tests/conftest.py`)。
 
