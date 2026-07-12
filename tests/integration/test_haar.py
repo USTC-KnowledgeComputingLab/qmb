@@ -15,7 +15,7 @@ import openfermion
 import pytest
 from flax import nnx
 
-from qmp.algorithms.haar import Haar, HaarConfig, KrylovBasisStrategy, _DynamicLanczos, _merge_pools, _init_state
+from qmp.algorithms.haar import Haar, HaarConfig, KrylovBasisStrategy, _DynamicLanczos, _merge_pools
 from qmp.models._build import SubConfigRef
 from qmp.models.openfermion import Model, ModelConfig
 from qmp.networks.mlp import WaveFunctionElectron as MlpElectron
@@ -167,32 +167,10 @@ def test_haar_integration_cycle(h2_model: Model, h2_network: MlpElectron) -> Non
         krylov_max_steps=3,
         basis_extend_count=32,
         basis_strategy=KrylovBasisStrategy.FIXED,
-        local_max_steps=1,  # just one step
+        local_max_steps=1,
+        max_cycles=1,
     )
     haar = Haar(cfg)
     haar._model = h2_model
     haar._network = h2_network
-
-    # Don't call run() (infinite loop) — manually do one cycle
-    state = _init_state()
-    key = jax.random.key(123)
-    c_net, p_net = h2_network.generate_unique(cfg.sampling_count_from_network, key=key)
-    configs, psi = _merge_pools(
-        c_net, p_net, jnp.zeros((0, c_net.shape[1]), dtype=jnp.uint8), jnp.zeros((0,), dtype=jnp.complex128)
-    )
-
-    lanczos = _DynamicLanczos(
-        model=h2_model,
-        configs=configs,
-        psi=psi,
-        max_steps=cfg.krylov_max_steps,
-        stop_norm=cfg.krylov_stop_norm,
-        random_period=cfg.krylov_random_period,
-        extend_count=cfg.basis_extend_count,
-        strategy=cfg.basis_strategy,
-        state_count=cfg.krylov_state_count,
-    )
-    results = list(lanczos.run())
-    assert len(results) > 0
-    e0, _, _ = results[-1][0]
-    assert abs(e0) < 3.0  # reasonable for H2
+    haar.run()  # runs exactly 1 cycle

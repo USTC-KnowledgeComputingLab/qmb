@@ -71,6 +71,7 @@ class HaarConfig:
 
     checkpoint_path: str | None = None
     checkpoint_interval: int = 1
+    max_cycles: int = -1  # -1 = infinite loop, >0 = run exactly N cycles then return
 
 
 # ==============================================================================
@@ -239,9 +240,13 @@ def _merge_pools(ca: Array, pa: Array, cb: Array, pb: Array) -> tuple[Array, Arr
     # pool first so that for duplicate configs pool psi wins (return_index picks first)
     both_c = jnp.concatenate([cb, ca], axis=0)
     both_p = jnp.concatenate([pb, pa], axis=0)
+    n_bytes = both_c.shape[1]
+    padded = n_bytes if n_bytes % 4 == 0 else ((n_bytes // 4) + 1) * 4
+    if n_bytes < padded:
+        both_c = jnp.pad(both_c, ((0, 0), (0, padded - n_bytes)))
     flat = both_c.reshape(both_c.shape[0], -1).view(jnp.uint32)
     _, idx = jnp.unique(flat, axis=0, return_index=True)
-    return both_c[idx], both_p[idx]
+    return both_c[idx, :n_bytes], both_p[idx]
 
 
 # ==============================================================================
@@ -303,15 +308,16 @@ class Haar:
             state = _init_state()
 
         cycle = state["haar"]["global"]
+        max_cycles = config.max_cycles
         logger.info("HAAR starting from cycle %d", int(cycle))
 
-        while True:
+        while max_cycles < 0 or cycle < state["haar"]["global"] + max_cycles:
             logger.info("=== Cycle %d ===", int(cycle))
             key = jax.random.key(cycle * config.sampling_count_from_network)
 
             # --- sample ---
             logger.info("Sampling from network...")
-            c_net, p_net, _ = self._network.generate_unique(config.sampling_count_from_network, key=key)  # ty: ignore — network dynamic
+            c_net, p_net = self._network.generate_unique(config.sampling_count_from_network, key=key)  # ty: ignore — network dynamic
 
             logger.info("Sampling from pool...")
             key2 = jax.random.fold_in(key, 1)
