@@ -1401,9 +1401,11 @@ Spec §3.2.1: 仅遍历 flip_mask==0 的对角 term 子集。执行时在 FermiH
 
 Spec §3.2: n_qubits ≤ 64 时走 `uint64_t` 单寄存器。执行 agent 须在 CUDA kernel 中实现两条编译期路径：`if constexpr (n_qubytes <= 8)` 用 `uint64_t` 批量 AND/POPCNT/XOR，else 逐字节循环。`n_qubytes` 是 template parameter，false 分支不参与编译。
 
-### 补充 8: JAX fallback JIT 兼容性 (Task 4) — 部分已解决
+### 补充 8: JAX fallback JIT 兼容性 (Task 4) — 已解决
 
-- `compute_diagonal_within_subspace`: 保持 `@jax.jit`，无 traced 条件。已通过。
-- `apply_within_subspace`: `@jax.jit` + `lax.cond` + `jnp.where` masking + 向量化匹配。已通过。
-- `find_all_relative_configs`: 哈希表操作（probe/compare/accumulate）是固有顺序操作，无法在 traced 值上使用 Python `if/continue`。维持无 JIT。
-- `find_topk_relative_configs`: 同上，维持无 JIT。
+四个函数全部 JIT 兼容:
+
+- `compute_diagonal_within_subspace`: `@jax.jit` — 纯算术向量化。已通过。
+- `apply_within_subspace`: `@partial(jax.jit, static_argnums=(9,))` + `jnp.where` masking — `direction` 编译期固定，内层查表向量化。已通过。
+- `find_all_relative_configs`: `@partial(jax.jit, static_argnums=(9,))` + `lax.fori_loop` + `lax.cond` — 哈希表操作用 `fori_loop` 携带可变状态，每个分支决策用 `lax.cond`。已通过。
+- `find_topk_relative_configs`: `@partial(jax.jit, static_argnums=(2,))` + `lax.fori_loop` + `lax.cond` — 同上。已通过。
