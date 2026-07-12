@@ -112,3 +112,16 @@ def test_create_network_prng_determinism(model: Model) -> None:
     second = model.create_network("mlp/u1", {"hidden_size": [8]}, rngs=nnx.Rngs(7))
     configs = _all_configs(model.n_qubits)
     assert jnp.allclose(first(configs), second(configs))
+
+
+def test_create_network_result_is_sampleable(model: Model) -> None:
+    """The built network is fully NetworkProto-conformant (generate / generate_unique work)."""
+    network = model.create_network("mlp/u1", {"hidden_size": [8]}, rngs=nnx.Rngs(0))
+
+    configs, psi, counts = network.generate(64, key=jax.random.key(0))
+    assert int(jnp.sum(counts)) == 64
+    assert jnp.allclose(psi, network(configs))
+
+    unique_configs, unique_psi = network.generate_unique(6, key=jax.random.key(1))
+    assert len(jnp.unique(unique_configs, axis=0)) == unique_configs.shape[0]
+    assert jnp.allclose(unique_psi, network(unique_configs))
