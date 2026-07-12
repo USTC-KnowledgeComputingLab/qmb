@@ -41,7 +41,10 @@ def build_from_ref(
     if ref is None:
         return None
     if ref.name not in config_dict:
-        importlib.import_module(f"qmp.{subsystem}.{ref.name}")
+        try:
+            importlib.import_module(f"qmp.{subsystem}.{ref.name}")
+        except ModuleNotFoundError:
+            raise KeyError(f"Unknown {subsystem}: {ref.name!r}") from None
     cfg_cls = config_dict[ref.name]
     cfg = dacite.from_dict(cfg_cls, ref.params)
     impl_cls = impl_dict[ref.name]
