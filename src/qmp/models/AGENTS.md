@@ -102,6 +102,15 @@ model 通过在模块底部执行 `model_dict[name] = Model` 和 `model_config_d
 
 网络配置类刻意在各 model 文件内重复（不抽公共模块），与「转发样板刻意不抽基类」同理，保留各 model 独立演化自由度。
 
+### 与 CLI 网络注册表的区别
+
+存在两套独立的网络机制，服务不同场景，不要混淆：
+
+- **`Model.network_dict`（本节，模型耦合）**：值是网络**配置类**，其 `create(model, *, rngs)` 从**具体 model 元数据**（n_qubits、电子数、n_spins）导出 site/spin 参数。用于"给定物理系统，构造与之匹配的 ansatz"。
+- **`qmp.networks._registry` 的 `network_config_dict` / `network_class_dict`（CLI 层，模型无关）**：由 CLI 的 `build_from_ref` 按名字 + `SubConfigRef.params` 直接构造网络，不依赖 model。当前 networks 尚未在该表自注册（留待后续）。
+
+二者可共存：算法层若需模型匹配的网络，用前者；若从 YAML 独立指定网络全部参数，用后者。
+
 ## 缓存
 
 fcidump 解析结果缓存于 `~/.cache/qmp/models/fcidump/{sha256}-v1.pkl`：
