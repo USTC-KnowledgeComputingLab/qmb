@@ -190,28 +190,47 @@ building blocks（均为 `nnx.Module`）：
 ## 11. 测试计划（内部自洽）
 
 ### 11.1 test_bitspack.py
-- pack∘unpack 往返一致（各 size ∈ {1,2,4,8}）
-- padding 边界（last_dim 非 elements_per_byte 整数倍）
-- 已知小例手工验证位布局
+- pack∘unpack 往返一致（各 size ∈ {1,2,4,8}，对齐与非对齐）
+- padding 边界（last_dim 非 elements_per_byte 整数倍）+ 截断丢弃 padding
+- 已知小例手工验证位布局（LSB-first）、多维输入、dtype 保持、各 size 最大值往返
+- 错误路径：非 uint8 输入、非法 size ∈ {0,3,5,7,16} 均报错
 
 ### 11.2 test_autoregressive.py
-- `normalize_log_amplitude` 后 Σ exp(2·x) = 1（含含 mask 的情形）
+- `normalize_log_amplitude`：Σ exp(2·x) = 1（含 mask 情形）、逐行独立归一化、= 逐行减常数
 - 两种 mask 粒子数约束正确（含手工小例；Normal 无约束不单独测）
-- `gumbel_topk_step` 无 NaN（含无效分支 sentinel）、扰动值不超过父上界、累积 log-prob 正确
-- `sample_step` 尊重禁止态、同 key 确定性
+- `gumbel_topk_step`：无 NaN（含无效分支 sentinel）、扰动值不超过父上界、累积 log-prob 正确、padding 父节点全无效、无效子节点排序下沉
+- `sample_step`：尊重禁止态、同 key 确定性、经验频率 ≈ Born 分布
 
-（gumbel-topk 束搜索的唯一性 + K 上限在网络级 `test_mlp.py` / `test_transformers.py` 中验证。）
+（gumbel-topk 束搜索的唯一性 + K 上限 + 穷尽性在网络级 `test_mlp.py` / `test_transformers.py` 中验证。）
 
 ### 11.3 test_mlp.py / test_transformers.py（各三变体）
+
+**契约与归一化**
 - `__call__` 输出 shape=[batch]、dtype=complex128
-- **归一化自洽**: 小系统枚举全 Hilbert 空间，Σ|ψ|² = 1
-- **粒子数守恒**: Electron/ElectronUpDown 变体对违反粒子数的 config 返回 ψ=0
-- **forward/generate 自洽**: `generate_unique` 返回的 psi 与对同一 config 调 `__call__` 一致
-- **generate_unique 唯一性**: 无重复 config，数量 ≤ batch_size
-- **generate counts**: counts 之和 = batch_size；configs 唯一
-- **PRNG 确定性**: 同 key 复现
-- **ordering**: +1/-1/自定义 list 行为正确
-- **任意 physical_dim**（Normal 变体）: physical_dim=3 等非 2 幂次可运行且归一化
+- 归一化自洽：小系统枚举全 Hilbert 空间，Σ|ψ|² = 1
+- 粒子数守恒：Electron/ElectronUpDown 对违反粒子数的 config 返回 ψ=0
+
+**采样正确性**
+- forward/generate 自洽：`generate_unique` / `generate` 返回的 psi 与 `__call__` 一致
+- generate_unique：唯一性、数量 ≤ batch_size、穷尽性（束宽 ≥ 支持集时返回精确支持集）、超 K 时封顶到支持集大小、strict 子集概率 < 1
+- generate：counts 之和 = batch_size、configs 唯一、经验频率 ≈ Born 分布
+- PRNG 确定性（generate 与 generate_unique）、不同 key 给出不同样本
+
+**数学性质**
+- batch 不变性（逐个 vs 批量估值一致）、jit == eager
+- config 编解码往返恒等
+- 初始态为实数（输出层零初始化）、梯度流经 `__call__` 有限且非零
+- Born 分布不受 phase 网络扰动影响（MLP 专属，相位/振幅分离）
+- 因果性：早期 site 条件概率不依赖后续 site（Transformer）
+
+**KV-cache 隔离（Transformer 专属）**
+- `generate*` 不污染 `nnx.Param`、重复生成一致、变化 batch size 正确重建 cache
+
+**边界与架构变体**
+- 守恒边界：electrons=0（真空）、electrons=sites（全占据）
+- ordering：+1/-1/自定义 list 行为正确 + 输出往返
+- 任意 physical_dim（Normal）：physical_dim=3、4 归一化
+- 单 site、非对称 spin_up≠spin_down、多隐层 / 空隐层（MLP）、depth=1/heads=1（Transformer）
 
 ## 12. 依赖
 

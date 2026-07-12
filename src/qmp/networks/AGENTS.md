@@ -88,5 +88,12 @@ log-amplitude、phase 全程 float64 累加（根 AGENTS.md 的全局 x64 策略
 
 ## 测试
 
-- `test_autoregressive.py`：归一化、mask、Gumbel 步（无 NaN、上界性质）、采样
-- `test_mlp.py` / `test_transformers.py`：各三变体的 shape/dtype、全空间归一化、粒子数守恒、generate/generate_unique 自洽与唯一性、PRNG 确定性、ordering、任意 physical_dim
+- `test_autoregressive.py`：归一化（含逐行独立、常数平移）、mask、Gumbel 步（无 NaN、上界性质、无效分支排序下沉）、采样（禁止态、确定性、经验 Born）
+- `test_mlp.py` / `test_transformers.py`：各三变体的
+  - 契约（shape/dtype）、全空间归一化、粒子数守恒
+  - 采样正确性：generate/generate_unique 自洽、唯一性、穷尽性、经验频率≈Born、determinism
+  - 数学性质：batch 不变性、jit==eager、config 往返、初始态实数、梯度流、相位分离（MLP）、因果性（Transformer）
+  - KV-cache 隔离（Transformer：不污染 Param、重复/变 batch 一致）
+  - 边界与架构变体：electrons=0/sites、ordering、任意 physical_dim、单 site、非对称自旋、多/空隐层、depth=1/heads=1
+
+测试原则：只做内部自洽的单元测试（不与旧 PyTorch 对拍）。避免昂贵的统计性网络级测试——采样分布正确性在 `_autoregressive` 层廉价验证；VMC 收敛、多卡、真实 Hamiltonian 联算属集成测试范畴，不放在此处。
