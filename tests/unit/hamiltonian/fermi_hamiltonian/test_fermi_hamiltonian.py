@@ -116,3 +116,28 @@ def test_find_topk_returns_k_rows() -> None:
     exclude = jnp.zeros((0, 1), dtype=jnp.uint8)
     selected = h.find_topk_relative_configs(configs, psi, 2, exclude)
     assert selected.shape == (2, 1)
+
+
+def test_find_all_fallback_silently_drops_on_overflow() -> None:
+    """Document the fallback overflow limitation (design difference vs CUDA).
+
+    The JAX fallback uses a fixed-capacity array and stops inserting once
+    ``new_cnt >= hash_capacity``, silently dropping further distinct configs
+    with no overflow signal. (The CUDA path returns an overflow flag and the
+    Python layer retries with doubled capacity — that retry loop is CUDA-only.)
+    Callers of the fallback must therefore pass a sufficiently large
+    ``hash_capacity``.
+    """
+    hamiltonian: dict[tuple[tuple[int, int], ...], complex] = {
+        ((1, 1), (0, 0)): -1.0 + 0j,
+        ((2, 1), (1, 0)): -1.0 + 0j,
+        ((3, 1), (2, 0)): -1.0 + 0j,
+    }
+    h = FermiHamiltonian(hamiltonian, n_qubits=4, devices=_CPU)
+    configs = jnp.array([[0b0001], [0b0010], [0b0100]], dtype=jnp.uint8)
+    psi = jnp.ones((3, 2), dtype=jnp.float64)
+    exclude = jnp.zeros((0, 1), dtype=jnp.uint8)
+    _, _, count_small = h.find_all_relative_configs(configs, psi, exclude, hash_capacity=2)
+    _, _, count_big = h.find_all_relative_configs(configs, psi, exclude, hash_capacity=64)
+    assert int(count_small) == 2  # capped at capacity, extra distinct config dropped
+    assert int(count_big) == 3  # ample capacity recovers all distinct configs

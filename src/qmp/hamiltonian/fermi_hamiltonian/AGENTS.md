@@ -88,7 +88,7 @@ CUDA kernel 与纯 JAX fallback 两套实现，输出语义一致 (`allclose` �
 
 ### find_all_relative_configs
 
-全部列举新构型 + 去重 + 振幅累加。CUDA: 自定义 CAS 哈希表 (`findall_slot`, wyhash64)，claim-then-probe 插入 (无自旋，避免 SIMT 死锁)，probe 上限 100 触发 overflow → kernel 返回 overflow 标志，Python 层翻倍 `hash_capacity` 重试 (≤8 次)，不丢构型; 两趟 collect 按"规范首槽"归并并发产生的重复 slot，count 与累加振幅精确。排除集用第二哈希表 (`exclude_slot`) O(1) 查询。
+全部列举新构型 + 去重 + 振幅累加。CUDA: 自定义 CAS 哈希表 (`findall_slot`, wyhash64)，claim-then-probe 插入 (无自旋，避免 SIMT 死锁)，probe 上限 100 触发 overflow → kernel 返回 overflow 标志，Python 层翻倍 `hash_capacity` 重试 (≤8 次)，不丢构型; 两趟 collect 按"规范首槽"归并并发产生的重复 slot，count 与累加振幅精确。排除集用第二哈希表 (`exclude_slot`) O(1) 查询。**JAX fallback 差异**: fallback 用固定 `hash_capacity` 数组，超容量时静默丢弃且无 overflow 信号 (无重试)，调用方须给足容量。
 
 ### find_topk_relative_configs
 

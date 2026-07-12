@@ -10,7 +10,7 @@
 - **位掩码预处理** (`prepare`): 纯 Python 将费米子哈密顿量字典转为 (create_mask, annihilate_mask, flip_mask, parity_mask, parity_const, coef) 表示
 - **四个 CUDA kernel**: `compute_diagonal_within_subspace`, `apply_within_subspace`, `find_all_relative_configs`, `find_topk_relative_configs` — 通过 JAX FFI 接入
 - **纯 JAX fallback**: CPU/CI 环境下无 GPU 可用时，用 `jax.jit` 实现相同功能
-- **JIT 编译与缓存**: CUDA kernel 按需编译 (.cu → .so)，缓存于 `~/.cache/qmp/`
+- **JIT 编译与缓存**: CUDA kernel 按需编译 (.cu → .so)，缓存于 `~/.cache/qmp/hamiltonian/fermi/qmp_hamiltonian_{n_qubytes}/lib.so`
 - **pytest 测试**: prepare 正确性 + fallback 端到端 + CUDA 回归
 
 ## 2. 文件结构
@@ -335,25 +335,22 @@ class FermiHamiltonian:
 
 ## 5. 测试
 
+实际测试文件 (计数见 plan 补充 4): prepare 32 + fallback 40 + cuda 30 + FermiHamiltonian 类(CPU 路径) 8。
+
 ### 5.1 `tests/unit/hamiltonian/fermi_hamiltonian/test_prepare.py`
-- `test_create_mask_h2`: H₂ 哈密顿量 verify create_mask
-- `test_annihilate_mask_hubbard_2x1`: 2-site Hubbard verify annihilate_mask
-- `test_parity_mask_jw`: JW 符号正确性 (已知手工计算)
-- `test_zero_term_skip`: 恒为零的 term 被正确跳过
-- `test_coef_preserved`: 系数保持
+prepare 正确性: create/annihilate/parity mask、JW 符号、零 term 跳过、系数保持、字节打包、多算符 term 等。
 
 ### 5.2 `tests/unit/hamiltonian/fermi_hamiltonian/test_fallback.py`
-- 小型合成哈密顿量 (4 qubits, ~10 terms), 10-20 configs
-- `test_diagonal_term_exact`: 手工计算结果对比
-- `test_apply_within_subspace_forward_backward_consistency`: H 和 H^dag 结果关系
-- `test_find_all_relative_configs_dedup`: 去重和振幅累加
-- `test_find_topk_relative_configs_topk`: Top-K 排序
+纯 JAX fallback 四操作端到端 (直接调用 `_jax_*` 函数): 对角手算对比、forward/backward、find_all 去重+振幅累加、find_topk 排序+max 语义、复数、边缘情形。
 
 ### 5.3 `tests/unit/hamiltonian/fermi_hamiltonian/test_cuda.py`
-- `@pytest.mark.cuda` — 仅 GPU 环境运行
-- 与 test_fallback 相同输入，assert CUDA 输出 ≈ JAX fallback 输出 (`allclose(rtol=1e-12)`)
-- **非 bit-exact**: GPU 的 `atomicAdd` 顺序非确定，浮点加法非结合律导致末位差异，不能用 `==` 比较
-- `test_hash_table_overflow_retry`: 人为给定过小 capacity，验证重试逻辑
+- `pytest.mark.skipif(not cuda_available)` — 仅 GPU 环境运行。
+- 与 fallback 相同输入，assert CUDA 输出 ≈ fallback 输出 (`allclose(rtol=1e-12)`)。
+- **非 bit-exact**: GPU `atomicAdd` 顺序非确定，浮点非结合，用 `allclose` 而非 `==`。
+- 覆盖: 四操作 + 多字节 (n_qubytes≥2) + 择小侧遍历 (含 backward 非对称) + 排除集 (find_all/find_topk) + 溢出重试 (`test_cuda_overflow_retry*`) + 并发去重 (`test_cuda_find_all_dedup_*`, `test_cuda_find_topk_no_duplicate_configs`)。
+
+### 5.4 `tests/unit/hamiltonian/fermi_hamiltonian/test_fermi_hamiltonian.py`
+在 CPU device 上驱动 `FermiHamiltonian` 类 (routes to fallback)，覆盖 CUDA 测试被跳过时仍需验证的 Python 层逻辑: 后端选择、对角预过滤、转发/形状、find_all/find_topk 契约。需 `jax_enable_x64` (见 `tests/conftest.py`)。
 
 ## 6. 非目标
 
@@ -363,11 +360,12 @@ class FermiHamiltonian:
 
 | 风险 | 等级 | 缓解 |
 |------|------|------|
-| 哈希表溢出 (open addressing 无限 probe) | **高** | probe 上限 100 硬限；Python 层 overflow retry 未实现 |
-| `compute_diagonal` 对角 term 仅占 1-10%，grid-stride loop 避免 10^12 线程启动 | **高** | 预过滤对角 term 子集 + grid-stride loop (~10^5 blocks)，不用 T×B 网格 |
-| 结构化 config bytes 导致 MurmurHash3 聚集 | 中 | 所有哈希表统一使用 wyhash |
-| L2 cache thrashing（configs 流驱逐 hash table 条目） | 中 | `__ldg()` 走 read-only cache |
-| 重复 alloc/free 哈希表导致 HBM 碎片化 | 中 | `cudaMemPool` 预分配；apply_within 哈希表跨调用缓存（已预留，未启用） |
-| 大量 terms 单次 kernel 内存压力 | 低 | 当前 terms 数 (<10^6) 单次 kernel 可行；未来可用 chunking |
+| 哈希表溢出 (open addressing 无限 probe) | **高** | probe 上限 100 硬限；CUDA 层返回 overflow 标志，Python 翻倍 capacity 重试 (`_MAX_HASH_RETRIES=8`)，已实现。**注: JAX fallback 无此保护——`new_cnt >= cap` 时静默丢弃 (见下)** |
+| `compute_diagonal` 对角 term 仅占 1-10% | **高** | 预过滤对角 term 子集 (已实现)；kernel 每线程一个 config 寄存器累加，避免 T×B 网格 |
+| 结构化 config bytes 导致哈希聚集 | 中 | 所有哈希表统一使用 wyhash64 |
+| L2 cache thrashing（configs 流驱逐 hash table 条目） | 中 | `__ldg()` 走 read-only cache (逐字节路径 + 标量数组；uint64 快路径因对齐豁免) |
+| 重复 alloc/free 哈希表导致 HBM 碎片化 | 中 | apply_within 哈希表跨调用缓存 (planned, `_apply_hash_cache` 已预留未启用) |
+| 大量 terms 单次 kernel 内存压力 | 低 | 当前 terms 数 (<10^6) 单次 kernel 可行；chunked compaction (planned) |
 | 纯 JAX fallback 与 CUDA 非 bit-exact (`atomicAdd` 顺序非确定) | 低 | 测试用 `allclose(rtol=1e-12)` |
-| `exclude_configs` 线性扫描耗时 | 低 | 当前 exclude 集小，线性扫描可行；未来可用哈希表 |
+| `exclude_configs` 排除 | 低 | CUDA 用第二个哈希表 (`exclude_slot`) O(1) 查询 (已实现)；fallback 用线性扫描 |
+| **JAX fallback find_all/find_topk 溢出静默丢弃** | 中 | fallback 用固定 `cap` 数组，`new_cnt >= cap` 时不插入且无信号；调用方须给足 `hash_capacity`。CUDA 路径有 overflow retry，fallback 无 (设计差异) |
