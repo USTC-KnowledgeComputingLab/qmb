@@ -119,7 +119,7 @@ __device__ inline void atomic_max_double(double* addr, double val)
     } while (assumed != old);
 }
 
-/* ── diagonal_term kernel (direct atomicAdd to global psi) ── */
+/* ── diagonal_term kernel (one thread per config, register accumulation) ── */
 
 template <int n_qubytes>
 __global__ void diagonal_term_kernel(
@@ -133,26 +133,33 @@ __global__ void diagonal_term_kernel(
     const double*  __restrict__ coef,
     double* __restrict__ psi)
 {
+    (void)total_pairs;
+    // Each diagonal element psi[i] is independent, so assign one thread per
+    // config (grid-stride over configs) and accumulate the contribution of every
+    // diagonal term in registers, writing psi[i] exactly once. This avoids the
+    // L2 atomic contention of the naive (term, config) atomicAdd scheme without
+    // needing a shared-memory reduction. `configs` here carry only the diagonal
+    // term subset (flip_mask == 0), pre-filtered on the Python side.
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t stride = blockDim.x * gridDim.x;
-    // Grid-stride over (term, config) pairs; accumulate diagonal contributions
-    // directly to global psi via atomicAdd. Only terms with flip_mask == 0
-    // (i.e. that do not change the configuration) contribute to the diagonal.
-    for (int64_t k = idx; k < total_pairs; k += stride) {
-        int64_t t = k / B;
-        int64_t i = k % B;
+    for (int64_t i = idx; i < B; i += stride) {
         const uint8_t* cfg = configs + i * n_qubytes;
-        if (!is_applicable<n_qubytes>(cfg, create_mask + t * n_qubytes,
-                                       annihilate_mask + t * n_qubytes))
-            continue;
-        const uint8_t* fm = flip_mask + t * n_qubytes;
-        bool is_diag = true;
-        for (int q = 0; q < n_qubytes; ++q) { if (__ldg(fm + q)) { is_diag = false; break; } }
-        if (!is_diag) continue;
-        bool parity = jw_parity<n_qubytes>(cfg, parity_mask + t * n_qubytes, __ldg(parity_const + t));
-        double sign = parity ? -1.0 : 1.0;
-        atomicAdd(psi + i * 2,     sign * __ldg(coef + t * 2));
-        atomicAdd(psi + i * 2 + 1, sign * __ldg(coef + t * 2 + 1));
+        double acc_re = 0.0, acc_im = 0.0;
+        for (int64_t t = 0; t < T; ++t) {
+            if (!is_applicable<n_qubytes>(cfg, create_mask + t * n_qubytes,
+                                          annihilate_mask + t * n_qubytes))
+                continue;
+            const uint8_t* fm = flip_mask + t * n_qubytes;
+            bool is_diag = true;
+            for (int q = 0; q < n_qubytes; ++q) { if (__ldg(fm + q)) { is_diag = false; break; } }
+            if (!is_diag) continue;
+            bool parity = jw_parity<n_qubytes>(cfg, parity_mask + t * n_qubytes, __ldg(parity_const + t));
+            double sign = parity ? -1.0 : 1.0;
+            acc_re += sign * __ldg(coef + t * 2);
+            acc_im += sign * __ldg(coef + t * 2 + 1);
+        }
+        psi[i * 2]     = acc_re;
+        psi[i * 2 + 1] = acc_im;
     }
 }
 
@@ -172,8 +179,9 @@ ffi::Error ComputeDiagonalWithinSubspaceImpl(
     int64_t T = create_mask.dimensions()[0];
     int64_t total = T * B;
     (void)Q;
-    cudaMemsetAsync(psi->untyped_data(), 0, psi->size_bytes(), stream);
-    int threads = 256, blocks = static_cast<int>(std::min<int64_t>((total + 255) / 256, 65535LL));
+    // One thread per config; the kernel writes every psi[i], so no memset needed.
+    int threads = 256, blocks = static_cast<int>(std::min<int64_t>((B + 255) / 256, 65535LL));
+    if (blocks < 1) blocks = 1;
     diagonal_term_kernel<N_QUBYTES><<<blocks, threads, 0, stream>>>(
         B, T, total, configs.typed_data(), create_mask.typed_data(),
         annihilate_mask.typed_data(), flip_mask.typed_data(),
