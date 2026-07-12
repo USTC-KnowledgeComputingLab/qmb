@@ -199,9 +199,107 @@ class Trim:
         self._network = None
         if config.network is not None and self._model is not None:
             self._network = self._model.create_network(config.network.name, config.network.params, rngs=nnx.Rngs(42))
+        self._state: dict[str, typing.Any] = _init_state()
 
     def run(self) -> None:
-        raise NotImplementedError
+        config = self._config
+        if self._model is None or self._network is None:
+            logger.error("Trim requires both model and network to be configured.")
+            return
+
+        loss_fn = _AVAILABLE_LOSSES[config.loss_name]
+
+        state: dict[str, typing.Any]
+        state = _load_checkpoint(config.checkpoint_path) if config.checkpoint_path else _init_state()
+        if state is None:
+            state = _init_state()
+        self._state = state
+
+        cycle = state["trim"]["global"]
+        start = cycle
+        logger.info("Trim starting from cycle %d", int(cycle))
+
+        while config.max_cycles < 0 or cycle < start + config.max_cycles:
+            logger.info("=== Cycle %d ===", int(cycle))
+            key = jax.random.key(cycle * config.sampling_count_from_network)
+
+            # --- 1. sample ---
+            c_net, p_net = self._network.generate_unique(config.sampling_count_from_network, key=key)  # ty: ignore — network dynamic
+            key2 = jax.random.fold_in(key, 1)
+            c_pool, p_pool = _sample_from_pool(state["trim"]["pool"], config.sampling_count_from_pool, key2)
+            core_c, core_p = _merge_pools(c_net, p_net, c_pool, p_pool)
+            logger.info("Core: %d unique configs", int(core_c.shape[0]))
+
+            # --- 2. expansion ---
+            pool_c, pool_p = _expand_pool(self._model, core_c, core_p, config.max_rounds, config.pool_core_ratio)
+            logger.info("Pool after expansion: %d configs", int(pool_c.shape[0]))
+
+            # --- 3. local trim ---
+            key3 = jax.random.fold_in(key, 2)
+            surv_c, surv_p = _local_trim(
+                self._model,
+                pool_c,
+                pool_p,
+                config.num_groups,
+                config.local_keep_count,
+                config.local_lanczos_steps,
+                config.krylov_stop_norm,
+                config.krylov_random_period,
+                key3,
+            )
+            logger.info("Survived local trim: %d configs", int(surv_c.shape[0]))
+
+            # --- 4. global trim ---
+            lanczos = _DynamicLanczos(
+                model=self._model,
+                configs=surv_c,
+                psi=surv_p,
+                max_steps=config.global_lanczos_steps,
+                stop_norm=config.krylov_stop_norm,
+                random_period=config.krylov_random_period,
+                extend_count=0,
+                strategy=KrylovBasisStrategy.FIXED,
+                state_count=config.krylov_state_count,
+            )
+            results: list[tuple[float, Array, Array]] = []
+            for results in lanczos.run():
+                e0, _cfg, _psi0 = results[0]
+                logger.info("Global Krylov energy: %.10f (basis %d)", e0, int(_cfg.shape[0]))
+            _e0, configs, psi = results[0]
+            state["trim"]["excited"] = [(e, cfg, p) for e, cfg, p in results]
+
+            # --- 5. target construction ---
+            target_prob = jnp.zeros_like(psi, dtype=jnp.float64)
+            for _e, _cfg, p in results:
+                target_prob = target_prob + (p.conj() * p).real
+            target_psi = jnp.sqrt(target_prob).astype(jnp.complex128)
+            max_idx = jnp.argmax(jnp.abs(target_psi))
+            target_psi = target_psi / target_psi[max_idx]
+
+            # --- 6. local optimization ---
+            logger.info("Starting local optimization...")
+            _new_params, _opt, step = _local_optimize(
+                self._network,
+                configs,
+                target_psi,
+                max_idx,
+                loss_fn,
+                config.local_max_steps,
+                config.local_stop_loss,
+            )
+            state["trim"]["local"] = step
+
+            # --- 7. update pool (next core = top-keep by |psi|) + checkpoint ---
+            keep = config.first_cycle_keep_size if cycle == 0 else config.core_keep_count
+            keep = min(keep, configs.shape[0])
+            order = jnp.argsort((psi.conj() * psi).real)[::-1][:keep]
+            core_sel_c, core_sel_p = configs[order], psi[order]
+            state["trim"]["pool"] = (core_sel_c, core_sel_p, jnp.ones_like(core_sel_p.real))
+            state["trim"]["global"] = cycle + 1
+            cycle += 1
+
+            if cycle % config.checkpoint_interval == 0 and config.checkpoint_path is not None:
+                _save_checkpoint(state, config.checkpoint_path)
 
 
 # ==============================================================================
