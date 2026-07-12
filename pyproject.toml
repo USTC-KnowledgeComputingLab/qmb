@@ -63,6 +63,9 @@ known-first-party = ["qmp"]
 quote-style = "double"
 indent-style = "space"
 
+[tool.ty.src]
+exclude = ["src/qmp/hamiltonian/third_parties"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
