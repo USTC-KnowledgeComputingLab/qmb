@@ -5,15 +5,24 @@ from __future__ import annotations
 import dataclasses
 import logging
 import pathlib
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import jax
 import jax.numpy as jnp
 import openfermion
 
 from qmp.hamiltonian.fermi_hamiltonian import FermiHamiltonian
+from qmp.networks.mlp import WaveFunctionElectron as MlpWaveFunctionElectron
+from qmp.networks.mlp import WaveFunctionElectronUpDown as MlpWaveFunctionUpDown
+from qmp.networks.transformers import WaveFunctionElectron as TransformersWaveFunctionElectron
+from qmp.networks.transformers import WaveFunctionElectronUpDown as TransformersWaveFunctionUpDown
 
 from ._model import ModelProto, model_config_dict, model_dict
+
+if TYPE_CHECKING:
+    from flax import nnx
+
+    from qmp.networks._protocol import NetworkProto
 
 logger = logging.getLogger(__name__)
 
@@ -119,3 +128,125 @@ class Model(ModelProto[ModelConfig]):
 
 model_dict["openfermion"] = Model
 model_config_dict["openfermion"] = ModelConfig
+
+
+@dataclasses.dataclass
+class MlpUpDownConfig:
+    """MLP network with spin-up/spin-down electron-number conservation."""
+
+    hidden_size: tuple[int, ...] = (512,)
+    ordering: int = 1
+
+    def create(self, model: Model, *, rngs: nnx.Rngs) -> NetworkProto:
+        """Build a spin-resolved MLP wave function for the model."""
+        logger.info("Creating MLP (u1u1) network: hidden_size=%a", self.hidden_size)
+        return MlpWaveFunctionUpDown(
+            double_sites=model.n_qubits,
+            spin_up=(model.n_electrons + model.n_spins) // 2,
+            spin_down=(model.n_electrons - model.n_spins) // 2,
+            hidden_size=self.hidden_size,
+            ordering=self.ordering,
+            rngs=rngs,
+        )
+
+
+Model.network_dict["mlp/u1u1"] = MlpUpDownConfig
+
+
+@dataclasses.dataclass
+class MlpElectronConfig:
+    """MLP network with total electron-number conservation."""
+
+    hidden_size: tuple[int, ...] = (512,)
+    ordering: int = 1
+
+    def create(self, model: Model, *, rngs: nnx.Rngs) -> NetworkProto:
+        """Build a total-electron MLP wave function for the model."""
+        logger.info("Creating MLP (u1) network: hidden_size=%a", self.hidden_size)
+        return MlpWaveFunctionElectron(
+            sites=model.n_qubits,
+            electrons=model.n_electrons,
+            hidden_size=self.hidden_size,
+            ordering=self.ordering,
+            rngs=rngs,
+        )
+
+
+Model.network_dict["mlp/u1"] = MlpElectronConfig
+
+
+@dataclasses.dataclass
+class TransformersUpDownConfig:
+    """Transformer network with spin-up/spin-down electron-number conservation."""
+
+    embedding_dim: int = 512
+    heads_num: int = 8
+    feed_forward_dim: int = 2048
+    depth: int = 6
+    tail_hidden_dim: int = 512
+    ordering: int = 1
+
+    def create(self, model: Model, *, rngs: nnx.Rngs) -> NetworkProto:
+        """Build a spin-resolved transformer wave function for the model."""
+        logger.info(
+            "Creating Transformers (u1u1) network: embedding_dim=%d, heads_num=%d, feed_forward_dim=%d, "
+            "depth=%d, tail_hidden_dim=%d",
+            self.embedding_dim,
+            self.heads_num,
+            self.feed_forward_dim,
+            self.depth,
+            self.tail_hidden_dim,
+        )
+        return TransformersWaveFunctionUpDown(
+            double_sites=model.n_qubits,
+            spin_up=(model.n_electrons + model.n_spins) // 2,
+            spin_down=(model.n_electrons - model.n_spins) // 2,
+            embedding_dim=self.embedding_dim,
+            heads_num=self.heads_num,
+            feed_forward_dim=self.feed_forward_dim,
+            depth=self.depth,
+            tail_hidden_dim=self.tail_hidden_dim,
+            ordering=self.ordering,
+            rngs=rngs,
+        )
+
+
+Model.network_dict["transformers/u1u1"] = TransformersUpDownConfig
+
+
+@dataclasses.dataclass
+class TransformersElectronConfig:
+    """Transformer network with total electron-number conservation."""
+
+    embedding_dim: int = 512
+    heads_num: int = 8
+    feed_forward_dim: int = 2048
+    depth: int = 6
+    tail_hidden_dim: int = 512
+    ordering: int = 1
+
+    def create(self, model: Model, *, rngs: nnx.Rngs) -> NetworkProto:
+        """Build a total-electron transformer wave function for the model."""
+        logger.info(
+            "Creating Transformers (u1) network: embedding_dim=%d, heads_num=%d, feed_forward_dim=%d, "
+            "depth=%d, tail_hidden_dim=%d",
+            self.embedding_dim,
+            self.heads_num,
+            self.feed_forward_dim,
+            self.depth,
+            self.tail_hidden_dim,
+        )
+        return TransformersWaveFunctionElectron(
+            sites=model.n_qubits,
+            electrons=model.n_electrons,
+            embedding_dim=self.embedding_dim,
+            heads_num=self.heads_num,
+            feed_forward_dim=self.feed_forward_dim,
+            depth=self.depth,
+            tail_hidden_dim=self.tail_hidden_dim,
+            ordering=self.ordering,
+            rngs=rngs,
+        )
+
+
+Model.network_dict["transformers/u1"] = TransformersElectronConfig
