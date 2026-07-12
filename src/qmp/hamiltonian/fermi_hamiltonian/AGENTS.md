@@ -1,5 +1,15 @@
 # Hamiltonian 子系统设计
 
+## 计划中 / 未实现 (TODO)
+
+四个核心操作已完整实现且与 JAX fallback 对拍通过。以下为**已知的设计目标，当前尚未实现**，实现时以此为蓝本 (但需先解决括号内的约束):
+
+1. **apply_within 哈希表跨调用缓存** — `configs_j` 在多轮迭代 (如 Lanczos 内循环) 不变时复用 GPU 哈希表，省去每次重建。当前 `FermiHamiltonian._apply_hash_cache` 是占位字段，从未启用；kernel 每次调用都重建哈希表。(约束: JAX FFI handler 无状态，跨 `ffi_call` 缓存需在 C++ 侧维护静态状态，架构上需谨慎设计。)
+2. **find_topk chunked compaction + `global_min_weight` 剪枝** — 分块处理 term (chunking + 排序 + rebuild + 用 K-th 权重剪枝) 以在 term 数极大时降低哈希表内存。当前为单次 kernel、`global_min_weight` 恒为 0 (无剪枝)。find_topk 的**去重正确性已实现**，只差此规模优化。仅在超大 term 数时才有收益。
+3. **多节点多卡 shard_map** — configs 按 batch 维分片、Hamiltonian 复制、`all_gather` 跨卡归并。当前仅用 `devices[0]` 单卡。独立大工程，需单独 spec 与 GPU 验证 (详见下文「多节点多卡」)。
+
+> 另有一处**后端行为差异** (非 TODO，是有意设计): JAX fallback 的 `find_all`/`find_topk` 用固定容量数组，超容量时静默丢弃且无信号 (CUDA 路径有 overflow retry)，调用 fallback 时须给足 `hash_capacity`。
+
 ## 概述
 
 Hamiltonian 子系统负责量子多体哈密顿量的存储和操作。核心设计围绕三个层面:
