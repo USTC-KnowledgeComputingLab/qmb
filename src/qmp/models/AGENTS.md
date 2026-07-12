@@ -118,6 +118,8 @@ network **不设全局注册表**（design 阶段移除了 `networks/_registry.p
 
 理由：只有 model 知道自己的系统尺寸（`n_qubits`、电子数、`n_spins`），网络的 site/spin 参数必须由 model 导出，故网络构造归属 model，而非独立的全局注册表。model 本身仍由 `qmp.models._build.build_model(ref)` 从 `SubConfigRef` 构造。
 
+`create_network` 的分发/反序列化/元数据注入由 `tests/unit/models/test_create_network.py` 直接覆盖（name 分发、未知 name `KeyError`、dacite 默认/覆盖/错类型/未知键、`electron_number` 驱动守恒、PRNG 确定性）；端到端调用由 `tests/unit/algorithms/test_demo.py` 覆盖。
+
 ## 缓存
 
 fcidump 解析结果缓存于 `~/.cache/qmp/models/fcidump/{sha256}-v1.pkl`：
