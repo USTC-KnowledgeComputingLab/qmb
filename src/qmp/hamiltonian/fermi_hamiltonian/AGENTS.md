@@ -70,15 +70,15 @@ parity     = parity_const[t] ^ (popcount(parity_mask[t] & config) & 1)
 
 ### apply_within_subspace
 
-稀疏矩阵乘向量: H · psi_i 投影到 configs_j 张成的子空间。支持 forward/backward 双向遍历。使用 cuCollections `cuco::static_map` 哈希表进行 O(1) config 查找——二分查找在 GPU 上因 warp divergence 不可行。
+稀疏矩阵乘向量: H · psi_i 投影到 configs_j 张成的子空间。支持 forward/backward 双向遍历。使用自定义线性探测哈希表（`apply_hash_slot`，wyhash64 哈希）进行 O(1) config 查找——二分查找在 GPU 上因 warp divergence 不可行。
 
 ### find_all_relative_configs
 
-全部列举新构型 + 去重 + 振幅累加。使用 cuCollections `cuco::static_map` 预分配哈希表。Bloom filter 预筛查排除已知构型。
+全部列举新构型 + 去重 + 振幅累加。使用自定义 CAS 哈希表（`findall_slot`，wyhash64 哈希）预分配，probe 上限 100。排除集使用线性扫描。
 
 ### find_topk_relative_configs
 
-Top-K 选择。使用哈希表 + CUB radix sort 最终排序。
+Top-K 选择。使用自定义哈希表（`topk_slot`）单次 kernel 处理全部 terms，最终 Python/JAX 层 `argsort` 排序取 top K。
 
 ## 多节点多卡
 
@@ -89,4 +89,4 @@ Top-K 选择。使用哈希表 + CUB radix sort 最终排序。
 
 ## 其他子系统引用
 
-各模型 (FCIDUMP, Hubbard 等) 的 Hamiltonian 通过 `Hamiltonian.from_fcidump()` 等工厂方法构建，返回统一的 `Hamiltonian` 实例。不同模型只负责将自身格式转换为 `{term: complex_coefficient}` 字典，其余逻辑全部复用。
+各模型 (FCIDUMP, Hubbard, OpenFermion 等) 在 `models/` 子系统中直接构造 `FermiHamiltonian(hamiltonian_dict, n_qubits=..., devices=...)`。不同模型只负责将自身格式转换为 `{term: complex_coefficient}` 字典，其余逻辑全部复用。

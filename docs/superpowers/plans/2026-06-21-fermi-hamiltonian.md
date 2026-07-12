@@ -8,7 +8,7 @@
 
 > **伪代码命名**: Plan 中的 `B`/`T`/`Q`/`K` 等单字母符号仅作伪代码示意。实现代码必须使用 `batch_size`/`term_count`/`n_qubytes`/`count_selected`。见 AGENTS.md。
 
-**Tech Stack:** jax, jaxlib, cuCollections, CUB, nvcc, pytest, wyhash
+**Tech Stack:** jax, jaxlib, nvcc, pytest, wyhash
 
 ---
 
@@ -961,7 +961,7 @@ _SOURCE_DIR = Path(__file__).resolve().parent
 def load_cuda_module(n_qubytes: int) -> ctypes.CDLL:
     """Compile and load a CUDA shared library for the given parameters.
 
-    The library is cached in ~/.cache/qmp/kclab/{key}/lib.so.
+    The library is cached in ~/.cache/qmp/hamiltonian/fermi/{key}/lib.so.
     invoked to compile _hamiltonian_cuda.cu with the appropriate macros.
     Subsequent calls load the cached .so directly via ctypes.
 
@@ -977,14 +977,14 @@ def load_cuda_module(n_qubytes: int) -> ctypes.CDLL:
         The loaded shared library.
     """
     key = f"qmp_hamiltonian_{n_qubytes}"
-    cache_dir = platformdirs.user_cache_path("qmp", "kclab") / key
+    cache_dir = platformdirs.user_cache_path("qmp", "kclab") / "hamiltonian" / "fermi" / key
     so_path = cache_dir / "lib.so"
 
     if not so_path.exists():
         cache_dir.mkdir(parents=True, exist_ok=True)
         try:
             import jaxlib
-            jax_include = jaxlib.get_include_dir()
+            jax_include = str(Path(jaxlib.__file__).parent / "include")
         except ImportError:
             jax_include = os.path.join(
                 os.path.dirname(os.path.dirname(os.__file__)),
@@ -1375,19 +1375,20 @@ Spec §3.2.1 要求 `compute_diagonal_within_subspace` 使用 shared memory 做 
 
 Spec §3.2.2 要求所有只读输入（configs, create_mask, annihilate_mask, flip_mask, parity_mask, parity_const, coef）通过 `__ldg()` 走 read-only cache。在 CUDA kernel 中将 `const uint8_t* __restrict__` 的访问改为 `__ldg(ptr + offset)` 模式。
 
-### 补充 3: 哈希表跨调用缓存（Task 8b）
+### 补充 3: 哈希表跨调用缓存（Task 8b）— 预留未启用
 
-Spec §3.2.2 要求 `apply_within_subspace` 的哈希表在 `configs_j` 不变时跨调用复用。实现：在 `FermiHamiltonian` 中维护 `(configs_j_hash, hash_table)` 缓存对，每次调用时比较 hash，命中则跳过 ~50ms 重建。
+Spec §3.2.2 要求 `apply_within_subspace` 的哈希表在 `configs_j` 不变时跨调用复用。`FermiHamiltonian` 中已预留 `_apply_hash_cache` 字段，但 CUDA kernel 当前每次调用均通过 `cudaMallocAsync`/`cudaFreeAsync` 重新分配哈希表。缓存逻辑尚未实现。
 
-### 补充 4: 缺失测试（Task 3, Task 5）
+### 补充 4: 缺失测试（Task 3, Task 5）— 已补全
 
-Spec §5.1-5.3 要求但 plan 未包含的测试：
-- `test_parity_mask_jw`: H₂ 哈密顿量手工计算 JW 奇偶性验证
-- `test_create_mask_h2`: H₂ 哈密顿量 verify create_mask
-- `test_forward_backward_value_consistency`: apply_within 的 forward 和 backward 结果数值一致性（不仅是 shape）
-- `test_diagonal_hand_calculated`: 手工计算结果对比（不仅是 all-zeros）
-- `test_hash_table_overflow_retry`: 人为过小 capacity 验证重试逻辑
-- `test_cuda_apply_within`, `test_cuda_find_all`, `test_cuda_find_topk`: CUDA vs fallback 对所有四个操作（不仅是 diagonal）
+Spec §5.1-5.3 要求但 plan 初始未包含的测试（均已添加）:
+- `test_parity_mask_jw`: ✓ 已通过 `test_prepare_hubbard_2site_masks`, `test_prepare_hopping_parity_const` 等覆盖
+- `test_create_mask_h2`: ✓ `test_prepare_create_mask_h2`, `test_prepare_h2_full`
+- `test_forward_backward_value_consistency`: ✓ `test_apply_within_forward_backward`, `test_apply_within_hermitian`, `test_cuda_apply_forward`, `test_cuda_apply_backward`
+- `test_diagonal_hand_calculated`: ✓ `test_diagonal_exact`, `test_diagonal_all_hopping`, `test_diagonal_complex_coef`, `test_diagonal_only_hamiltonian`
+- `test_hash_table_overflow_retry`: ✓ `test_cuda_overflow_retry`
+- `test_cuda_apply_within`, `test_cuda_find_all`, `test_cuda_find_topk`: ✓ 全部 21 个 CUDA 测试
+- 总计: 96 tests
 
 ### 补充 5: AGENTS.md 名称确认与更新（Task 1）
 
@@ -1396,11 +1397,17 @@ Spec §5.1-5.3 要求但 plan 未包含的测试：
 
 ### 补充 6: `if constexpr (n_qubytes <= 8)` 静态分发 (Task 8a-8d)
 
-### 补充 7: compute_diagonal 预过滤 (Task 6, Task 8a)
-Spec §3.2.1: 仅遍历 flip_mask==0 的对角 term 子集。执行时在 FermiHamiltonian 中分离 diag_idx，compute_diagonal 只传对角 term 的 masks 给 kernel/JAX fallback，减少 90-99% 无用对。
+### 补充 7: compute_diagonal 预过滤 (Task 6, Task 8a) — 索引已计算，未用于传参
+
+Spec §3.2.1: 仅遍历 flip_mask==0 的对角 term 子集。`FermiHamiltonian` 已计算 `_diag_idx`（flip_mask==0 的 term 索引）并写入日志，但 `compute_diagonal_within_subspace` 的 CUDA 和 JAX 路径仍接收全部 term masks，在 kernel 内部运行时检查 `flip_mask[t]==0`。将 `_diag_idx` 用于传参过滤可减少 90-99% 无用遍历，但需注意 JIT trace 下索引切片（非静态 shape）可能额外触发 re-trace。
 
 Spec §3.2: n_qubits ≤ 64 时走 `uint64_t` 单寄存器。执行 agent 须在 CUDA kernel 中实现两条编译期路径：`if constexpr (n_qubytes <= 8)` 用 `uint64_t` 批量 AND/POPCNT/XOR，else 逐字节循环。`n_qubytes` 是 template parameter，false 分支不参与编译。
 
-### 补充 8: JAX fallback JIT 兼容性 (Task 4)
+### 补充 8: JAX fallback JIT 兼容性 (Task 4) — 已解决
 
-Plan 中 JAX fallback 函数使用 Python `if` 判断 traced JAX 值（如 `if not applicable: continue`），这将在 `@jax.jit` 编译时抛出 `ConcretizationTypeError`。执行 agent 须将所有 Python `if` 替换为 `jax.lax.cond`、`jnp.where`，或将循环体改为纯掩码式 `jnp.where(applicable, value, carry)` 模式。确保四个 fallback 函数在 `@jax.jit` 下正确编译和执行。
+四个函数全部 JIT 兼容:
+
+- `compute_diagonal_within_subspace`: `@jax.jit` — 纯算术向量化。已通过。
+- `apply_within_subspace`: `@partial(jax.jit, static_argnums=(9,))` + `jnp.where` masking — `direction` 编译期固定，内层查表向量化。已通过。
+- `find_all_relative_configs`: `@partial(jax.jit, static_argnums=(9,))` + `lax.fori_loop` + `lax.cond` — 哈希表操作用 `fori_loop` 携带可变状态，每个分支决策用 `lax.cond`。已通过。
+- `find_topk_relative_configs`: `@partial(jax.jit, static_argnums=(2,))` + `lax.fori_loop` + `lax.cond` — 同上。已通过。
