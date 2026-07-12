@@ -110,3 +110,42 @@ def test_unpack_truncates_padding() -> None:
     unpacked = unpack_int(packed, size=1, last_dim=3)
     assert unpacked.shape == (1, 3)
     assert jnp.array_equal(unpacked, values)
+
+
+# ---- error paths ----
+
+
+def test_pack_rejects_non_uint8() -> None:
+    values = jnp.array([[1, 0, 1, 0]], dtype=jnp.int32)
+    with pytest.raises(ValueError, match="uint8"):
+        pack_int(values, size=1)
+
+
+def test_unpack_rejects_non_uint8() -> None:
+    packed = jnp.array([[5]], dtype=jnp.int32)
+    with pytest.raises(ValueError, match="uint8"):
+        unpack_int(packed, size=1, last_dim=8)
+
+
+@pytest.mark.parametrize("size", [0, 3, 5, 7, 16])
+def test_pack_rejects_invalid_size(size: int) -> None:
+    values = jnp.array([[1, 0, 1, 0]], dtype=jnp.uint8)
+    with pytest.raises(ValueError, match="size must be one of"):
+        pack_int(values, size=size)
+
+
+@pytest.mark.parametrize("size", [0, 3, 5, 7, 16])
+def test_unpack_rejects_invalid_size(size: int) -> None:
+    packed = jnp.array([[5]], dtype=jnp.uint8)
+    with pytest.raises(ValueError, match="size must be one of"):
+        unpack_int(packed, size=size, last_dim=4)
+
+
+def test_max_values_round_trip() -> None:
+    """Maximum representable value per size survives a round trip."""
+    for size in (1, 2, 4, 8):
+        max_value = (1 << size) - 1
+        elements_per_byte = 8 // size
+        values = jnp.full((1, elements_per_byte * 2), max_value, dtype=jnp.uint8)
+        unpacked = unpack_int(pack_int(values, size), size, last_dim=elements_per_byte * 2)
+        assert jnp.array_equal(unpacked, values)

@@ -151,3 +151,119 @@ def test_generate_unique_round_trip_with_ordering() -> None:
     net = WaveFunctionElectron(sites=4, electrons=2, hidden_size=(8,), ordering=[2, 0, 3, 1], rngs=nnx.Rngs(14))
     configs, psi = net.generate_unique(6, key=jax.random.key(6))
     assert jnp.allclose(psi, net(configs))
+
+
+# ---- sampling correctness ----
+
+
+def test_generate_empirical_frequency_matches_born() -> None:
+    """Sampled frequencies approximate the Born distribution |psi|^2."""
+    net = WaveFunctionElectron(sites=4, electrons=2, hidden_size=(16,), rngs=nnx.Rngs(20))
+    all_configs = _all_configs(2, 4, 1)
+    probability = jnp.abs(net(all_configs)) ** 2
+
+    configs, _, counts = net.generate(40000, key=jax.random.key(0))
+    frequency = counts / jnp.sum(counts)
+
+    lookup = {tuple(row): float(probability[index]) for index, row in enumerate(all_configs.tolist())}
+    for row, freq in zip(configs.tolist(), frequency.tolist(), strict=True):
+        assert abs(freq - lookup[tuple(row)]) < 0.02
+
+
+def test_generate_unique_is_exhaustive_when_beam_covers_space() -> None:
+    """With beam width >= support size, generate_unique returns exactly the support set."""
+    net = WaveFunctionElectron(sites=4, electrons=2, hidden_size=(16,), rngs=nnx.Rngs(21))
+    all_configs = _all_configs(2, 4, 1)
+    probability = jnp.abs(net(all_configs)) ** 2
+    support = {tuple(row) for row, prob in zip(all_configs.tolist(), probability.tolist(), strict=True) if prob > 1e-12}
+
+    configs, _ = net.generate_unique(6, key=jax.random.key(0))
+    generated = {tuple(row) for row in configs.tolist()}
+    assert generated == support
+
+
+def test_generate_unique_caps_at_support_size() -> None:
+    """Requesting more unique samples than exist returns exactly the support size."""
+    net = WaveFunctionElectron(sites=4, electrons=2, hidden_size=(8,), rngs=nnx.Rngs(22))
+    configs, _ = net.generate_unique(50, key=jax.random.key(0))
+    # Support size for C(4, 2) = 6.
+    assert configs.shape[0] == 6
+    assert len(jnp.unique(configs, axis=0)) == configs.shape[0]
+
+
+def test_generate_determinism() -> None:
+    net = WaveFunctionElectron(sites=4, electrons=2, hidden_size=(8,), rngs=nnx.Rngs(23))
+    first = net.generate(300, key=jax.random.key(7))
+    second = net.generate(300, key=jax.random.key(7))
+    assert jnp.array_equal(first[0], second[0])
+    assert jnp.array_equal(first[2], second[2])
+
+
+def test_generate_unique_different_keys_differ() -> None:
+    """A near-uniform net gives different unique subsets for different keys."""
+    net = WaveFunctionElectron(sites=6, electrons=3, hidden_size=(8,), rngs=nnx.Rngs(24))
+    first, _ = net.generate_unique(3, key=jax.random.key(1))
+    second, _ = net.generate_unique(3, key=jax.random.key(2))
+    assert not jnp.array_equal(first, second)
+
+
+# ---- conservation edge cases ----
+
+
+def test_electron_zero_conserved() -> None:
+    """electrons=0 puts all amplitude on the vacuum configuration."""
+    net = WaveFunctionElectron(sites=3, electrons=0, hidden_size=(8,), rngs=nnx.Rngs(25))
+    all_configs = _all_configs(2, 3, 1)
+    probability = jnp.abs(net(all_configs)) ** 2
+    assert jnp.allclose(probability[0], 1.0)  # index 0 == (0,0,0)
+    assert jnp.allclose(jnp.sum(probability), 1.0)
+
+
+def test_electron_full_conserved() -> None:
+    """electrons=sites puts all amplitude on the fully occupied configuration."""
+    net = WaveFunctionElectron(sites=3, electrons=3, hidden_size=(8,), rngs=nnx.Rngs(26))
+    all_configs = _all_configs(2, 3, 1)
+    probability = jnp.abs(net(all_configs)) ** 2
+    assert jnp.allclose(probability[-1], 1.0)  # index -1 == (1,1,1)
+    assert jnp.allclose(jnp.sum(probability), 1.0)
+
+
+def test_updown_generate_unique_exhaustive() -> None:
+    """UpDown generate_unique enumerates the full spin-resolved support."""
+    net = WaveFunctionElectronUpDown(double_sites=6, spin_up=1, spin_down=1, hidden_size=(8,), rngs=nnx.Rngs(27))
+    configs, _ = net.generate_unique(50, key=jax.random.key(0))
+    # Support: C(3, 1) up * C(3, 1) down = 9.
+    assert configs.shape[0] == 9
+    values = unpack_int(configs, size=1, last_dim=6)
+    up_count = values[:, 0] + values[:, 2] + values[:, 4]
+    down_count = values[:, 1] + values[:, 3] + values[:, 5]
+    assert jnp.all(up_count == 1)
+    assert jnp.all(down_count == 1)
+
+
+# ---- initialisation & gradients ----
+
+
+def test_initial_state_is_real() -> None:
+    """Zero-initialised output heads give a real initial wave function (phase 0)."""
+    net = WaveFunctionElectron(sites=4, electrons=2, hidden_size=(16,), rngs=nnx.Rngs(28))
+    psi = net(_all_configs(2, 4, 1))
+    assert jnp.max(jnp.abs(jnp.imag(psi))) < 1e-12
+
+
+def test_gradient_flows_through_call() -> None:
+    """Gradients w.r.t. parameters are finite and non-zero (VMC trainability)."""
+    net = WaveFunctionElectron(sites=4, electrons=2, hidden_size=(16,), rngs=nnx.Rngs(29))
+    all_configs = _all_configs(2, 4, 1)
+    graphdef, params = nnx.split(net, nnx.Param)
+
+    def loss(params_state: nnx.State) -> jax.Array:
+        model = nnx.merge(graphdef, params_state)
+        psi = model(all_configs)
+        return jnp.sum(jnp.real(psi) ** 2 + jnp.imag(psi) ** 2)
+
+    grads = jax.grad(loss)(params)
+    leaves = jax.tree_util.tree_leaves(grads)
+    assert leaves
+    assert all(bool(jnp.all(jnp.isfinite(leaf))) for leaf in leaves)
+    assert any(float(jnp.sum(jnp.abs(leaf))) > 0.0 for leaf in leaves)

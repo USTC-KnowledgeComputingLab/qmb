@@ -148,3 +148,49 @@ def test_sample_step_determinism() -> None:
     first = sample_step(conditional, key)
     second = sample_step(conditional, key)
     assert jnp.array_equal(first, second)
+
+
+def test_sample_step_empirical_distribution() -> None:
+    """Sampled frequencies approximate the Born distribution exp(2*log_amp)."""
+    key = jax.random.key(5)
+    # Fixed conditional over 3 states, normalised so probabilities are exp(2*x).
+    conditional = normalize_log_amplitude(jnp.array([0.4, -0.1, 0.2]), axis=-1)
+    target = jnp.exp(2.0 * conditional)
+    batch = jnp.broadcast_to(conditional, (40000, 3))
+    samples = sample_step(batch, key)
+    counts = jnp.array([jnp.sum(samples == state) for state in range(3)])
+    frequency = counts / jnp.sum(counts)
+    assert jnp.max(jnp.abs(frequency - target)) < 0.01
+
+
+def test_gumbel_step_all_children_invalid_when_parent_padding() -> None:
+    """A padding parent yields only invalid children (no NaN, all sentinel)."""
+    key = jax.random.key(6)
+    parent_log_prob = jnp.array([INVALID_LOG_PROB])
+    parent_perturbed = jnp.array([INVALID_LOG_PROB])
+    parent_valid = jnp.array([False])
+    conditional = normalize_log_amplitude(jnp.array([[0.5, 0.5]]), axis=-1)
+    child_log_prob, child_perturbed, child_valid = gumbel_topk_step(
+        parent_log_prob, parent_perturbed, parent_valid, conditional, key
+    )
+    assert not bool(jnp.any(child_valid))
+    assert not bool(jnp.any(jnp.isnan(child_perturbed)))
+    assert bool(jnp.all(child_perturbed == INVALID_LOG_PROB))
+    assert bool(jnp.all(child_log_prob == INVALID_LOG_PROB))
+
+
+def test_gumbel_step_invalid_children_sink_below_valid() -> None:
+    """Invalid children always sort below valid ones (sentinel is very negative)."""
+    key = jax.random.key(7)
+    parent_log_prob = jnp.array([0.0, 0.0])
+    parent_perturbed = jnp.array([0.0, 0.0])
+    parent_valid = jnp.array([True, False])  # second beam is padding
+    conditional = normalize_log_amplitude(jnp.array([[0.3, 0.7], [0.5, 0.5]]), axis=-1)
+    _, child_perturbed, child_valid = gumbel_topk_step(
+        parent_log_prob, parent_perturbed, parent_valid, conditional, key
+    )
+    flat_perturbed = child_perturbed.reshape(-1)
+    flat_valid = child_valid.reshape(-1)
+    valid_min = jnp.min(jnp.where(flat_valid, flat_perturbed, jnp.inf))
+    invalid_max = jnp.max(jnp.where(flat_valid, -jnp.inf, flat_perturbed))
+    assert float(invalid_max) < float(valid_min)
