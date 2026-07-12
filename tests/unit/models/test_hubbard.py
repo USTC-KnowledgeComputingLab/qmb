@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import itertools
 
+import jax
 import jax.numpy as jnp
 import pytest
 from flax import nnx
@@ -17,7 +18,8 @@ from qmp.models.hubbard import (
     TransformersElectronConfig,
     TransformersUpDownConfig,
 )
-from qmp.utility.bitspack import pack_int
+from qmp.networks.transformers import WaveFunctionElectronUpDown as TransformersWaveFunctionUpDown
+from qmp.utility.bitspack import pack_int, unpack_int
 
 
 def test_hubbard_registered() -> None:
@@ -246,3 +248,79 @@ def test_hubbard_transformers_u1_construction() -> None:
     network = TransformersElectronConfig(**_SMALL_NETWORK_PARAMS).create(model, rngs=nnx.Rngs(0))
     psi = network(_all_configs(model.n_qubits))
     assert jnp.allclose(jnp.sum(jnp.abs(psi) ** 2), 1.0)
+
+
+def test_hubbard_transformers_u1_conservation() -> None:
+    """transformers/u1 enforces total-electron conservation."""
+    model = Model(ModelConfig(m=2, n=1, u=4.0))
+    network = TransformersElectronConfig(**_SMALL_NETWORK_PARAMS).create(model, rngs=nnx.Rngs(0))
+    psi = network(_all_configs(model.n_qubits))
+    values = jnp.array(list(itertools.product([0, 1], repeat=4)), dtype=jnp.uint8)
+    assert jnp.all(jnp.abs(psi)[values.sum(axis=1) != 2] < 1e-12)
+
+
+def test_hubbard_default_hyperparameters() -> None:
+    """Config classes carry the documented default hyperparameters."""
+    assert MlpUpDownConfig().hidden_size == (512,)
+    assert MlpElectronConfig().hidden_size == (512,)
+    assert TransformersUpDownConfig().embedding_dim == 512
+    assert TransformersUpDownConfig().depth == 6
+    assert TransformersElectronConfig().tail_hidden_dim == 512
+
+
+def test_hubbard_config_fields_passed_to_network() -> None:
+    """Config hyperparameters propagate to the constructed network."""
+    model = Model(ModelConfig(m=2, n=1, u=4.0))
+    network = TransformersUpDownConfig(embedding_dim=16, heads_num=4, depth=2).create(model, rngs=nnx.Rngs(0))
+    assert isinstance(network, TransformersWaveFunctionUpDown)
+    assert network.embedding_dim == 16
+
+
+def test_hubbard_network_prng_determinism() -> None:
+    """Same rngs seed yields identical parameters (reproducible construction)."""
+    model = Model(ModelConfig(m=2, n=1, u=4.0))
+    first = MlpElectronConfig(hidden_size=(8,)).create(model, rngs=nnx.Rngs(7))
+    second = MlpElectronConfig(hidden_size=(8,)).create(model, rngs=nnx.Rngs(7))
+    configs = _all_configs(model.n_qubits)
+    assert jnp.allclose(first(configs), second(configs))
+
+
+def test_hubbard_odd_electron_spin_split() -> None:
+    """Odd electron number splits as spin_up = N//2, spin_down = N - N//2."""
+    model = Model(ModelConfig(m=2, n=1, electron_number=3, u=4.0))  # spin_up=1, spin_down=2
+    network = MlpUpDownConfig(hidden_size=(8,)).create(model, rngs=nnx.Rngs(0))
+    psi = network(_all_configs(model.n_qubits))
+    values = jnp.array(list(itertools.product([0, 1], repeat=4)), dtype=jnp.uint8)
+    up = values[:, 0] + values[:, 2]
+    down = values[:, 1] + values[:, 3]
+    assert jnp.all(jnp.abs(psi)[(up != 1) | (down != 2)] < 1e-12)
+
+
+@pytest.mark.parametrize("ordering", [1, -1])
+def test_hubbard_network_ordering(ordering: int) -> None:
+    """The ordering hyperparameter is forwarded and preserves normalisation."""
+    model = Model(ModelConfig(m=2, n=1, u=4.0))
+    network = MlpElectronConfig(hidden_size=(8,), ordering=ordering).create(model, rngs=nnx.Rngs(0))
+    psi = network(_all_configs(model.n_qubits))
+    assert jnp.allclose(jnp.sum(jnp.abs(psi) ** 2), 1.0)
+
+
+def test_hubbard_network_generate_unique() -> None:
+    """generate_unique from a model network yields unique, conserving configs."""
+    model = Model(ModelConfig(m=2, n=1, u=4.0))
+    network = MlpElectronConfig(hidden_size=(8,)).create(model, rngs=nnx.Rngs(0))
+    configs, psi = network.generate_unique(6, key=jax.random.key(0))
+    assert configs.shape[0] == 6  # full support C(4, 2)
+    assert len(jnp.unique(configs, axis=0)) == configs.shape[0]
+    assert jnp.allclose(psi, network(configs))
+    values = unpack_int(configs, size=1, last_dim=model.n_qubits)
+    assert jnp.all(values.sum(axis=1) == 2)
+
+
+def test_hubbard_network_generate_counts() -> None:
+    """generate from a model network returns counts summing to the sample size."""
+    model = Model(ModelConfig(m=2, n=1, u=4.0))
+    network = MlpElectronConfig(hidden_size=(8,)).create(model, rngs=nnx.Rngs(0))
+    configs, psi, counts = network.generate(200, key=jax.random.key(1))
+    assert int(jnp.sum(counts)) == 200
+    assert jnp.allclose(psi, network(configs))
