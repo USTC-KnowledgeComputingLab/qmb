@@ -60,7 +60,7 @@ tests/unit/
 
 ## 4. 数值约定
 
-- **float64**: log-amplitude / log-phase 累加与复振幅组装用 float64。JAX 默认 float32，需在 `src/qmp/__init__.py` 顶部启用 `jax.config.update("jax_enable_x64", True)`。这是包级数值策略（Hamiltonian 子系统同样使用 float64）。
+- **float64**: log-amplitude / log-phase 累加与复振幅组装用 float64。JAX 默认 float32，需在 `src/qmp/__init__.py` 中（导入后、任何数值运算前）调用 `jax.config.update("jax_enable_x64", True)`。这是包级数值策略（Hamiltonian 子系统同样使用 float64）。
 - **config 编码**: bit-packed uint8 `[batch_size, n_qubytes]`，与 Hamiltonian 子系统输入格式一致。`n_qubytes = ceil(n_qubits * bits_per_site_element / 8)`。
 - **psi 输出**: complex128，一维 `[batch_size]`。
 
