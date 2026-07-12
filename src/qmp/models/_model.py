@@ -1,8 +1,9 @@
 """Model protocol and registry.
 
-``ModelProto`` defines the uniform interface every model exposes. ``model_dict``
-is the plugin registry mapping model names to their classes; models register
-themselves at import time via ``model_dict[name] = Model``.
+``ModelProto`` defines the uniform interface every model exposes.
+``model_dict`` and ``model_config_dict`` are the plugin registries;
+models register themselves at import time via
+``model_dict[name] = Model`` and ``model_config_dict[name] = ModelConfig``.
 """
 
 from __future__ import annotations
