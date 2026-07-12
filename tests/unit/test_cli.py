@@ -154,3 +154,19 @@ def test_main_action_params_int_override() -> None:
     with mock.patch("qmp.algorithms.demo.Demo.run") as mock_run:
         main(argv=["--config", str(tmp), "--action.params.sample_count", "123"])
         mock_run.assert_called_once()
+
+
+def test_load_yaml_file_not_found() -> None:
+    """Non-existent YAML file → omegaconf raises."""
+    with pytest.raises(FileNotFoundError):
+        _load_yaml("/nonexistent/path.yaml")
+
+
+def test_load_yaml_action_without_params() -> None:
+    """YAML with action.name but no params section → params defaults to {}."""
+    yaml_content = "action:\n  name: demo\n"
+    tmp = Path(tempfile.gettempdir()) / "test_cli_no_params.yaml"
+    tmp.write_text(yaml_content)
+    cfg = _load_yaml(str(tmp))
+    assert cfg.action.name == "demo"
+    assert cfg.action.params == {}
