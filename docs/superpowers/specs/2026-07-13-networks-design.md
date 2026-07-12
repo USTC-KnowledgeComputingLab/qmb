@@ -170,9 +170,13 @@ building blocks（均为 `nnx.Module`）：
 三变体：
 - config 移位（丢弃末 site，前置 BOS=0），使 position t 编码"前 t 个 site 的历史"。
 - `__call__`: 并行处理全部 site（causal mask 保证无未来信息泄漏）。
-- `generate*`: unrolled Python for，逐 token 处理，KV-cache 逐步 concat（每步形状为具体常量，jit 展开无碍）。
+- `generate*`: unrolled Python for，**增量 KV-cache 解码**。每步只喂新 token，attention 复用缓存的 key/value（`nnx.MultiHeadAttention` 的 `decode=True` + `init_cache`）。`generate_unique` 每步剪枝后按父束索引 `parents = selected // states` 沿 batch 轴重排每层 attention 的 cache，使缓存跟随束的祖先路径。生成为纯前向，无需 `detach`。
 
 任意 physical_dim 在 Normal 变体：`Embedding` 状态数 = physical_dim，`Tail` 输出 = 2 × physical_dim。
+
+### 初始化
+
+输出头（MLP amplitude/phase 末层、Transformer Tail 末层）**零初始化**，使初始条件分布近似均匀（最大熵），为 VMC 提供中性起点。位置嵌入用小 stddev（0.02），隐藏层用 flax 默认。实测 `normal(stddev=1.0)` 输出层会产生强尖峰随机初态，不合适。
 
 ## 10. ordering
 

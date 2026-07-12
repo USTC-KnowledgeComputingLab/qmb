@@ -1,19 +1,22 @@
 """Transformer autoregressive neural quantum states (dense decoder).
 
 A single causal transformer decoder predicts every site's conditional
-log-amplitude and phase in parallel. Three variants differ only in their
-particle-number conservation constraints, mirroring the MLP variants:
+log-amplitude and phase. Three variants differ only in their particle-number
+conservation constraints, mirroring the MLP variants:
 
 - :class:`WaveFunctionNormal` — no conservation, arbitrary ``physical_dim``.
 - :class:`WaveFunctionElectron` — total electron number conserved.
 - :class:`WaveFunctionElectronUpDown` — spin-up and spin-down numbers conserved.
 
-Because attention is causal, generation re-runs the decoder over the growing
-prefix at each step and reads the last position. This is mathematically
-identical to key/value caching but avoids cache bookkeeping through the beam
-search; generation is a pure forward pass so no gradient detaching is needed.
+Amplitude evaluation (:meth:`__call__`) runs the decoder once over the whole
+sequence with a causal mask. Sampling (:meth:`generate` / :meth:`generate_unique`)
+uses incremental key/value caching: at each site only the newly appended token is
+fed through the decoder, and the cached keys/values are reordered along the batch
+axis to follow the beam search. The decoder uses dense feed-forward blocks (no
+mixture-of-experts).
 
-The decoder uses dense feed-forward blocks (no mixture-of-experts).
+Output heads are zero-initialised so the initial conditional distribution is
+near-uniform (maximum entropy), which is a neutral starting point for VMC.
 """
 
 from __future__ import annotations
@@ -73,15 +76,19 @@ def _invert_permutation(permutation: tuple[int, ...]) -> tuple[int, ...]:
 
 
 class _PositionalEmbedding(nnx.Module):
-    """Per-position, per-token embedding table of shape ``[sites, physical_dim, embedding_dim]``."""
+    """Per-position, per-token embedding table of shape ``[sites, physical_dim, embedding_dim]``.
+
+    ``position`` selects which site rows are read, so a single incremental token
+    can be embedded at its true position.
+    """
 
     def __init__(self, sites: int, physical_dim: int, embedding_dim: int, *, rngs: nnx.Rngs) -> None:
-        initializer = nnx.initializers.normal(stddev=1.0)
+        initializer = nnx.initializers.normal(stddev=0.02)
         self.table = nnx.Param(initializer(rngs.params(), (sites, physical_dim, embedding_dim), jnp.float64))
 
-    def __call__(self, tokens: Array) -> Array:
+    def __call__(self, tokens: Array, position: int = 0) -> Array:
         sequence_length = tokens.shape[1]
-        table = self.table[...][:sequence_length]
+        table = self.table[...][position : position + sequence_length]
         # table: [seq, physical_dim, emb]; tokens: [batch, seq] -> [batch, seq, emb]
         return jnp.take_along_axis(table[None], tokens[:, :, None, None], axis=2)[:, :, 0, :]
 
@@ -114,7 +121,7 @@ class _DecoderUnit(nnx.Module):
         self.norm2 = nnx.LayerNorm(embedding_dim, param_dtype=jnp.float64, rngs=rngs)
         self.feed_forward = _FeedForward(embedding_dim, feed_forward_dim, rngs=rngs)
 
-    def __call__(self, inputs: Array, mask: Array) -> Array:
+    def __call__(self, inputs: Array, mask: Array | None) -> Array:
         normed = self.norm1(inputs)
         attended = self.attention(normed, mask=mask)
         residual = inputs + attended
@@ -122,7 +129,12 @@ class _DecoderUnit(nnx.Module):
 
 
 class _Transformers(nnx.Module):
-    """Stack of causal decoder units."""
+    """Stack of causal decoder units.
+
+    In parallel mode a causal mask is built for the full sequence. In decode mode
+    (single incremental token) the attention layers rely on their key/value cache
+    and no mask is passed.
+    """
 
     def __init__(
         self, embedding_dim: int, heads_num: int, feed_forward_dim: int, depth: int, *, rngs: nnx.Rngs
@@ -131,8 +143,8 @@ class _Transformers(nnx.Module):
             [_DecoderUnit(embedding_dim, heads_num, feed_forward_dim, rngs=rngs) for _ in range(depth)]
         )
 
-    def __call__(self, inputs: Array) -> Array:
-        mask = nnx.make_causal_mask(jnp.ones(inputs.shape[:2]))
+    def __call__(self, inputs: Array, *, decode: bool) -> Array:
+        mask = None if decode else nnx.make_causal_mask(jnp.ones(inputs.shape[:2]))
         activation = inputs
         for unit in self.units:
             activation = unit(activation, mask)
@@ -140,11 +152,16 @@ class _Transformers(nnx.Module):
 
 
 class _Tail(nnx.Module):
-    """Output head: Linear -> GELU -> Linear producing amplitude and phase logits."""
+    """Output head: Linear -> GELU -> Linear producing amplitude and phase logits.
+
+    The final layer is zero-initialised so the wave function starts near-uniform.
+    """
 
     def __init__(self, embedding_dim: int, hidden_dim: int, output_dim: int, *, rngs: nnx.Rngs) -> None:
         self.up = nnx.Linear(embedding_dim, hidden_dim, param_dtype=jnp.float64, rngs=rngs)
-        self.down = nnx.Linear(hidden_dim, output_dim, param_dtype=jnp.float64, rngs=rngs)
+        self.down = nnx.Linear(
+            hidden_dim, output_dim, kernel_init=nnx.initializers.zeros, param_dtype=jnp.float64, rngs=rngs
+        )
 
     def __call__(self, inputs: Array) -> Array:
         return self.down(jax.nn.gelu(self.up(inputs)))
@@ -167,6 +184,7 @@ class _TransformerWaveFunctionBase(nnx.Module):
         tail_hidden_dim: int,
         rngs: nnx.Rngs,
     ) -> None:
+        self.embedding_dim = embedding_dim
         self.embedding = _PositionalEmbedding(self.sites, self.states_per_site, embedding_dim, rngs=rngs)
         self.transformers = _Transformers(embedding_dim, heads_num, feed_forward_dim, depth, rngs=rngs)
         self.tail = _Tail(embedding_dim, tail_hidden_dim, 2 * self.states_per_site, rngs=rngs)
@@ -190,64 +208,82 @@ class _TransformerWaveFunctionBase(nnx.Module):
     def _ordering_reversed_array(self) -> Array:
         return jnp.asarray(self._ordering_reversed, dtype=jnp.int32)
 
-    def _decoder_outputs(self, tokens: Array) -> tuple[Array, Array]:
-        """Run the decoder over ``tokens`` ``[batch, seq]``; return raw amp/phase per position.
-
-        Returns ``(raw_amplitude, phase)`` each of shape ``[batch, seq, states_per_site]``.
-        """
-        embedded = self.embedding(tokens)
-        hidden = self.transformers(embedded)
+    def _split_tail(self, hidden: Array) -> tuple[Array, Array]:
+        """Split a tail activation into ``(raw_amplitude, phase)`` over the state axis."""
         tail = self.tail(hidden)
-        raw_amplitude = tail[:, :, : self.states_per_site]
-        phase = tail[:, :, self.states_per_site :]
-        return raw_amplitude, phase
+        return tail[..., : self.states_per_site], tail[..., self.states_per_site :]
 
-    def _input_tokens(self, site_values: Array) -> Array:
-        """Prepend a BOS token (0) and drop the last site, giving the causal input stream."""
-        batch_size = site_values.shape[0]
-        bos = jnp.zeros((batch_size, 1), dtype=jnp.int32)
-        if site_values.shape[1] == 0:
-            return bos
-        return jnp.concatenate([bos, site_values[:, :-1]], axis=1)
+    def _conditional_log_amplitude(self, raw_amplitude: Array, prefix_values: Array, site_index: int) -> Array:
+        """Normalise a raw amplitude slice ``[batch, states]`` under the particle-number mask."""
+        mask = self._local_mask(prefix_values, site_index)
+        return normalize_log_amplitude(apply_mask(raw_amplitude, mask), axis=-1)
 
     def __call__(self, configs: Array) -> Array:
         site_values = self._config_to_site_values(configs)
         batch_size = site_values.shape[0]
         batch_indices = jnp.arange(batch_size)
 
-        tokens = self._input_tokens(site_values)
-        raw_amplitude, phase = self._decoder_outputs(tokens)
+        # Causal input stream: BOS token followed by all but the last site.
+        bos = jnp.zeros((batch_size, 1), dtype=jnp.int32)
+        tokens = bos if self.sites == 1 else jnp.concatenate([bos, site_values[:, :-1]], axis=1)
+
+        embedded = self.embedding(tokens, position=0)
+        hidden = self.transformers(embedded, decode=False)
+        raw_amplitude, phase = self._split_tail(hidden)
 
         total_log_amplitude = jnp.zeros((batch_size,), dtype=jnp.float64)
         total_phase = jnp.zeros((batch_size,), dtype=jnp.float64)
         for site_index in range(self.sites):
-            mask = self._local_mask(site_values[:, :site_index], site_index)
-            conditional = normalize_log_amplitude(apply_mask(raw_amplitude[:, site_index], mask), axis=-1)
+            conditional = self._conditional_log_amplitude(
+                raw_amplitude[:, site_index], site_values[:, :site_index], site_index
+            )
             chosen = site_values[:, site_index]
             total_log_amplitude = total_log_amplitude + conditional[batch_indices, chosen]
             total_phase = total_phase + phase[:, site_index][batch_indices, chosen]
 
         return jnp.exp(total_log_amplitude + 1j * total_phase)
 
-    def _conditional_from_prefix(self, prefix_values: Array, site_index: int) -> Array:
-        """Normalised conditional log-amplitude ``[batch, states]`` at ``site_index``.
+    # ---- incremental decoding ----
 
-        Re-runs the decoder over ``[BOS, prefix]`` and reads the final position.
-        """
-        batch_size = prefix_values.shape[0]
-        bos = jnp.zeros((batch_size, 1), dtype=jnp.int32)
-        tokens = jnp.concatenate([bos, prefix_values], axis=1)
-        raw_amplitude, _ = self._decoder_outputs(tokens)
-        mask = self._local_mask(prefix_values, site_index)
-        return normalize_log_amplitude(apply_mask(raw_amplitude[:, site_index], mask), axis=-1)
+    def _init_decode_cache(self, batch_size: int) -> None:
+        """Enable decode mode and allocate key/value caches for a full sequence."""
+        self.transformers.set_attributes(decode=True)
+        for unit in self.transformers.units:
+            unit.attention.init_cache((batch_size, self.sites, self.embedding_dim), dtype=jnp.float64)
+
+    def _disable_decode(self) -> None:
+        self.transformers.set_attributes(decode=False)
+
+    def _reorder_cache(self, parents: Array) -> None:
+        """Reorder every attention key/value cache along the batch axis by ``parents``."""
+        for unit in self.transformers.units:
+            attention = unit.attention
+            cached_key = attention.cached_key
+            cached_value = attention.cached_value
+            assert cached_key is not None
+            assert cached_value is not None
+            attention.cached_key = nnx.Cache(cached_key[...][parents])
+            attention.cached_value = nnx.Cache(cached_value[...][parents])
+
+    def _decode_step(self, token: Array, site_index: int) -> tuple[Array, Array]:
+        """Feed one token ``[batch, 1]`` at ``site_index``; return ``(raw_amplitude, phase)`` ``[batch, states]``."""
+        embedded = self.embedding(token, position=site_index)
+        hidden = self.transformers(embedded, decode=True)
+        raw_amplitude, phase = self._split_tail(hidden)
+        return raw_amplitude[:, 0], phase[:, 0]
 
     def generate(self, batch_size: int, *, key: Array) -> tuple[Array, Array, Array]:
+        self._init_decode_cache(batch_size)
         site_values = jnp.zeros((batch_size, 0), dtype=jnp.int32)
+        token = jnp.zeros((batch_size, 1), dtype=jnp.int32)  # BOS
         for site_index in range(self.sites):
-            conditional = self._conditional_from_prefix(site_values, site_index)
+            raw_amplitude, _ = self._decode_step(token, site_index)
+            conditional = self._conditional_log_amplitude(raw_amplitude, site_values, site_index)
             key, subkey = jax.random.split(key)
             choice = sample_step(conditional, subkey).astype(jnp.int32)
             site_values = jnp.concatenate([site_values, choice[:, None]], axis=1)
+            token = choice[:, None]
+        self._disable_decode()
 
         configs = self._site_values_to_config(site_values)
         unique_configs, counts = jnp.unique(configs, axis=0, return_counts=True)
@@ -256,20 +292,23 @@ class _TransformerWaveFunctionBase(nnx.Module):
 
     def generate_unique(self, batch_size: int, *, key: Array) -> tuple[Array, Array]:
         beam_width = batch_size
+        self._init_decode_cache(beam_width)
+
         beam_values = jnp.zeros((beam_width, 0), dtype=jnp.int32)
         beam_log_prob = jnp.full((beam_width,), 0.0, dtype=jnp.float64)
         beam_perturbed = jnp.full((beam_width,), 0.0, dtype=jnp.float64)
         beam_valid = jnp.arange(beam_width) == 0
+        token = jnp.zeros((beam_width, 1), dtype=jnp.int32)  # BOS for every beam slot
 
+        states = self.states_per_site
         for site_index in range(self.sites):
-            conditional = self._conditional_from_prefix(beam_values, site_index)
-            child_conditional_log_prob = 2.0 * conditional
+            raw_amplitude, _ = self._decode_step(token, site_index)
+            conditional = self._conditional_log_amplitude(raw_amplitude, beam_values, site_index)
             key, subkey = jax.random.split(key)
             child_log_prob, child_perturbed, child_valid = gumbel_topk_step(
-                beam_log_prob, beam_perturbed, beam_valid, child_conditional_log_prob, subkey
+                beam_log_prob, beam_perturbed, beam_valid, 2.0 * conditional, subkey
             )
 
-            states = self.states_per_site
             tiled_prefix = jnp.broadcast_to(beam_values[:, None, :], (beam_width, states, site_index)).reshape(
                 beam_width * states, site_index
             )
@@ -280,11 +319,15 @@ class _TransformerWaveFunctionBase(nnx.Module):
 
             flat_perturbed = child_perturbed.reshape(-1)
             selected = jnp.argsort(flat_perturbed)[::-1][:beam_width]
+            parents = (selected // states).astype(jnp.int32)
 
             beam_values = candidates[selected]
             beam_log_prob = child_log_prob.reshape(-1)[selected]
             beam_perturbed = flat_perturbed[selected]
             beam_valid = child_valid.reshape(-1)[selected]
+            self._reorder_cache(parents)
+            token = beam_values[:, site_index : site_index + 1]
+        self._disable_decode()
 
         configs = self._site_values_to_config(beam_values)
         configs = configs[jnp.asarray(beam_valid)]

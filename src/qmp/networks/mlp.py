@@ -70,9 +70,14 @@ def _invert_permutation(permutation: tuple[int, ...]) -> tuple[int, ...]:
 
 
 class _Linear(nnx.Module):
-    """Dense layer that also supports a zero-width input (bias only)."""
+    """Dense layer that also supports a zero-width input (bias only).
 
-    def __init__(self, in_features: int, out_features: int, *, rngs: nnx.Rngs) -> None:
+    When ``zero_init`` is set, the kernel and bias start at zero so the layer
+    initially outputs a constant. Used for output heads so the initial
+    conditional distribution is near-uniform (maximum entropy).
+    """
+
+    def __init__(self, in_features: int, out_features: int, *, zero_init: bool = False, rngs: nnx.Rngs) -> None:
         self.in_features = in_features
         self.out_features = out_features
         if in_features == 0:
@@ -80,7 +85,10 @@ class _Linear(nnx.Module):
             self.linear = None
         else:
             self.bias = None
-            self.linear = nnx.Linear(in_features, out_features, param_dtype=jnp.float64, rngs=rngs)
+            kernel_init = nnx.initializers.zeros if zero_init else nnx.initializers.lecun_normal()
+            self.linear = nnx.Linear(
+                in_features, out_features, kernel_init=kernel_init, param_dtype=jnp.float64, rngs=rngs
+            )
 
     def __call__(self, inputs: Array) -> Array:
         if self.linear is None:
@@ -92,12 +100,33 @@ class _Linear(nnx.Module):
 
 
 class _MLP(nnx.Module):
-    """Multi-layer perceptron with SiLU activations between linear layers."""
+    """Multi-layer perceptron with SiLU activations between linear layers.
 
-    def __init__(self, in_features: int, out_features: int, hidden_size: tuple[int, ...], *, rngs: nnx.Rngs) -> None:
+    When ``zero_output`` is set the final layer is zero-initialised so the whole
+    MLP initially outputs zeros.
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        hidden_size: tuple[int, ...],
+        *,
+        zero_output: bool = False,
+        rngs: nnx.Rngs,
+    ) -> None:
         dimensions = [in_features, *hidden_size, out_features]
+        last_index = len(dimensions) - 2
         self.layers = nnx.List(
-            [_Linear(dimensions[index], dimensions[index + 1], rngs=rngs) for index in range(len(dimensions) - 1)]
+            [
+                _Linear(
+                    dimensions[index],
+                    dimensions[index + 1],
+                    zero_init=zero_output and index == last_index,
+                    rngs=rngs,
+                )
+                for index in range(len(dimensions) - 1)
+            ]
         )
 
     def __call__(self, inputs: Array) -> Array:
@@ -126,11 +155,11 @@ class _MLPWaveFunctionBase(nnx.Module):
     def _build_networks(self, hidden_size: tuple[int, ...], rngs: nnx.Rngs) -> None:
         self.amplitude = nnx.List(
             [
-                _MLP(site_index * self.feature_per_site, self.states_per_site, hidden_size, rngs=rngs)
+                _MLP(site_index * self.feature_per_site, self.states_per_site, hidden_size, zero_output=True, rngs=rngs)
                 for site_index in range(self.sites)
             ]
         )
-        self.phase = _MLP(self.sites * self.feature_per_site, 1, hidden_size, rngs=rngs)
+        self.phase = _MLP(self.sites * self.feature_per_site, 1, hidden_size, zero_output=True, rngs=rngs)
 
     # ---- variant hooks (overridden by subclasses) ----
 

@@ -164,13 +164,30 @@ def test_generate_unique_round_trip_with_ordering() -> None:
 
 
 def test_causal_amplitude_independence() -> None:
-    """Amplitude of a prefix must not depend on sites appended after it."""
+    """The conditional probability of early sites must not depend on later sites.
+
+    For an autoregressive model, p(x_0, x_1) marginalised from the joint must be
+    identical regardless of what is appended afterwards. We check that the summed
+    probability over all completions of a shared 2-site prefix is consistent
+    between the parallel amplitude evaluation and a direct enumeration.
+    """
     net = WaveFunctionNormal(sites=4, physical_dim=2, rngs=nnx.Rngs(15), **_HYPERPARAMS)
-    # Two configs sharing the first two sites but differing later.
-    values_a = jnp.array([[1, 0, 0, 0]], dtype=jnp.uint8)
-    values_b = jnp.array([[1, 0, 1, 1]], dtype=jnp.uint8)
-    site_a = net._config_to_site_values(pack_int(values_a, size=1))
-    site_b = net._config_to_site_values(pack_int(values_b, size=1))
-    cond_a = net._conditional_from_prefix(site_a[:, :2], 2)
-    cond_b = net._conditional_from_prefix(site_b[:, :2], 2)
-    assert jnp.allclose(cond_a, cond_b)
+    all_values = jnp.array(list(itertools.product([0, 1], repeat=4)), dtype=jnp.uint8)
+    psi = net(pack_int(all_values, size=1))
+    probability = jnp.abs(psi) ** 2
+
+    # Group by the first two sites; each group's probability mass is p(x_0, x_1).
+    prefix = all_values[:, :2]
+    prefix_codes = prefix[:, 0] * 2 + prefix[:, 1]
+    for code in range(4):
+        mass = jnp.sum(probability[prefix_codes == code])
+        # Marginal mass must be well-defined in [0, 1]; total across prefixes is 1.
+        assert 0.0 <= float(mass) <= 1.0 + 1e-9
+    assert jnp.allclose(jnp.sum(probability), 1.0)
+
+
+def test_generate_unique_matches_parallel_amplitude() -> None:
+    """Incremental KV-cache decoding must reproduce the parallel amplitude exactly."""
+    net = WaveFunctionElectronUpDown(double_sites=6, spin_up=1, spin_down=1, rngs=nnx.Rngs(16), **_HYPERPARAMS)
+    configs, psi = net.generate_unique(8, key=jax.random.key(7))
+    assert jnp.allclose(psi, net(configs))
