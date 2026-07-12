@@ -20,9 +20,18 @@ import optax
 from flax import nnx
 from jax import Array
 
-from qmp.algorithms._losses import sum_filtered_angle_scaled_log
 from qmp.algorithms._registry import action_class_dict, action_config_dict
 from qmp.models._build import SubConfigRef, build_model
+from qmp.utility._losses import (
+    direct,
+    log,
+    sum_filtered_angle_log,
+    sum_filtered_angle_scaled_log,
+    sum_filtered_log,
+    sum_filtered_scaled_log,
+    sum_reweighted_angle_log,
+    sum_reweighted_log,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -255,8 +264,15 @@ def _load_checkpoint(path: str) -> dict | None:
 # HAAR main
 # ==============================================================================
 
-_AVAILABLE_LOSSES: dict[str, typing.Callable[[Array, Array], Array]] = {
+_AVAILABLE_LOSSES: dict[str, typing.Callable[..., Array]] = {
+    "log": log,
+    "sum_reweighted_log": sum_reweighted_log,
+    "sum_filtered_log": sum_filtered_log,
+    "sum_filtered_scaled_log": sum_filtered_scaled_log,
+    "sum_reweighted_angle_log": sum_reweighted_angle_log,
+    "sum_filtered_angle_log": sum_filtered_angle_log,
     "sum_filtered_angle_scaled_log": sum_filtered_angle_scaled_log,
+    "direct": direct,
 }
 
 
@@ -371,7 +387,7 @@ def _local_optimize(
     configs: Array,
     target_psi: Array,
     max_idx: int,
-    loss_fn: typing.Callable[[Array, Array], Array],
+    loss_fn: typing.Callable[..., Array],
     max_steps: int,
     stop_loss: float,
 ) -> tuple[object, object, int]:
