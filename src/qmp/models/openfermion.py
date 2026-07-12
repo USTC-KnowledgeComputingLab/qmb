@@ -140,7 +140,7 @@ model_config_dict["openfermion"] = ModelConfig
 class MlpUpDownConfig:
     """MLP network with spin-up/spin-down electron-number conservation."""
 
-    hidden_size: tuple[int, ...] = (512,)
+    hidden_size: list[int] = dataclasses.field(default_factory=lambda: [512])
     ordering: int = 1
 
     def create(self, model: Model, *, rngs: nnx.Rngs) -> NetworkProto:
@@ -150,7 +150,7 @@ class MlpUpDownConfig:
             double_sites=model.n_qubits,
             spin_up=(model.n_electrons + model.n_spins) // 2,
             spin_down=(model.n_electrons - model.n_spins) // 2,
-            hidden_size=self.hidden_size,
+            hidden_size=self.hidden_size if isinstance(self.hidden_size, tuple) else tuple(self.hidden_size),
             ordering=self.ordering,
             rngs=rngs,
         )
@@ -163,7 +163,7 @@ Model.network_dict["mlp/u1u1"] = MlpUpDownConfig
 class MlpElectronConfig:
     """MLP network with total electron-number conservation."""
 
-    hidden_size: tuple[int, ...] = (512,)
+    hidden_size: list[int] = dataclasses.field(default_factory=lambda: [512])
     ordering: int = 1
 
     def create(self, model: Model, *, rngs: nnx.Rngs) -> NetworkProto:
@@ -172,7 +172,7 @@ class MlpElectronConfig:
         return MlpWaveFunctionElectron(
             sites=model.n_qubits,
             electrons=model.n_electrons,
-            hidden_size=self.hidden_size,
+            hidden_size=self.hidden_size if isinstance(self.hidden_size, tuple) else tuple(self.hidden_size),
             ordering=self.ordering,
             rngs=rngs,
         )
