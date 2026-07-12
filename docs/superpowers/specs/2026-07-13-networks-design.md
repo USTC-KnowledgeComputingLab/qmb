@@ -26,9 +26,9 @@
 
 1. **Flax nnx** API（非 linen）
 2. Transformer decoder 使用 **dense FeedForward**，不含 DeepSeekMoE（无 shared/routed experts、centroid、负载均衡 bias）
-3. `generate` 与 `generate_unique` **显式接收 PRNG key**（纯函数，无内部随机状态）
+3. `generate` 与 `generate_unique` **显式接收 PRNG key**（随机性无内部状态；注意 Transformer 生成会在模块上留下 KV-cache 变量，见 §9）
 4. 顺带实现 **JAX 版 `utility/bitspack.py`**
-5. 生成循环使用 **unrolled Python for**（sites 数在构造时静态已知，循环在 jit trace 期展开）
+5. 生成循环使用 **unrolled Python for**（sites 数在构造时静态已知，逐 site 展开）。注意 `__call__`（估值）可 jit；`generate` / `generate_unique` 因末尾用 `jnp.unique` / 布尔过滤产生动态形状，**整体不可 jit**，按 eager 执行
 6. Normal 变体支持**任意 physical_dim**（qudit）
 7. 测试为**内部自洽 unit test**，不与旧 PyTorch 实现数值对拍
 
@@ -40,7 +40,8 @@ src/qmp/utility/
 └── bitspack.py                # JAX pack_int / unpack_int (size ∈ {1,2,4,8})
 
 src/qmp/networks/
-├── __init__.py                # re-export 六个 WaveFunction 类
+├── __init__.py                # re-export NetworkProto + mlp / transformers 模块
+├── AGENTS.md                  # 子系统设计与局部原则
 ├── _protocol.py               # NetworkProto Protocol
 ├── _autoregressive.py         # 共享逻辑：归一化、mask、gumbel-topk、采样
 ├── mlp.py                     # MLP backbone + 3 变体
@@ -87,19 +88,20 @@ def unpack_int(array: Array, size: int, last_dim: int) -> Array:
 ### 6.1 条件振幅归一化
 
 ```python
-def normalize_log_amplitude(log_amp: Array, axes: tuple[int, ...]) -> Array:
+def normalize_log_amplitude(log_amplitude: Array, axis: int = -1) -> Array:
     """归一化局部条件 log-amplitude 使 Σ p = Σ exp(2·log_amp) = 1。
-    param = 0.5 · log(Σ exp(2·log_amp))；返回 log_amp - param。"""
+    log_partition = 0.5 · logsumexp(2·log_amplitude)；返回 log_amplitude - log_partition。"""
 ```
 
-### 6.2 三种粒子数 mask
+`apply_mask(log_amplitude, mask)`: 把 `mask` 为 False 的态设为 `-inf`（零概率）。
 
-返回布尔张量，True 表示"可以在当前不完整构型后追加该状态"。违反约束的分支后续被赋 log-amplitude = -inf。
+### 6.2 两种粒子数 mask
 
-- `mask_normal`: 无约束（恒 True）。
-- `mask_electron(partial_config, site_index, total_sites, electrons) -> [batch, 2]`:
-  `add_hole = hole < total_sites - electrons`；`add_electron = electron < electrons`。
-- `mask_electron_up_down(partial_config, site_index, total_sites, spin_up, spin_down) -> [batch, 2, 2]`:
+返回布尔张量，True 表示"可以在当前不完整构型后追加该状态"。违反约束的分支经 `apply_mask` 赋 log-amplitude = -inf。Normal 变体无约束，直接内联 `jnp.ones(...)`（不设独立函数）。
+
+- `mask_electron(electron_count, sites_filled, total_sites, electrons) -> [..., 2]`:
+  `can_add_hole = hole_count < total_sites - electrons`；`can_add_particle = electron_count < electrons`。
+- `mask_electron_up_down(up_count, down_count, sites_filled, total_sites, spin_up, spin_down) -> [..., 2, 2]`:
   up/down 各自独立约束的逻辑与。索引 `[., up, down]`。
 
 ### 6.3 Gumbel top-K 束搜索单步
@@ -110,14 +112,16 @@ def normalize_log_amplitude(log_amp: Array, axes: tuple[int, ...]) -> Array:
 def gumbel_topk_step(
     parent_log_prob: Array,          # [beam] 累积无扰动 log p
     parent_perturbed: Array,         # [beam] 父节点条件扰动 log p (L̃)
-    child_cond_log_prob: Array,      # [beam, n_states] 子节点条件 log p(x_i|x_<i)
+    parent_valid: Array,             # [beam] 是否为有效（非 padding）束槽
+    conditional_log_prob: Array,     # [beam, n_states] 子节点条件 log p(x_i|x_<i)，禁止态为 -inf
     key: Array,
-) -> tuple[Array, Array]:
-    """返回 (child_log_prob [beam, n_states], child_perturbed [beam, n_states])。
-    l = parent_log_prob[:,None] + child_cond_log_prob
+) -> tuple[Array, Array, Array]:
+    """返回 (child_log_prob, child_perturbed, child_valid)，均为 [beam, n_states]。
+    l = parent_log_prob[:,None] + conditional_log_prob
     L = l + Gumbel(key)                       # G = -log(-log U)
     Z = max_over_states(L)                    # [beam, 1]
     L̃ = -log( exp(-parent_perturbed[:,None]) - exp(-Z) + exp(-L) )
+    无效子节点（parent 为 padding 或 conditional 为 -inf）标记 child_valid=False 并置 sentinel。
     """
 ```
 
@@ -149,23 +153,24 @@ class NetworkProto(Protocol):
 
 ## 8. MLP 设计 (`mlp.py`)
 
-- `MLP(nnx.Module)`: 多层 `nnx.Linear` + SiLU 激活。`dim_in == 0` 时退化为 bias-only 层（对应旧 `FakeLinear`，避免零输入维度）。
+- `_MLP(nnx.Module)`: 多层 `_Linear` + SiLU 激活；`zero_output=True` 时末层零初始化。
+- `_Linear`: 包装 `nnx.Linear`；`in_features == 0` 时退化为 bias-only 层（对应旧 `FakeLinear`，因 `nnx.Linear(0, …)` 会除零崩溃）。
 - 三变体各含：
-  - `amplitude`: site 数个独立 MLP（第 i 个输入维度 = i × 每 site 元素数，输出 = 每 site 状态数）
-  - `phase`: 单个 MLP（输入 = 全部 site，输出 = 1）
-- `__call__`: unpack → 应用 `ordering_reversed` → 逐 site 并行算条件振幅 → 加 mask → 归一化 → gather 实际状态 → 累加 log-amplitude；phase 网络算总相位 → 组装 `exp(amp + i·phase)`。
+  - `amplitude`: site 数个独立 `_MLP`（第 i 个输入维度 = i × 每 site 元素数，输出 = 每 site 状态数），末层零初始化
+  - `phase`: 单个 `_MLP`（输入 = 全部 site，输出 = 1），末层零初始化
+- `__call__`: unpack → 应用 `ordering_reversed` → 逐 site 算条件振幅 → 加 mask → 归一化 → gather 实际状态 → 累加 log-amplitude；phase 网络算总相位 → 组装 `exp(amp + i·phase)`。
 - `generate` / `generate_unique`: unrolled Python for over sites，逐 site 扩展束/采样。
 
 ## 9. Transformers 设计 (`transformers.py`)
 
 building blocks（均为 `nnx.Module`）：
 
-- `Embedding`: 每个 position 一个 `[physical_dim, embedding_dim]` 查表；输入位置 `base` 偏移。
-- `SelfAttention`: fused QKV Linear + causal mask + KV-cache（k/v 经 `jax.lax.stop_gradient` 截断历史梯度）。多头。
-- `FeedForward`: `Linear(emb→hidden) → GELU → Linear(hidden→emb)`（dense，无 MoE）。
-- `DecoderUnit`: pre-norm self-attention + 残差 + LayerNorm + dense FFN + 残差 + LayerNorm。
-- `Transformers`: depth 层 `DecoderUnit` 堆叠。
-- `Tail`: `Linear → GELU → Linear`，输出维度 = 2 × 每 site 状态数（amplitude + phase）。
+- `_PositionalEmbedding`: 每个 position 一个 `[physical_dim, embedding_dim]` 查表；`position` 参数选择起始行，使单个增量 token 能在其真实位置被嵌入。
+- 注意力: 直接用 `nnx.MultiHeadAttention`（fused QKV，`decode=False` 并行 + causal mask；`decode=True` 增量 + KV-cache）。生成为纯前向，无梯度磁带，因此无需截断历史梯度（无 `stop_gradient`）。
+- `_FeedForward`: `Linear(emb→hidden) → GELU → Linear(hidden→emb)`（dense，无 MoE）。
+- `_DecoderUnit`: pre-norm self-attention + 残差 + LayerNorm + dense FFN + 残差。
+- `_Transformers`: depth 层 `_DecoderUnit` 堆叠；并行模式建 causal mask，decode 模式靠 KV-cache 无需 mask。
+- `_Tail`: `Linear → GELU → Linear`，输出维度 = 2 × 每 site 状态数（amplitude + phase）；末层零初始化。
 
 三变体：
 - config 移位（丢弃末 site，前置 BOS=0），使 position t 编码"前 t 个 site 的历史"。
@@ -190,10 +195,12 @@ building blocks（均为 `nnx.Module`）：
 - 已知小例手工验证位布局
 
 ### 11.2 test_autoregressive.py
-- `normalize_log_amplitude` 后 Σ exp(2·x) = 1
-- 三种 mask 粒子数约束正确（含手工小例）
-- `gumbel_topk_step` 无 NaN（含无效分支 sentinel）
-- gumbel-topk 束搜索唯一性 + K 上限
+- `normalize_log_amplitude` 后 Σ exp(2·x) = 1（含含 mask 的情形）
+- 两种 mask 粒子数约束正确（含手工小例；Normal 无约束不单独测）
+- `gumbel_topk_step` 无 NaN（含无效分支 sentinel）、扰动值不超过父上界、累积 log-prob 正确
+- `sample_step` 尊重禁止态、同 key 确定性
+
+（gumbel-topk 束搜索的唯一性 + K 上限在网络级 `test_mlp.py` / `test_transformers.py` 中验证。）
 
 ### 11.3 test_mlp.py / test_transformers.py（各三变体）
 - `__call__` 输出 shape=[batch]、dtype=complex128
@@ -212,16 +219,18 @@ building blocks（均为 `nnx.Module`）：
 
 ## 13. 非目标
 
-- 多节点 shard_map 集成（接口保持纯函数 + 显式 key，为后续预留）
+- 多节点 shard_map 集成（接口保持显式 key 与纯 pytree 参数，为后续预留）
 - 与旧 PyTorch 实现数值对拍
 - MPS 网络（本 spec 不含）
 - checkpoint 序列化（nnx 参数为标准 pytree，后续由 algorithms 层处理）
+- 生成时的显存分块（`block_num`）
 
 ## 14. 已知风险
 
 | 风险 | 等级 | 缓解 |
 |------|------|------|
 | Gumbel 条件截断 `inf - inf = NaN` | 高 | 有限 sentinel -1e30 + `jnp.where` 护栏 |
-| unrolled 循环在大 sites 编译时间长 | 中 | 本 spec 目标 sites ≲ 100；后续可选 scan 优化 |
+| unrolled 循环在大 sites 编译时间长 | 中 | `__call__` 目标 sites ≲ 100；`generate*` 不整体 jit，按 eager 逐步执行 |
 | x64 全局启用影响其他子系统 | 低 | 包级策略，Hamiltonian 亦用 float64；文档记录 |
 | 任意 physical_dim 的 bitspack size 仅支持 {1,2,4,8} | 低 | physical_dim 状态编码 bit 数取 {1,2,4,8}；spec 限定 physical_dim ≤ 256 |
+| Transformer `generate*` 在模块留下 KV-cache 变量（side effect） | 低 | Cache 属 `nnx.Cache` 非 `nnx.Param`，优化器/梯度不受影响；每次调用重建 |

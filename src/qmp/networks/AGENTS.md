@@ -45,7 +45,9 @@ Networks 子系统提供**变分波函数 ansatz**（神经量子态，NQS）。
 
 ### 生成循环用 unrolled Python for
 
-sites 数在构造时静态已知，生成循环在 jit trace 期展开。各步形状虽不同但都是具体常量。这也是 MLP 变体唯一可行方式（每 site 是独立模块，输入维度随 i 增长，无法 scan）。
+sites 数在构造时静态已知，生成循环逐 site 展开。各步形状虽不同但都是具体常量。这也是 MLP 变体唯一可行方式（每 site 是独立模块，输入维度随 i 增长，无法 scan）。
+
+注意可 jit 性：`__call__`（估值）可以 jit。但 `generate` / `generate_unique` 末尾用 `jnp.unique` / 布尔过滤产生**动态形状**，因此**整体不可 jit**，按 eager 执行——unrolled 循环只是让每步以具体形状运行，并非把整个函数塞进一次 jit。
 
 ### Transformer 的 KV-cache 增量解码
 
@@ -53,6 +55,7 @@ sites 数在构造时静态已知，生成循环在 jit trace 期展开。各步
 - `generate*`（采样）：增量 KV-cache 解码。每步只喂新 token，attention 复用缓存的 key/value（`nnx.MultiHeadAttention` 的 `decode=True` + `init_cache`）。
 - **束搜索中的 cache 重排**：`generate_unique` 每步剪枝后，按父束索引 `parents = selected // states` 沿 batch 轴重排每层 attention 的 `cached_key`/`cached_value`。这保证缓存跟随束的祖先路径。
 - 因为生成是纯前向（无 autograd 磁带），旧代码的 `detach` 不需要。
+- **副作用提示**：`generate*` 会在模块上通过 `init_cache` 建立 `nnx.Cache` 变量并原地更新（KV-cache 本质有状态）。这些 Cache 变量在调用后仍留存于模块（每次调用会重新分配、正确按当前 batch_size 重建）。它们属于 `nnx.Cache` 类别，**不属于 `nnx.Param`**，故按 `nnx.Param` 过滤的优化器/梯度不受影响；但 `nnx.state(net)`（全量）会包含它们。这是唯一偏离"纯函数优于副作用"原则的地方，源于 nnx KV-cache 的有状态设计。
 - 正确性验证：`generate_unique` 返回的 psi 与对同一 config 调 `__call__` 数值一致（见 `test_generate_unique_matches_parallel_amplitude`）。
 
 ### 初始化：输出层零初始化
@@ -79,7 +82,7 @@ log-amplitude、phase 全程 float64 累加（根 AGENTS.md 的全局 x64 策略
 ## 未包含（后续工作）
 
 - MPS 网络
-- 多节点 shard_map 集成（接口已保持纯函数 + 显式 key）
+- 多节点 shard_map 集成（接口已保持显式 key + 纯 pytree 参数）
 - checkpoint 序列化（nnx 参数为标准 pytree，由 algorithms 层处理）
 - 生成时的显存分块（`block_num`）—— 暂时移除
 
