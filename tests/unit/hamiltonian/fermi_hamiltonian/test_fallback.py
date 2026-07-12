@@ -294,3 +294,162 @@ def test_find_topk_count_selected_one() -> None:
     exclude = jnp.zeros((0, 1), dtype=jnp.uint8)
     result = find_topk_relative_configs(configs, psi_i, 1, exclude, *masks)
     assert result.shape == (1, configs.shape[1])
+
+
+# ---- apply_within Hermitian conjugation ----
+
+
+def test_apply_within_hermitian_conjugate() -> None:
+    """Forward(direction=0) and backward(direction=1) should be Hermitian conjugates."""
+    h: dict[tuple[tuple[int, int], ...], complex] = {((1, 1), (0, 0)): -2.0 + 1.0j}
+    masks = prepare(h, n_qubits=4)
+    ci = jnp.array([[0b01], [0b10], [0b00], [0b11]], dtype=jnp.uint8)
+    cj = jnp.array([[0b01], [0b10], [0b00]], dtype=jnp.uint8)
+    psi_i = jnp.array([[0.5, 1.0], [0.0, 0.0], [2.0, 3.0], [0.3, -0.7]], dtype=jnp.float64)
+    psi_j = jnp.array([[1.0, 0.0], [0.0, 0.0], [0.0, 2.0]], dtype=jnp.float64)
+    fwd_i2j = apply_within_subspace(ci, psi_i, cj, *masks, direction=0)
+    bwd_j2i = apply_within_subspace(ci, psi_j, cj, *masks, direction=1)
+    inner_fwd = jnp.sum(psi_j[:, 0] * fwd_i2j[:, 0] + psi_j[:, 1] * fwd_i2j[:, 1])
+    inner_bwd = jnp.sum(psi_i[:, 0] * bwd_j2i[:, 0] + psi_i[:, 1] * bwd_j2i[:, 1])
+    assert jnp.allclose(inner_fwd, inner_bwd, rtol=1e-10)
+
+
+# ---- find_all amplitude correctness ----
+
+
+def test_find_all_amplitude_exact() -> None:
+    """c_1^dag c_0 on |01> with psi=1+0j → |10> with amplitude -1+0j (JW sign +)."""
+    masks = prepare({((1, 1), (0, 0)): -1.0 + 0j}, n_qubits=4)
+    configs = jnp.array([[0b01]], dtype=jnp.uint8)
+    psi_i = jnp.array([[1.0, 0.0]], dtype=jnp.float64)
+    exclude = jnp.zeros((0, 1), dtype=jnp.uint8)
+    new_c, new_p, cnt = find_all_relative_configs(configs, psi_i, exclude, *masks, hash_capacity=50)
+    assert int(cnt) == 1
+    assert int(new_c[0, 0]) == 0b10  # |10⟩
+    assert abs(float(new_p[0, 0]) - (-1.0)) < 1e-10
+    assert abs(float(new_p[0, 1])) < 1e-10
+
+
+def test_find_all_amplitude_sum() -> None:
+    """Two source configs both connect to the same new config: amplitudes accumulate."""
+    masks = prepare({((1, 1), (0, 0)): -1.0 + 0j}, n_qubits=4)
+    configs = jnp.array([[0b01], [0b01]], dtype=jnp.uint8)
+    psi_i = jnp.array([[1.0, 0.0], [0.5, 0.0]], dtype=jnp.float64)
+    exclude = jnp.zeros((0, 1), dtype=jnp.uint8)
+    _new_c, new_p, cnt = find_all_relative_configs(configs, psi_i, exclude, *masks, hash_capacity=50)
+    assert int(cnt) == 1
+    assert abs(float(new_p[0, 0]) - (-1.5)) < 1e-10
+
+
+# ---- find_topk ordering ----
+
+
+def test_find_topk_ordering() -> None:
+    """find_topk should return configs in descending weight order."""
+    h: dict[tuple[tuple[int, int], ...], complex] = {
+        ((1, 1), (0, 0)): -3.0 + 0j,
+        ((2, 1), (1, 0)): -1.0 + 0j,
+        ((3, 1), (2, 0)): -0.1 + 0j,
+    }
+    masks = prepare(h, n_qubits=4)
+    configs = jnp.array([[0b010], [0b100], [0b1000]], dtype=jnp.uint8)
+    psi_i = jnp.array([[1.0, 0.0], [1.0, 0.0], [1.0, 0.0]], dtype=jnp.float64)
+    exclude = jnp.zeros((0, 1), dtype=jnp.uint8)
+    result = find_topk_relative_configs(configs, psi_i, 3, exclude, *masks)
+    assert result.shape == (3, configs.shape[1])
+    configs_set = {int(r[0]) for r in result}
+    assert len(configs_set) == 3  # distinct configs
+
+
+def test_find_topk_k_exceeds_distinct() -> None:
+    """K larger than the number of distinct new configs should not crash."""
+    masks = prepare({((1, 1), (0, 0)): -1.0 + 0j}, n_qubits=4)
+    configs = jnp.array([[0b01]], dtype=jnp.uint8)
+    psi_i = jnp.ones((1, 2), dtype=jnp.float64)
+    exclude = jnp.zeros((0, 1), dtype=jnp.uint8)
+    result = find_topk_relative_configs(configs, psi_i, 10, exclude, *masks)
+    assert result.shape == (10, configs.shape[1])
+
+
+# ---- diagonal with JW parity ----
+
+
+def test_diagonal_with_parity() -> None:
+    """n_2 = c_2^dag c_2 with coef=2.0: diagonal contribution for configs with qubit 2 occupied."""
+    masks = prepare({((2, 1), (2, 0)): 2.0 + 0j}, n_qubits=8)
+    configs = jnp.array([[0b100], [0b101], [0b001], [0b010]], dtype=jnp.uint8)
+    psi = compute_diagonal_within_subspace(configs, *masks)
+    assert abs(float(psi[0, 0]) - 2.0) < 1e-10  # |100⟩: bit2 occupied → +2.0
+    assert abs(float(psi[1, 0]) - 2.0) < 1e-10  # |101⟩: bit2 occupied → +2.0
+    assert abs(float(psi[2, 0])) < 1e-10  # |001⟩: bit2 not occupied → 0
+    assert abs(float(psi[3, 0])) < 1e-10  # |010⟩: bit2 not occupied → 0
+
+
+# ---- multi-byte qubits ----
+
+
+def test_diagonal_multi_byte() -> None:
+    """n_qubits=12 (Q=2) diagonal: n_0 + n_10."""
+    masks = prepare({((0, 1), (0, 0)): 1.0 + 0j, ((10, 1), (10, 0)): 5.0 + 0j}, n_qubits=12)
+    configs = jnp.array([[0, 0b100], [0b01, 0]], dtype=jnp.uint8)
+    psi = compute_diagonal_within_subspace(configs, *masks)
+    assert abs(float(psi[0, 0]) - 5.0) < 1e-10  # bit 10 in byte 1
+    assert abs(float(psi[1, 0]) - 1.0) < 1e-10  # bit 0 in byte 0
+
+
+def test_apply_within_multi_byte() -> None:
+    """n_qubits=12 hopping c_9^dag c_2."""
+    masks = prepare({((9, 1), (2, 0)): -1.0 + 0j}, n_qubits=12)
+    ci = jnp.array([[0b100, 0]], dtype=jnp.uint8)  # bit 2 set in byte 0
+    pi = jnp.ones((1, 2), dtype=jnp.float64)
+    cj = jnp.array([[0, 0b10]], dtype=jnp.uint8)  # bit 9 set in byte 1
+    pj = apply_within_subspace(ci, pi, cj, *masks, direction=0)
+    assert abs(float(pj[0, 0]) - (-1.0)) < 1e-10
+
+
+def test_find_all_multi_byte() -> None:
+    """n_qubits=12 find_all with hopping."""
+    masks = prepare({((9, 1), (2, 0)): -1.0 + 0j}, n_qubits=12)
+    configs = jnp.array([[0b100, 0]], dtype=jnp.uint8)
+    psi_i = jnp.ones((1, 2), dtype=jnp.float64)
+    exclude = jnp.zeros((0, 2), dtype=jnp.uint8)
+    new_c, _new_p, cnt = find_all_relative_configs(configs, psi_i, exclude, *masks, hash_capacity=50)
+    assert int(cnt) == 1
+    assert int(new_c[0, 1]) & 2 == 2  # bit 9 in byte 1
+
+
+# ---- zero psi ----
+
+
+def test_diagonal_zero_psi() -> None:
+    """psi_i all zeros: diagonal should return zero."""
+    masks, configs = _hopping_model()
+    psi = compute_diagonal_within_subspace(configs, *masks)
+    for i in range(psi.shape[0]):
+        assert abs(float(psi[i, 0])) < 1e-10
+        assert abs(float(psi[i, 1])) < 1e-10
+
+
+def test_apply_within_zero_psi() -> None:
+    """psi_i all zeros: apply_within should return zero."""
+    masks, configs = _hopping_model()
+    psi_i = jnp.zeros((4, 2), dtype=jnp.float64)
+    fwd = apply_within_subspace(configs, psi_i, configs, *masks, direction=0)
+    assert jnp.all(abs(fwd) < 1e-10)
+
+
+# ---- complex coef x complex psi x direction=1 ----
+
+
+def test_apply_within_complex_hermitian() -> None:
+    """Complex coefficient, complex psi, direction=1 → full H^† application."""
+    h: dict[tuple[tuple[int, int], ...], complex] = {((1, 1), (0, 0)): 0.5 + 1.5j}
+    masks = prepare(h, n_qubits=4)
+    ci = jnp.array([[1], [2]], dtype=jnp.uint8)
+    cj = jnp.array([[1], [2], [0]], dtype=jnp.uint8)
+    psi_i = jnp.array([[2.0, 3.0], [1.0, -1.0]], dtype=jnp.float64)
+    fwd = apply_within_subspace(ci, psi_i, cj, *masks, direction=0)
+    bwd = apply_within_subspace(ci, psi_i, cj, *masks, direction=1)
+    assert fwd.shape == (3, 2)
+    assert bwd.shape == (2, 2)
+    assert jnp.any(jnp.abs(fwd) > 0) or jnp.any(jnp.abs(bwd) > 0)

@@ -270,3 +270,40 @@ def test_cuda_find_topk_k_one() -> None:
     m = prepare({((1, 1), (0, 0)): -1.0 + 0j}, n_qubits=4)
     jr = jax_find_topk(c, pi, 1, exclude, *m)
     assert cr.shape == jr.shape == (1, c.shape[1])
+
+
+# ---- multi-byte qubits (n_qubits > 8 → n_qubytes >= 2) ----
+
+
+def test_cuda_diagonal_multi_byte() -> None:
+    """n_qubits=12: CUDA diagonal should match JAX fallback."""
+    h = FermiHamiltonian(
+        {((0, 1), (0, 0)): 3.0 + 0j, ((10, 1), (10, 0)): 5.0 + 0j}, n_qubits=12, devices=["localhost:cuda:0"]
+    )
+    m = prepare({((0, 1), (0, 0)): 3.0 + 0j, ((10, 1), (10, 0)): 5.0 + 0j}, n_qubits=12)
+    c = jnp.array([[0, 0b100], [0b01, 0]], dtype=jnp.uint8)
+    assert jnp.allclose(h.compute_diagonal_within_subspace(c), jax_diag(c, *m), rtol=1e-12)
+
+
+def test_cuda_apply_multi_byte() -> None:
+    """n_qubits=12: CUDA apply_within should match JAX fallback."""
+    h = FermiHamiltonian({((9, 1), (2, 0)): -1.0 + 0j}, n_qubits=12, devices=["localhost:cuda:0"])
+    m = prepare({((9, 1), (2, 0)): -1.0 + 0j}, n_qubits=12)
+    ci = jnp.array([[0b100, 0]], dtype=jnp.uint8)
+    pi = jnp.ones((1, 2), dtype=jnp.float64)
+    cj = jnp.array([[0, 0b10]], dtype=jnp.uint8)
+    assert jnp.allclose(
+        h.apply_within_subspace(ci, pi, cj, direction=0), jax_apply_within(ci, pi, cj, *m, direction=0), rtol=1e-12
+    )
+
+
+def test_cuda_find_topk_multi_byte() -> None:
+    """n_qubits=12: CUDA find_topk should match JAX fallback."""
+    h = FermiHamiltonian({((9, 1), (2, 0)): -1.0 + 0j}, n_qubits=12, devices=["localhost:cuda:0"])
+    m = prepare({((9, 1), (2, 0)): -1.0 + 0j}, n_qubits=12)
+    c = jnp.array([[0b100, 0]], dtype=jnp.uint8)
+    pi = jnp.ones((1, 2), dtype=jnp.float64)
+    exclude = jnp.zeros((0, 2), dtype=jnp.uint8)
+    cr = h.find_topk_relative_configs(c, pi, 2, exclude)
+    jr = jax_find_topk(c, pi, 2, exclude, *m)
+    assert cr.shape == jr.shape

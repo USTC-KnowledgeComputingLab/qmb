@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+import typing
 
 import jax
 import jax.ffi
 import jax.numpy as jnp
 
+from ._hamiltonian_cuda_loader import load_cuda_module  # optional: needs nvcc to compile .so
 from ._hamiltonian_jax import (
     apply_within_subspace as _jax_apply_within_subspace,
 )
@@ -22,12 +23,6 @@ from ._hamiltonian_jax import (
     find_topk_relative_configs as _jax_find_topk_relative_configs,
 )
 from ._hamiltonian_prepare import prepare
-
-if TYPE_CHECKING:
-    pass
-
-
-from ._hamiltonian_cuda_loader import load_cuda_module  # optional: needs nvcc to compile .so
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +84,7 @@ class FermiHamiltonian:
         self._diag_idx = jnp.where(fm_sum == 0)[0]
         self._use_cuda = _try_register_ffi(self._n_qubytes)
         # 哈希表跨调用缓存: apply_within 在 configs_j 不变时复用
-        self._apply_hash_cache: tuple[int, Any] | None = None
+        self._apply_hash_cache: tuple[int, typing.Any] | None = None
         logger.info(
             "FermiHamiltonian: %d terms (%d diagonal), %d qubits, cuda=%s",
             int(self._coef.shape[0]),
