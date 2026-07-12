@@ -4,11 +4,15 @@ Template parameter n_qubytes = ceil(n_qubits/8).
 Compiled per-n_qubytes by nvcc -DN_QUBYTES=X.
 XLA FFI handlers for four operations.
 
-Optimizations:
-- if constexpr (n_qubytes <= 8): uint64_t register path
-- __ldg() read-only cache for all input data
-- Block-level shared-memory reduction for diagonal_term
-- wyhash64 inline hash function
+Implementation notes:
+- if constexpr (n_qubytes <= 8): pack masks into a single uint64_t register path
+  (loaded via __builtin_memcpy — config/mask rows are only 1-byte aligned, so a
+  reinterpret_cast to uint64_t* would be a misaligned/UB load).
+- __ldg() read-only cache is used for coef/psi/parity_const and the n_qubytes>8
+  byte-loop path (not for config bytes nor the uint64 fast path).
+- diagonal_term accumulates directly to global psi via atomicAdd (no shared-mem
+  reduction).
+- inline wyhash64 + custom linear-probing hash tables (no cuCollections).
 */
 
 #include <algorithm>
@@ -112,7 +116,7 @@ __device__ inline void atomic_max_double(double* addr, double val)
     } while (assumed != old);
 }
 
-/* ── diagonal_term kernel with block-level reduction ── */
+/* ── diagonal_term kernel (direct atomicAdd to global psi) ── */
 
 template <int n_qubytes>
 __global__ void diagonal_term_kernel(

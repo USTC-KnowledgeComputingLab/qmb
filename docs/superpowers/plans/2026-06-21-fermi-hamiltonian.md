@@ -1370,13 +1370,13 @@ git commit -m "test: add CUDA vs JAX fallback regression tests"
 
 以下事项 spec 有明确要求，但 plan 中未完整展开。执行 agent 必须在对应任务中补全：
 
-### 补充 1: 块级归约（Task 8a）
+### 补充 1: 块级归约（Task 8a）— 未采用
 
-Spec §3.2.1 要求 `compute_diagonal_within_subspace` 使用 shared memory 做 intra-block 归约，每个 block 只发一次 `atomicAdd`——而非每个线程都发 `atomicAdd`。实现方法：block 内用 `__shared__ double2 accum[256]` 做 warp-level reduction，最后 thread 0 写回 global。
+Spec §3.2.1 初版要求 `compute_diagonal_within_subspace` 用 shared memory 做 intra-block 归约。实际实现**未采用**：初版的 `s_re[i % 256]` shared-mem 归约在 `B > 256` 或多 block 时会因 slot 串号 / 部分写回而产生错误结果，修复时改为每个 (term, config) 对**直接 `atomicAdd` 到全局 `psi`**。shared-mem 归约作为未来的 L2 争用优化保留在规划中。
 
-### 补充 2: `__ldg()` 读取优化（Task 8a-8d）
+### 补充 2: `__ldg()` 读取优化（Task 8a-8d）— 部分采用
 
-Spec §3.2.2 要求所有只读输入（configs, create_mask, annihilate_mask, flip_mask, parity_mask, parity_const, coef）通过 `__ldg()` 走 read-only cache。在 CUDA kernel 中将 `const uint8_t* __restrict__` 的访问改为 `__ldg(ptr + offset)` 模式。
+Spec §3.2.2 初版要求所有只读输入都走 `__ldg()`。实际实现**部分采用**：`__ldg()` 用于 coef / psi / parity_const 以及 n_qubytes>8 的逐字节路径；config 字节与 n_qubytes≤8 的 uint64 快路径 (`load_u64` 经 `__builtin_memcpy`) 为普通读取。
 
 ### 补充 3: 哈希表跨调用缓存（Task 8b）— 预留未启用
 
