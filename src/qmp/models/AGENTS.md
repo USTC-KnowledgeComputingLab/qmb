@@ -15,7 +15,8 @@ Models 子系统是**物理问题的定义层**：把某个具体的量子多体
 ```
 src/qmp/models/
 ├── __init__.py       # 模块 docstring
-├── _model.py         # ModelProto 协议 + model_dict 注册表
+├── _model.py         # ModelProto 协议 + model_dict / model_config_dict 注册表
+├── _build.py         # SubConfigRef + build_model (从 SubConfigRef 构造 model)
 ├── hubbard.py        # 二维格点 Hubbard 模型 (程序化生成，无外部依赖)
 ├── fcidump.py        # FCIDUMP 文件 (openfermion 解析 + pickle 缓存)
 └── openfermion.py    # OpenFermion MolecularData 文件
