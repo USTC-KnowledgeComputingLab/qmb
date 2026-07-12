@@ -141,6 +141,7 @@ class _DynamicLanczos:
                     random_v = random_v - dot * prev_v
                 random_v = random_v / jnp.linalg.norm(random_v)
                 v.append(random_v)
+                beta.append(jnp.array(0.0))
             else:
                 beta.append(norm_w)
                 v.append(w / norm_w)
@@ -239,7 +240,7 @@ def _merge_pools(ca: Array, pa: Array, cb: Array, pb: Array) -> tuple[Array, Arr
     both_c = jnp.concatenate([cb, ca], axis=0)
     both_p = jnp.concatenate([pb, pa], axis=0)
     flat = both_c.reshape(both_c.shape[0], -1).view(jnp.uint32)
-    _, idx, _ = jnp.unique(flat, axis=0, return_index=True, return_counts=True, size=flat.shape[0], fill_value=0)  # ty: ignore — jax size/fill_value
+    _, idx = jnp.unique(flat, axis=0, return_index=True)
     return both_c[idx], both_p[idx]
 
 
@@ -393,26 +394,28 @@ def _local_optimize(
     max_steps: int,
     stop_loss: float,
 ) -> tuple[object, object, int]:
+    import copy as _copy
+
+    graphdef, params = nnx.split(network, nnx.Param)  # ty: ignore — network dynamic
 
     def _loss_grad(pdict: dict[str, typing.Any]) -> Array:  # ty: ignore — closure
-        nnx.update(network, pdict)  # ty: ignore
-        psi_net = network(configs)  # ty: ignore — network dynamic
+        net = nnx.merge(graphdef, pdict)  # ty: ignore
+        psi_net = net(configs)  # ty: ignore — network dynamic
         psi_net = psi_net / psi_net[max_idx]
         return loss_fn(psi_net, target_psi)
 
     opt = optax.adam(1e-3)
-    opt_state = opt.init(nnx.state(network, nnx.Param))  # ty: ignore — network dynamic
+    opt_state = opt.init(params)
 
     for _ in range(5):
-        params_backup = _copy.deepcopy(nnx.state(network, nnx.Param))  # ty: ignore
+        params_backup = _copy.deepcopy(params)
         opt_backup = _copy.deepcopy(opt_state)
 
         success = True
         for step in range(max_steps):
-            loss_val, grads = jax.value_and_grad(_loss_grad)(nnx.state(network, nnx.Param))  # ty: ignore
-            updates, opt_state = opt.update(grads, opt_state, nnx.state(network, nnx.Param))  # ty: ignore
-            new_params = optax.apply_updates(nnx.state(network, nnx.Param), updates)  # ty: ignore
-            nnx.update(network, new_params)  # ty: ignore
+            loss_val, grads = jax.value_and_grad(_loss_grad)(params)  # ty: ignore
+            updates, opt_state = opt.update(grads, opt_state, params)
+            params = optax.apply_updates(params, updates)
 
             if step % 100 == 0:
                 logger.info("  step %d, loss=%.10f", step, float(loss_val))
@@ -424,17 +427,20 @@ def _local_optimize(
 
             if float(loss_val) < stop_loss:
                 logger.info("Loss threshold met at step %d", step)
-                return nnx.state(network, nnx.Param), opt_state, step  # ty: ignore
+                nnx.update(network, params)  # ty: ignore — merge back into network for next cycle
+                return params, opt_state, step
 
         else:
             if success:
-                return nnx.state(network, nnx.Param), opt_state, max_steps  # ty: ignore
+                nnx.update(network, params)  # ty: ignore
+                return params, opt_state, max_steps
 
-        nnx.update(network, params_backup)  # ty: ignore
+        params = params_backup
         opt_state = opt_backup
 
     logger.error("Local optimization failed after all retries")
-    return nnx.state(network, nnx.Param), opt_state, 0  # ty: ignore
+    nnx.update(network, params_backup)  # ty: ignore
+    return params_backup, opt_state, 0
 
 
 # ==============================================================================
