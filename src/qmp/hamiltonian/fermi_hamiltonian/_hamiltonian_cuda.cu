@@ -508,20 +508,63 @@ __global__ void find_all_kernel(
     }
 }
 
+/* Canonical slot for a key: the first slot (from wyhash(key) % cap, probing
+   forward) that currently holds that key. All duplicate slots for the same key
+   lie on the contiguous occupied run starting at that hash position (insert
+   never skips an empty slot), so every duplicate resolves to the same canonical
+   slot. Used to merge duplicates that concurrent insertion may have created
+   (see the mid-publish skip in find_all_kernel). */
 template <int n_qubytes>
-__global__ void find_all_collect_kernel(
+__device__ int64_t find_canonical_slot(
+    const findall_slot<n_qubytes>* table, int64_t cap, const uint8_t* key)
+{
+    uint64_t h = wyhash64<n_qubytes>(key, 1);
+    int64_t idx = h % cap;
+    for (int64_t p = 0; p < cap; ++p) {
+        const findall_slot<n_qubytes>& slot = table[idx];
+        if (!slot.occupied) return idx;  // unreachable for a key that exists
+        bool match = true;
+        for (int q = 0; q < n_qubytes; ++q)
+            if (slot.key[q] != key[q]) { match = false; break; }
+        if (match) return idx;
+        idx = (idx + 1) % cap;
+    }
+    return idx;
+}
+
+/* Pass 1: each canonical slot claims one output index and writes its key. */
+template <int n_qubytes>
+__global__ void find_all_dedup_repr_kernel(
     const findall_slot<n_qubytes>* table, int64_t cap,
-    uint8_t* new_configs, double* psi_j, int* out_count)
+    uint8_t* new_configs, int* out_count, int64_t* slot_out)
 {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t stride = blockDim.x * gridDim.x;
     for (int64_t s = idx; s < cap; s += stride) {
-        const findall_slot<n_qubytes>& slot = table[s];
-        if (!slot.occupied) continue;
-        int out = atomicAdd(out_count, 1);
-        for (int q = 0; q < n_qubytes; ++q) new_configs[out * n_qubytes + q] = slot.key[q];
-        psi_j[out * 2] = slot.real_val;
-        psi_j[out * 2 + 1] = slot.imag_val;
+        if (!table[s].occupied) continue;
+        int64_t canonical = find_canonical_slot<n_qubytes>(table, cap, table[s].key);
+        if (canonical == s) {
+            int out = atomicAdd(out_count, 1);
+            slot_out[s] = out;
+            for (int q = 0; q < n_qubytes; ++q) new_configs[out * n_qubytes + q] = table[s].key[q];
+        }
+    }
+}
+
+/* Pass 2: every occupied slot adds its amplitude into its canonical's output. */
+template <int n_qubytes>
+__global__ void find_all_dedup_merge_kernel(
+    const findall_slot<n_qubytes>* table, int64_t cap,
+    double* psi_j, const int64_t* slot_out)
+{
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t stride = blockDim.x * gridDim.x;
+    for (int64_t s = idx; s < cap; s += stride) {
+        if (!table[s].occupied) continue;
+        int64_t canonical = find_canonical_slot<n_qubytes>(table, cap, table[s].key);
+        int64_t out = slot_out[canonical];
+        atomicAdd(psi_j + out * 2,     table[s].real_val);
+        atomicAdd(psi_j + out * 2 + 1, table[s].imag_val);
     }
 }
 
@@ -575,19 +618,27 @@ ffi::Error FindAllRelativeConfigsImpl(
         parity_const.typed_data(), reinterpret_cast<const double*>(coef.typed_data()),
         d_exclude, exclude_cap,
         d_table, cap, d_overflow);
-    // Compact non-empty slots into the output buffers and count distinct configs.
+    // Compact distinct configs into the output buffers. Concurrent insertion may
+    // have placed the same key in multiple slots (mid-publish skip); dedup here
+    // by merging every slot into its canonical slot's single output entry.
+    int64_t* d_slot_out = nullptr;
+    cudaMallocAsync(&d_slot_out, cap * sizeof(int64_t), stream);
     int cblocks = static_cast<int>(std::min<int64_t>((cap + 255) / 256, 65535LL));
     if (cblocks < 1) cblocks = 1;
-    find_all_collect_kernel<N_QUBYTES><<<cblocks, 256, 0, stream>>>(
+    find_all_dedup_repr_kernel<N_QUBYTES><<<cblocks, 256, 0, stream>>>(
         d_table, cap,
         reinterpret_cast<uint8_t*>(new_configs->untyped_data()),
+        d_count, d_slot_out);
+    find_all_dedup_merge_kernel<N_QUBYTES><<<cblocks, 256, 0, stream>>>(
+        d_table, cap,
         reinterpret_cast<double*>(psi_j->untyped_data()),
-        d_count);
+        d_slot_out);
     cudaMemcpyAsync(count->untyped_data(), d_count, sizeof(int), cudaMemcpyDeviceToDevice, stream);
     cudaMemcpyAsync(overflow->untyped_data(), d_overflow, sizeof(int), cudaMemcpyDeviceToDevice, stream);
     cudaFreeAsync(d_table, stream);
     cudaFreeAsync(d_overflow, stream);
     cudaFreeAsync(d_count, stream);
+    cudaFreeAsync(d_slot_out, stream);
     if (d_exclude) cudaFreeAsync(d_exclude, stream);
     return ffi::Error::Success();
 }

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from qmp.hamiltonian.fermi_hamiltonian._hamiltonian import FermiHamiltonian
@@ -237,6 +238,46 @@ def test_cuda_overflow_retry_matches_large_capacity() -> None:
     _, _, cnt_small = h.find_all_relative_configs(c, pi, exclude, hash_capacity=1)
     _, _, cnt_large = h.find_all_relative_configs(c, pi, exclude, hash_capacity=256)
     assert int(cnt_small) == int(cnt_large)
+
+
+def _collect_config_amp_map(configs, psi, count):
+    # Build {config_bytes -> (re, im)} for the first `count` output rows.
+    result: dict[bytes, tuple[float, float]] = {}
+    cfg = np.asarray(configs)
+    amp = np.asarray(psi)
+    for row in range(int(count)):
+        key = cfg[row].tobytes()
+        result[key] = (float(amp[row, 0]), float(amp[row, 1]))
+    return result
+
+
+def test_cuda_find_all_dedup_tight_capacity_matches_fallback() -> None:
+    # High-collision stress: a mixed Hamiltonian gives multiple (term, config)
+    # paths, and a tight-but-sufficient capacity maximises probe collisions so
+    # concurrent insertion is prone to creating duplicate slots. The collect-time
+    # canonical-slot merge must still yield exactly the fallback's deduped
+    # configs and accumulated amplitudes.
+    hamiltonian: dict[tuple[tuple[int, int], ...], complex] = {
+        ((1, 1), (0, 0)): -1.0 + 0j,
+        ((2, 1), (1, 0)): -1.0 + 0j,
+        ((0, 1), (0, 0)): 0.5 + 0j,
+    }
+    h = FermiHamiltonian(hamiltonian, n_qubits=4, devices=["localhost:cuda:0"])
+    m = prepare(hamiltonian, n_qubits=4)
+    c = _c4()
+    pi = jnp.ones((4, 2), dtype=jnp.float64)
+    exclude = jnp.zeros((0, 1), dtype=jnp.uint8)
+
+    cuda_cfg, cuda_psi, cuda_cnt = h.find_all_relative_configs(c, pi, exclude, hash_capacity=8)
+    jax_cfg, jax_psi, jax_cnt = jax_find_all(c, pi, exclude, *m, hash_capacity=64)
+
+    assert int(cuda_cnt) == int(jax_cnt)
+    cuda_map = _collect_config_amp_map(cuda_cfg, cuda_psi, cuda_cnt)
+    jax_map = _collect_config_amp_map(jax_cfg, jax_psi, jax_cnt)
+    assert set(cuda_map) == set(jax_map)
+    for key in cuda_map:
+        assert cuda_map[key][0] == pytest.approx(jax_map[key][0], abs=1e-9)
+        assert cuda_map[key][1] == pytest.approx(jax_map[key][1], abs=1e-9)
 
 
 # ---- find_topk ----
