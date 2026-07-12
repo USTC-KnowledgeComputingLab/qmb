@@ -22,7 +22,7 @@ src/qmp/hamiltonian/fermi_hamiltonian/
 ├── _hamiltonian.py              # FermiHamiltonian 类 + FFI 注册 + CUDA/fallback 路由
 ├── _hamiltonian_prepare.py      # 纯 Python 位掩码预处理 → JAX arrays
 ├── _hamiltonian_jax.py          # 纯 JAX fallback 实现 (四个操作, @jax.jit)
-├── _hamiltonian_cuda.cu         # CUDA kernel (四个操作, 模板化 n_qubytes/max_op_number)
+├── _hamiltonian_cuda.cu         # CUDA kernel (四个操作, 模板化 n_qubytes)
 └── _hamiltonian_cuda_loader.py  # CUDA JIT 编译 + 缓存 (nvcc + platformdirs)
 
 tests/
@@ -134,9 +134,9 @@ def prepare(operators, n_qubits):
 **模板参数** (编译期宏):
 - `N_QUBYTES` (macro): ceil(n_qubits/8)，同时作为静态分发键
 
-**静态分发**: `N_QUBYTES` 决定内核使用哪种位运算路径。通过 `if constexpr (N_QUBYTES <= 8)` 在编译期选择:
-- **n_qubits ≤ 64** (N_QUBYTES ≤ 8): 所有掩码可装载为单个 `uint64_t` 寄存器。可作用性检查 `(config & create_mask) == 0` 是单条 AND+JZ 指令，JW 奇偶性是单条 POPCNT 指令。零循环开销。
-- **n_qubits > 64** (N_QUBYTES > 8): 掩码以 `std::array<uint8_t, N_QUBYTES>` 存储，逐字节循环。循环边界是编译期常量，编译器可完全展开。
+**静态分发**: 通过 `if constexpr (n_qubytes <= 8)` 在编译期选择:
+- **n_qubits ≤ 64** (n_qubytes ≤ 8): 所有掩码可装载为单个 `uint64_t` 寄存器。可作用性检查 `(config & create_mask) == 0` 是单条 AND+JZ 指令，JW 奇偶性是单条 POPCNT 指令。零循环开销。
+- **n_qubits > 64** (n_qubytes > 8): 掩码以 `uint8_t[n_qubytes]` 存储，逐字节循环。循环边界是编译期常量，编译器可完全展开。
 
 #### 3.2.1 `compute_diagonal_within_subspace` — 对角元
 
@@ -157,7 +157,7 @@ for each term_t:
 
 **并行度**: grid-stride loop，grid 大小按 SM 数量 × 最大 occupancy 设定（~10^5 blocks 级别，而非 T×B = 10^12）。每个 block 内循环处理多个 term × config 对。
 
-**预过滤**: Python 层预处理阶段将 term 按 `flip_mask[t] == 0` 分为对角 term 和非对角 term。`compute_diagonal_within_subspace` 仅遍历对角 term 子集（diagonal terms 通常只占 1-10% 总 term 数），减少 90-99% 无用线程。filtered_terms 作为输入传入 kernel。
+**预过滤** (planned, not yet in active path): Python 层预处理阶段将 term 按 `flip_mask[t] == 0` 分为对角 term 和非对角 term。`compute_diagonal_within_subspace` 可仅遍历对角 term 子集（diagonal terms 通常只占 1-10% 总 term 数），减少 90-99% 无用线程。当前实现中 `_diag_idx` 已计算并写入日志，但 kernel 仍遍历全部 terms 并在运行时检查 `flip_mask[t] == 0`。
 
 **块级归约**: 每个 block 的多个线程可能对同一个 `psi[i]` 累加贡献。先用 shared memory 做 intra-block 归约，最后每个 block 只发一次 `atomicAdd`。这在 diagonal term 密集时（多 term 对应同一 config）显著减少 L2 原子争用。
 
@@ -166,8 +166,8 @@ for each term_t:
 计算 `ψ_j = H · ψ_i` 投影到 `configs_j` 子空间。支持 forward/backward 双向。
 
 ```
-预处理: 对 dst_configs 构建 cuco::static_map (key=config, value=index_in_original_order)
-         10^7 entries → ~300 MB (10^7 entries, 60% load, ~17B per slot)
+预处理: 对 dst_configs 构建自定义线性探测哈希表 (apply_hash_slot, key=config bytes, value=index)
+         哈希: wyhash64, load factor 60%
 
 for each term_t:
     for each src_i:                              # forward: src=configs_i; backward: src=configs_j
@@ -176,7 +176,7 @@ for each term_t:
         if not is_applicable(check_config, create_mask[t], annihilate_mask[t]): continue
         new_config = src_i XOR flip_mask[t]
 
-        idx = hash_table.lookup(new_config)       # forward: lookup in configs_j; backward: lookup in configs_i
+        idx = apply_hash_lookup(new_config)       # forward: lookup in configs_j; backward: lookup in configs_i
         if idx < 0: continue
 
         parity = parity_const[t] XOR popcount(parity_mask[t] & check_config) & 1
@@ -190,7 +190,7 @@ for each term_t:
 **方向选择**: forward 遍历 T × B_i，backward 遍历 T × B_j。选较小侧最小化总线程数。forward 时 `psi_i` 为输入波函数，输出形状 `[B_j,2]`。backward 时 `psi_i` 为 `configs_j` 上的波函数，H^† 作用于它，投影回 `configs_i`，输出形状 `[B_i,2]`。
 
 - **`__ldg()` 读取掩码和数据**: 所有只读输入通过 `__ldg()` 走 read-only cache，减少 L1 压力。
-- **哈希表跨调用缓存**: 若 `configs_j` 在多轮迭代中不变（Lanczos 内循环常见），复用哈希表省 50-200ms 构建时间。以 `configs_j` 数据指针的 hash 作为 key 判断是否需要重建。
+- **哈希表跨调用缓存** (planned, placeholder only): 若 `configs_j` 在多轮迭代中不变（Lanczos 内循环常见），复用哈希表省 50-200ms 构建时间。`FermiHamiltonian` 中已预留 `_apply_hash_cache` 字段，但 CUDA kernel 当前每次调用均重新构建哈希表。
 - **哈希函数**: 使用 wyhash。config bytes 非随机（受占据数、自旋守恒约束），wyhash 使用 multiply-and-xor 链 (wymum) 对结构化 occupation-number 字节有良好扩散。
 
 #### 3.2.3 `find_all_relative_configs` — 全部枚举 + 去重
@@ -198,16 +198,16 @@ for each term_t:
 枚举 H 作用产生的所有不重复新 config，累加各路径贡献的振幅。
 
 ```
-初始化 cuCollections cuco::static_map (capacity = estimated_distinct / 0.6)
+初始化自定义 CAS 哈希表 (findall_slot, capacity = estimated_distinct / 0.6)
+哈希: wyhash64, linear probing, probe 上限 100
 
 for each term_t:
     for each config_i:
         if not is_applicable(config_i, create_mask[t], annihilate_mask[t]): continue
         new_config = config_i XOR flip_mask[t]
 
-        # 排除已知构型: Bloom 预筛查 → 二分查找确认
-        if bloom_maybe_present(exclude_set, new_config):
-            if binary_search(exclude_configs, new_config) >= 0: continue
+        # 排除已知构型: 线性扫描 configs_exclude
+        if linear_scan_match(exclude_configs, new_config) >= 0: continue
 
         # 计算贡献
         parity = parity_const[t] XOR popcount(parity_mask[t] & config_i) & 1
@@ -219,51 +219,39 @@ for each term_t:
         if slot: atomicAdd(slot, contribution)
         else: hash_table.insert_cas(new_config, contribution)
 
-return hash_table.collect_nonempty()  # 线性扫描
+# kernel 退出后 → host 端线性扫描收集非空 slots
 ```
 
 **容量**: 10^7 distinct → ~600 MB; 10^8 → ~6 GB。预分配，零运行时分配。
 
-**溢出保护**: 插入时 probe 超阈值（如 10×log₂(capacity)）→ 标记溢出 → kernel 返回错误码 → Python 层用更大 capacity 重试。不可静默丢弃 config。
+**溢出保护**: 插入时 probe 超硬上限 100 → 标记 overflow → 不可静默丢弃 config。Python 层尚未读取 overflow 标志以 retry。
 
-**排除集哈希表**: 用第二个 `cuco::static_map` 代替 Bloom+二分查找。10^8 exclude entries → 额外 ~6 GB HBM，总计 ~12 GB——在 80 GB H100 上可行，且避免了 Bloom 假阳性带来的 O(log N) 二分查找回退。
+**排除集**: 对 `configs_exclude` 进行线性扫描排除已知构型（terms × configs 数量级不高时可行）。规划中可用第二个 `cuco::static_map` 替代线性扫描以支持更大排除集。
 
 #### 3.2.4 `find_topk_relative_configs` — Top-K 选择
 
 选出最重要的 K 个新 config。
 
 ```
-初始化 哈希表 (capacity = 2K, ~6 MB)  # K×2 overprovisioning
-global_min_weight = 0.0
-chunk_size = max_terms_per_launch       # ~1000, 按 GPU 能力动态确定
+初始化 哈希表 (capacity = 2K)
 
-for chunk_start in [0, chunk_size, 2*chunk_size, ..., T-1]:
-    # ── CUDA kernel ──
-    for t in chunk:
-        for each config_i:
-            if not is_applicable(config_i, create_mask[t], annihilate_mask[t]): continue
-            weight = |coef[t] * psi_i[i]|²
-            if weight <= global_min_weight: continue
+# 单次 kernel 遍历全部 T × B 对
+for each term_t:
+    for each config_i:
+        if not is_applicable(config_i, create_mask[t], annihilate_mask[t]): continue
+        weight = |coef[t] * psi_i[i]|²
 
-            new_config = config_i XOR flip_mask[t]
-            if in_exclude_set(new_config): continue
+        new_config = config_i XOR flip_mask[t]
+        if in_exclude_set(new_config): continue
 
-            slot = hash_table.find(new_config)
-            if slot: atomicMax(slot.weight, weight)
-            else: hash_table.insert_cas(new_config, weight)
-    # kernel 退出 (隐式全局屏障)
+        slot = hash_table.find(new_config, weight)
+        if slot: atomicMax(slot.weight, weight)
+        else: hash_table.insert_cas(new_config, weight)
 
-    # ── compact (独立 kernel) ──
-    entries = hash_table.collect_nonempty()
-    CUB::radix_sort_descending(entries, key=weight)
-    entries = unique_top_k(entries, K)
-    hash_table.rebuild(entries)
-    global_min_weight = entries[-1].weight
-
-# 最终 compact → 返回 top K configs
+# kernel 退出后 → Python/JAX 层 argsort → top K
 ```
 
-**设计决策**: kernel 间 compact，compact 不在 2D grid 内部（无需中段全局同步）。每个 chunk 的 kernel 退出即隐式屏障，随后安全 sort → cutoff → rebuild → 下一轮。~100 轮 compact 总开销 ~50ms。
+**实现**: 当前为单次 kernel 启动。规划中的 between-kernel compaction（chunking + CUB radix sort + rebuild）可在 terms 数量极大时降低内存占用，尚未实现。
 
 **`max` 而非 `sum` 的理由**: (a) `atomicMax` 单调确定，而 `atomicAdd` 浮点非结合导致非确定性；(b) 量子化学中 `|H_ij*c_i|²` 近似 power-law，`max` 与 `sum` 高度相关（Spearman ρ≈0.75-0.95），max 足以选出最重要的 configs；(c) 无需 Gumbel 噪声——其对 K=100K 引入 ~5-15% 排名翻转，且每次额外 60+ cycles 计算成本。
 
@@ -276,15 +264,18 @@ def load_cuda_module(n_qubytes: int) -> ctypes.CDLL:
     so_path = cache_dir / "lib.so"
 
     if not so_path.exists():
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        jax_include = str(Path(jaxlib.__file__).parent / "include")
+        include_cuco = _THIRD_PARTIES_DIR / "cuco" / "include"
         subprocess.run([
             "nvcc", "-shared", "-Xcompiler", "-fPIC",
-            f"-I{jaxlib.get_include_dir()}",
-            f"-I{THIRD_PARTIES_DIR}/cuco/include",
+            f"-I{jax_include}",
+            f"-I{include_cuco}",
             f"-DN_QUBYTES={n_qubytes}",
             "-std=c++20", "-O3", "--use_fast_math",
             "-arch=native",
             "-o", str(so_path),
-            str(SOURCE_DIR / "_hamiltonian_cuda.cu"),
+            str(_SOURCE_DIR / "_hamiltonian_cuda.cu"),
         ], check=True)
 
     lib = ctypes.cdll.LoadLibrary(str(so_path))
@@ -298,7 +289,7 @@ def load_cuda_module(n_qubytes: int) -> ctypes.CDLL:
 | 函数 | JIT 方式 | 原因 |
 |------|---------|------|
 | `compute_diagonal_within_subspace` | `@jax.jit` | 纯算术向量化，无控制流分支 |
-| `apply_within_subspace` | `@partial(jax.jit, static_argnums=(9,))` + `jnp.where` masking | `direction` 用 `static_argnums`；内层查表向量化 |
+| `apply_within_subspace` | `@partial(jax.jit, static_argnums=(9,))` + `jnp.all` vectorized matching | `direction` 用 `static_argnums`；内层查表通过 `jnp.all(dst_c == new_c, axis=1)` 向量化 |
 | `find_all_relative_configs` | `@partial(jax.jit, static_argnums=(9,))` + `lax.fori_loop` + `lax.cond` | 哈希表 probe/accumulate 用 `fori_loop` 携带可变状态 + `lax.cond` 分支；`hash_capacity` 编译期固定 |
 | `find_topk_relative_configs` | `@partial(jax.jit, static_argnums=(2,))` + `lax.fori_loop` + `lax.cond` | 同上，`count_selected` 编译期固定 |
 
@@ -312,7 +303,7 @@ class FermiHamiltonian:
         self._device = ...
         # 按 |coef| 降序排列
         # 尝试加载 CUDA kernel
-        self._use_cuda = _try_enable_cuda(...)
+        self._use_cuda = _try_register_ffi(...)
 
     def compute_diagonal_within_subspace(self, configs):
         ...
@@ -366,11 +357,11 @@ class FermiHamiltonian:
 
 | 风险 | 等级 | 缓解 |
 |------|------|------|
-| 哈希表溢出导致 kernel hang (`cuco::static_map` open addressing 无限 probe) | **高** | 插入失败检测 (probe 超阈值 10×log₂(capacity)) → 错误码 → Python 层 retry 更大 capacity |
+| 哈希表溢出 (open addressing 无限 probe) | **高** | probe 上限 100 硬限；Python 层 overflow retry 未实现 |
 | `compute_diagonal` 对角 term 仅占 1-10%，grid-stride loop 避免 10^12 线程启动 | **高** | 预过滤对角 term 子集 + grid-stride loop (~10^5 blocks)，不用 T×B 网格 |
 | 结构化 config bytes 导致 MurmurHash3 聚集 | 中 | 所有哈希表统一使用 wyhash |
-| L2 cache thrashing（configs 流驱逐 hash table 条目） | 中 | configs 用 `cudaAccessPropertyStreaming` 标记，`__ldg()` 走 read-only cache |
-| 重复 alloc/free 哈希表导致 HBM 碎片化 | 中 | `cudaMemPool` 预分配；apply_within 哈希表跨调用缓存 |
-| find_topk 多 kernel 分段中 compact 开销（~100 轮 × 0.5ms） | 低 | 总开销 ~50ms，相对 10+ 分钟总体计算忽略不计 |
+| L2 cache thrashing（configs 流驱逐 hash table 条目） | 中 | `__ldg()` 走 read-only cache |
+| 重复 alloc/free 哈希表导致 HBM 碎片化 | 中 | `cudaMemPool` 预分配；apply_within 哈希表跨调用缓存（已预留，未启用） |
+| 大量 terms 单次 kernel 内存压力 | 低 | 当前 terms 数 (<10^6) 单次 kernel 可行；未来可用 chunking |
 | 纯 JAX fallback 与 CUDA 非 bit-exact (`atomicAdd` 顺序非确定) | 低 | 测试用 `allclose(rtol=1e-12)` |
-| `exclude_configs` 未排序传入 CUDA | 低 | Python 层预处理排序，或用第二哈希表替代 Bloom+二分查找
+| `exclude_configs` 线性扫描耗时 | 低 | 当前 exclude 集小，线性扫描可行；未来可用哈希表 |
