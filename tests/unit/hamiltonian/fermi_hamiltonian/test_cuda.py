@@ -153,7 +153,7 @@ def test_cuda_apply_complex_psi() -> None:
     m = prepare({((1, 1), (0, 0)): 1.0 + 0j}, n_qubits=4)
     assert jnp.allclose(
         h.apply_within_subspace(ci, pi, cj, direction=0), jax_apply_within(ci, pi, cj, *m, direction=0), rtol=1e-12
-    )  # FIXME: CUDA sign bug)
+    )
 
 
 def test_cuda_apply_complex_coef() -> None:
@@ -186,6 +186,21 @@ def test_cuda_apply_small_subspace() -> None:
     m = prepare({((1, 1), (0, 0)): -1.0 + 0j}, n_qubits=4)
     assert jnp.allclose(
         h.apply_within_subspace(ci, pi, cj, direction=0), jax_apply_within(ci, pi, cj, *m, direction=0), rtol=1e-12
+    )
+
+
+def test_cuda_apply_backward_asymmetric() -> None:
+    # Backward (direction=1) with B_i != B_j exercises the smaller-side traversal
+    # (traverse_dst branch) together with the H^dagger semantics.
+    h = _hopping_h()
+    configs_i = _c4()  # 4 configs
+    configs_j = jnp.array([[0b10], [0b01]], dtype=jnp.uint8)  # 2 configs (smaller dst under dir=1)
+    psi = jnp.ones((2, 2), dtype=jnp.float64)  # lives on configs_j (src for backward)
+    m = prepare({((1, 1), (0, 0)): -1.0 + 0j}, n_qubits=4)
+    assert jnp.allclose(
+        h.apply_within_subspace(configs_i, psi, configs_j, direction=1),
+        jax_apply_within(configs_i, psi, configs_j, *m, direction=1),
+        rtol=1e-12,
     )
 
 
@@ -345,6 +360,50 @@ def test_cuda_find_topk_no_duplicate_configs() -> None:
     # Non-zero (real) configs must be distinct; zero padding rows may repeat.
     nonzero = [r for r in rows if any(r)]
     assert len(nonzero) == len(set(nonzero))
+
+
+def _config_set(rows) -> set[tuple[int, ...]]:
+    return {tuple(int(b) for b in row) for row in np.asarray(rows) if any(int(b) for b in row)}
+
+
+def test_cuda_find_topk_selected_configs_match_fallback() -> None:
+    # Verify the actual selected config set (not just the shape) matches the JAX
+    # fallback. A single occupied source config with distinct term coefficients
+    # gives each reachable config a unique weight (no ties), so top-K is
+    # deterministic and the set comparison is well-defined.
+    hamiltonian: dict[tuple[tuple[int, int], ...], complex] = {
+        ((1, 1), (0, 0)): -4.0 + 0j,
+        ((2, 1), (0, 0)): -3.0 + 0j,
+        ((3, 1), (0, 0)): -2.0 + 0j,
+    }
+    h = FermiHamiltonian(hamiltonian, n_qubits=4, devices=["localhost:cuda:0"])
+    m = prepare(hamiltonian, n_qubits=4)
+    c = jnp.array([[0b0001]], dtype=jnp.uint8)
+    pi = jnp.ones((1, 2), dtype=jnp.float64)
+    exclude = jnp.zeros((0, 1), dtype=jnp.uint8)
+    cuda_sel = h.find_topk_relative_configs(c, pi, 2, exclude)
+    jax_sel = jax_find_topk(c, pi, 2, exclude, *m)
+    assert _config_set(cuda_sel) == _config_set(jax_sel)
+
+
+def test_cuda_find_topk_with_exclude() -> None:
+    # find_topk must honour the exclude set (second hash table); excluded configs
+    # must not appear in the selection, matching the fallback. Distinct coefs
+    # avoid weight ties so the selection is deterministic.
+    hamiltonian: dict[tuple[tuple[int, int], ...], complex] = {
+        ((1, 1), (0, 0)): -4.0 + 0j,
+        ((2, 1), (0, 0)): -3.0 + 0j,
+        ((3, 1), (0, 0)): -2.0 + 0j,
+    }
+    h = FermiHamiltonian(hamiltonian, n_qubits=4, devices=["localhost:cuda:0"])
+    m = prepare(hamiltonian, n_qubits=4)
+    c = jnp.array([[0b0001]], dtype=jnp.uint8)
+    pi = jnp.ones((1, 2), dtype=jnp.float64)
+    exclude = jnp.array([[0b0010]], dtype=jnp.uint8)  # exclude the highest-weight target (qubit1)
+    cuda_sel = h.find_topk_relative_configs(c, pi, 2, exclude)
+    jax_sel = jax_find_topk(c, pi, 2, exclude, *m)
+    assert (0b0010,) not in _config_set(cuda_sel)
+    assert _config_set(cuda_sel) == _config_set(jax_sel)
 
 
 # ---- multi-byte qubits (n_qubits > 8 → n_qubytes >= 2) ----
