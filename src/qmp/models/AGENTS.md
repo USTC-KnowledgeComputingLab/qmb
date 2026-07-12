@@ -35,7 +35,10 @@ src/qmp/models/
 
 - 全局 `model_dict[name] = ModelClass`：配置驱动的 CLI 按名字动态查找 model
 - 全局 `model_config_dict[name] = ModelConfigClass`：CLI 层 `dacite.from_dict` 按名字查找 config dataclass 类型
-- 每个 model 类的 `network_dict`：把物理系统与兼容 ansatz 配对（本轮为空 `{}`）
+- 每个 model 的 `network_dict`：Model 支持哪些 network config 类型（`{"mlp": MLPConfig, ...}`）
+- 每个 model 的 `create_network(name, params)`：model 调用 dacite + 注入自身属性（`sites`, `n_electrons` 等）构造 network 实例
+
+**network 构造设计**：network 不设全局注册表。由 model 内聚——model 知道自己的系统尺寸，故由其负责构造 network。network config dataclass 是纯数据（`hidden`, `activation`），不含 `create` 方法。
 
 model 通过在模块底部执行 `model_dict[name] = Model` 和 `model_config_dict[name] = ModelConfig` 完成自注册；上层通过 `importlib.import_module` 动态导入触发注册。
 

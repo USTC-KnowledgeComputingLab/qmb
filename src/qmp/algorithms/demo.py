@@ -7,7 +7,6 @@ from dataclasses import dataclass
 
 from qmp.algorithms._registry import action_class_dict, action_config_dict
 from qmp.models._model import model_config_dict, model_dict
-from qmp.networks._registry import network_class_dict, network_config_dict
 from qmp.utility._build import SubConfigRef, build_from_ref
 
 logger = logging.getLogger(__name__)
@@ -28,9 +27,7 @@ class Demo:
     def __init__(self, config: DemoConfig) -> None:
         self._config = config
         self._model = build_from_ref(config.model, "models", config_dict=model_config_dict, impl_dict=model_dict)
-        self._network = build_from_ref(
-            config.network, "networks", config_dict=network_config_dict, impl_dict=network_class_dict
-        )
+        self._network = _build_network(config.network, self._model)
 
     def run(self) -> None:
         logger.info("Demo algorithm starting.")
@@ -44,6 +41,12 @@ class Demo:
         else:
             logger.info("No network configured.")
         logger.info("Demo algorithm finished.")
+
+
+def _build_network(ref: SubConfigRef | None, model: object | None) -> object | None:
+    if ref is None or model is None:
+        return None
+    return model.create_network(ref.name, ref.params)  # ty: ignore — model owns construction
 
 
 action_config_dict["demo"] = DemoConfig
