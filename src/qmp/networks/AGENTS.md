@@ -49,10 +49,23 @@ sites 数在构造时静态已知，生成循环逐 site 展开。各步形状�
 
 ### JIT 边界
 
-- `__call__`（估值）用 `@nnx.jit` 修饰：整段静态形状，直接调用与 `generate*` 末尾的振幅重算都受益。
-- 生成循环的**每步前向**是热点：MLP 的 `_conditional_log_amplitude`、Transformer 的 `_decode_step` 用 `functools.partial(nnx.jit, static_argnums=...)` 修饰，`site_index` 作为**静态参数**（各 site 的 amplitude 子网 / 位置嵌入不同，按 site 各编译一次并跨调用缓存）。实测 generate_unique 因此提速一到两个数量级。
-- `generate` / `generate_unique` **整体不可 jit**：末尾用 `jnp.unique` / 布尔过滤产生动态形状。它们保持 eager，只把内部静态形状的重活交给上述被 jit 的方法。batch_size / beam_width 改变会触发这些方法按新形状重新编译（正常 jit 行为）。
+函数按 jit 关系分三类：
+
+**① jit 入口（显式装饰）**
+- `__call__`（估值）：`@nnx.jit`，整段静态形状；直接调用与 `generate*` 末尾的振幅重算都受益。
+- 每步前向（生成热点）：MLP `_conditional_log_amplitude`、Transformer `_decode_step`，用 `functools.partial(nnx.jit, static_argnums=...)`，`site_index` 作为**静态参数**（各 site 的 amplitude 子网 / 位置嵌入不同，按 site 各编译一次并跨步缓存）。实测 generate_unique 提速一到两个数量级。
 - Transformer 的 `_decode_step` 原地更新 KV-cache；`nnx.jit` 会将 cache 状态穿引进出，跨步保留更新。
+
+**② 无独立装饰，但随①一起编译（间接 jit）或构造期运行**
+- nnx 子层 `__call__`（`_MLP`/`_Linear`/`_PositionalEmbedding`/`_FeedForward`/`_DecoderUnit`/`_Transformers`/`_Tail`）、以及从 `__call__` 内调用的 `_config_to_site_values`/`_site_values_to_features`/`_split_tail`/`_local_mask` 等——在①的 jit 边界内被 trace。
+- 构造期逻辑（`__init__`/`_build_networks`/`_resolve_ordering`/`_invert_permutation`/`_bit_size_for`）——只在建网时跑，不涉及 jit。
+
+**③ 顶层 eager，未进 jit**
+- `generate` / `generate_unique` 本身：末尾 `jnp.unique` / 布尔过滤产生**动态形状**，整体不可 jit；作为 eager 编排，逐步调用①的被 jit 方法。
+- 束搜索循环里的**静态形状胶水**也是 eager 逐 op 执行的，**并未** jit：`gumbel_topk_step`、`sample_step`、`2.0 * conditional`、`broadcast_to`/`reshape`/`concatenate`/`argsort`/fancy-indexing、以及 Transformer 的 `_conditional_log_amplitude`（仅做 mask+归一化，很轻，故未像 MLP 版那样装饰）。
+- cache 编排小工具：`_init_decode_cache`/`_reorder_cache`/`_disable_decode`、`_site_values_to_config`。
+
+**要点**：主导开销（网络前向）已 jit；剩下未 jit 的是①之外的轻量束搜索记账与不可避免的动态形状部分。并非"所有静态代码都进了 jit"——静态胶水因相对前向开销可忽略而保持 eager。`batch_size` / `beam_width` 改变会触发①按新形状重新编译（正常 jit 行为）。
 
 ### Transformer 的 KV-cache 增量解码
 
