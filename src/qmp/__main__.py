@@ -56,6 +56,8 @@ def main(argv: list[str] | None = None) -> None:
     logger.info("action=%s params=%s", cli.action.name, cli.action.params)
 
     importlib.import_module(f"qmp.algorithms.{cli.action.name}")
+    if cli.action.name not in action_config_dict:
+        raise KeyError(f"Unknown action: {cli.action.name!r}. Registered: {list(action_config_dict)}")
     cfg_cls = action_config_dict[cli.action.name]
     cfg = dacite.from_dict(cfg_cls, cli.action.params)
     impl_cls = action_class_dict[cli.action.name]

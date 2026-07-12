@@ -99,3 +99,28 @@ def test_build_model_unknown_param_ignored() -> None:
         ref = SubConfigRef(name="fake", params={"value": 1, "extra": "ignored"})
         instance = build_model(ref)
         assert instance.config.value == 1
+
+
+# ---- build_model: module lazy-import and integration ----
+
+
+def test_build_model_config_without_impl_errors() -> None:
+    """Name in config_dict but NOT in impl_dict → KeyError."""
+    config_only = {"fake": _FakeConfig}
+    empty_impl: dict[str, type[object]] = {}
+    with (
+        mock.patch("qmp.models._build.model_config_dict", config_only),
+        mock.patch("qmp.models._build.model_dict", empty_impl),
+    ):
+        ref = SubConfigRef(name="fake")
+        with pytest.raises(KeyError):
+            build_model(ref)
+
+
+def test_build_model_import_succeeds_but_no_registration() -> None:
+    """Lazy import of a real module that doesn't register → KeyError."""
+    with mock.patch("qmp.models._build.model_config_dict", {}), mock.patch("qmp.models._build.model_dict", {}):
+        # "sys" is importable but not a model — _build will try importlib then check dict
+        ref = SubConfigRef(name="sys")
+        with pytest.raises(KeyError, match="sys"):
+            build_model(ref)

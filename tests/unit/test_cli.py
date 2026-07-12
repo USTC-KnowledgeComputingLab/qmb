@@ -6,6 +6,8 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 from qmp.__main__ import ActionCLI, ConfigCLI, _load_yaml, main
 
 # ---- ConfigCLI defaults ----
@@ -108,3 +110,63 @@ def test_main_override() -> None:
     with mock.patch("qmp.algorithms.demo.Demo.run") as mock_run:
         main(argv=["--config", str(tmp), "--action.params.message", "overridden"])
         mock_run.assert_called_once()
+
+
+# ---- YAML ${} interpolation ----
+
+
+def test_load_yaml_interpolation() -> None:
+    """omegaconf ${} interpolation resolves cross-references."""
+    yaml_content = """
+base_path: /tmp
+action:
+  name: demo
+  params:
+    model:
+      name: fcidump
+      params:
+        model_path: ${base_path}/test.fcidump
+"""
+    tmp = Path(tempfile.gettempdir()) / "test_cli_interp.yaml"
+    tmp.write_text(yaml_content)
+    cfg = _load_yaml(str(tmp))
+    assert cfg.action.params["model"]["params"]["model_path"] == "/tmp/test.fcidump"
+
+
+# ---- main() error cases ----
+
+
+def test_main_unknown_action() -> None:
+    """main() with unknown action name → KeyError (module doesn't register)."""
+    with pytest.raises(ModuleNotFoundError, match="nonexistent"):
+        main(argv=["--action.name", "nonexistent"])
+
+
+def test_main_action_params_int_override() -> None:
+    """CLI --action.params.sample_count=10 overrides YAML value."""
+    yaml_content = """action:
+  name: demo
+  params:
+    sample_count: 100
+"""
+    tmp = Path(tempfile.gettempdir()) / "test_cli_int_override.yaml"
+    tmp.write_text(yaml_content)
+    with mock.patch("qmp.algorithms.demo.Demo.run") as mock_run:
+        main(argv=["--config", str(tmp), "--action.params.sample_count", "123"])
+        mock_run.assert_called_once()
+
+
+def test_load_yaml_file_not_found() -> None:
+    """Non-existent YAML file → omegaconf raises."""
+    with pytest.raises(FileNotFoundError):
+        _load_yaml("/nonexistent/path.yaml")
+
+
+def test_load_yaml_action_without_params() -> None:
+    """YAML with action.name but no params section → params defaults to {}."""
+    yaml_content = "action:\n  name: demo\n"
+    tmp = Path(tempfile.gettempdir()) / "test_cli_no_params.yaml"
+    tmp.write_text(yaml_content)
+    cfg = _load_yaml(str(tmp))
+    assert cfg.action.name == "demo"
+    assert cfg.action.params == {}
