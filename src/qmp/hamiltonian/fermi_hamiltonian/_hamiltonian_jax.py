@@ -6,6 +6,7 @@ All functions are JIT-compatible where fixed shapes are known.
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING
 
 import jax
@@ -60,6 +61,7 @@ def compute_diagonal_within_subspace(
     return psi
 
 
+@partial(jax.jit, static_argnums=(9,))
 def apply_within_subspace(
     configs_i: Array,
     psi_i: Array,
@@ -89,35 +91,26 @@ def apply_within_subspace(
         pm_mask = parity_mask[t]
         pc = parity_const[t]
         for i in range(batch_size_src):
-            check_c = src_c[i] ^ fm if direction == 1 else src_c[i]
+            check_c = jnp.where(direction == 1, src_c[i] ^ fm, src_c[i])
             applicable = True
             for q in range(n_qubytes):
-                if (check_c[q] & cm[q]) != 0:
-                    applicable = False
-                    break
-                if (check_c[q] & am[q]) != am[q]:
-                    applicable = False
-                    break
-            if not applicable:
-                continue
+                applicable &= (check_c[q] & cm[q]) == 0
+                applicable &= (check_c[q] & am[q]) == am[q]
             new_c = src_c[i] ^ fm
-            idx = -1
-            for j in range(batch_size_dst):
-                if jnp.all(dst_c[j] == new_c):
-                    idx = j
-                    break
-            if idx < 0:
-                continue
+            matches = jnp.all(dst_c == new_c, axis=1)
+            matched = jnp.any(matches)
+            idx = jnp.argmax(matches)
             parity = _parity(pc, pm_mask, check_c, n_qubytes)
             sign = jnp.where(parity.astype(bool), -1.0, 1.0)
             cf_r = coef[t, 0]
-            cf_i = -coef[t, 1] if direction == 1 else coef[t, 1]
+            cf_i = jnp.where(direction == 1, -coef[t, 1], coef[t, 1])
             pr = src_p[i, 0]
             pi_v = src_p[i, 1]
             val_r = sign * (cf_r * pr - cf_i * pi_v)
             val_i = sign * (cf_r * pi_v + cf_i * pr)
-            psi_j = psi_j.at[idx, 0].add(val_r)
-            psi_j = psi_j.at[idx, 1].add(val_i)
+            add = applicable & matched
+            psi_j = psi_j.at[idx, 0].add(jnp.where(add, val_r, 0.0))
+            psi_j = psi_j.at[idx, 1].add(jnp.where(add, val_i, 0.0))
     return psi_j
 
 

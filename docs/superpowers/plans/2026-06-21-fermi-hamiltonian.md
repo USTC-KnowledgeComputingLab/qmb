@@ -1401,6 +1401,9 @@ Spec §3.2.1: 仅遍历 flip_mask==0 的对角 term 子集。执行时在 FermiH
 
 Spec §3.2: n_qubits ≤ 64 时走 `uint64_t` 单寄存器。执行 agent 须在 CUDA kernel 中实现两条编译期路径：`if constexpr (n_qubytes <= 8)` 用 `uint64_t` 批量 AND/POPCNT/XOR，else 逐字节循环。`n_qubytes` 是 template parameter，false 分支不参与编译。
 
-### 补充 8: JAX fallback JIT 兼容性 (Task 4)
+### 补充 8: JAX fallback JIT 兼容性 (Task 4) — 部分已解决
 
-Plan 中 JAX fallback 函数使用 Python `if` 判断 traced JAX 值（如 `if not applicable: continue`），这将在 `@jax.jit` 编译时抛出 `ConcretizationTypeError`。执行 agent 须将所有 Python `if` 替换为 `jax.lax.cond`、`jnp.where`，或将循环体改为纯掩码式 `jnp.where(applicable, value, carry)` 模式。确保四个 fallback 函数在 `@jax.jit` 下正确编译和执行。
+- `compute_diagonal_within_subspace`: 保持 `@jax.jit`，无 traced 条件。已通过。
+- `apply_within_subspace`: `@jax.jit` + `lax.cond` + `jnp.where` masking + 向量化匹配。已通过。
+- `find_all_relative_configs`: 哈希表操作（probe/compare/accumulate）是固有顺序操作，无法在 traced 值上使用 Python `if/continue`。维持无 JIT。
+- `find_topk_relative_configs`: 同上，维持无 JIT。
