@@ -326,10 +326,10 @@ class FermiHamiltonian:
 **编译 CUDA**: `nvcc` (用户机器上), `jaxlib` 的 XLA headers (`xla/ffi/api/ffi.h`)
 
 **第三方库** (git submodule, 置于 `src/qmp/hamiltonian/third_parties/`):
-- `cuCollections`: GPU hash table (`cuco::static_map`), header-only, [github.com/NVIDIA/cuCollections](https://github.com/NVIDIA/cuCollections)
-- `wyhash`: 哈希函数, ~30 行 C inline 到 .cu 中, 无需编译
+- `cuCollections`: 作为 submodule 保留、loader 仍传 `-I cuco/include`，但**当前 `.cu` 实现未使用**。四个操作均使用自定义线性探测哈希表 (inline wyhash64)，非 `cuco::static_map`。规划中若要支持超大排除集/去重可切回 cuco。
+- `wyhash`: 哈希函数, 内联到 .cu (`wyhash64` 模板), 无需编译
 
-**无**: numpy, torch, pybind11, ninja
+**无**: numpy, torch, pybind11, ninja, cuCollections (运行时实际未链接)
 
 ## 5. 测试
 

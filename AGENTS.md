@@ -7,7 +7,7 @@
 | 领域 | 技术 |
 |------|------|
 | 数值计算 | `jax` + `jaxlib` |
-| CUDA 扩展 | `jax.ffi` (XLA custom call) + nvcc + cuCollections |
+| CUDA 扩展 | `jax.ffi` (XLA custom call) + nvcc (自定义线性探测哈希表 + inline wyhash64) |
 | 量子化学接口 | `openfermion`, `pyscf` |
 | Lint/Format | `ruff` |
 | 类型检查 | `ty` (Astral 出品) |
