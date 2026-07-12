@@ -400,7 +400,6 @@ def _local_optimize(
     max_steps: int,
     stop_loss: float,
 ) -> tuple[object, object, int]:
-    import copy as _copy
 
     graphdef, params = nnx.split(network, nnx.Param)  # ty: ignore — network dynamic
 
@@ -416,6 +415,7 @@ def _local_optimize(
     for _ in range(5):
         params_backup = _copy.deepcopy(params)
         opt_backup = _copy.deepcopy(opt_state)
+        last_loss: float = 0.0
 
         success = True
         for step in range(max_steps):
@@ -433,11 +433,28 @@ def _local_optimize(
 
             if float(loss_val) < stop_loss:
                 logger.info("Loss threshold met at step %d", step)
-                nnx.update(network, params)  # ty: ignore — merge back into network for next cycle
+                nnx.update(network, params)  # ty: ignore
                 return params, opt_state, step
+
+            if step > 0 and abs(float(loss_val) - last_loss) < stop_loss:
+                logger.info("Loss stagnated at step %d", step)
+                nnx.update(network, params)  # ty: ignore
+                return params, opt_state, step
+
+            last_loss = float(loss_val)
 
         else:
             if success:
+                # check for NaN/inf in all parameters after optimization
+                params_ok = all(
+                    not (bool(jnp.any(jnp.isnan(v))) or bool(jnp.any(jnp.isinf(v))))
+                    for v in jax.tree_util.tree_leaves(params)
+                )
+                if not params_ok:
+                    logger.warning("NaN detected in parameters, restoring backup")
+                    params = params_backup
+                    opt_state = opt_backup
+                    continue
                 nnx.update(network, params)  # ty: ignore
                 return params, opt_state, max_steps
 
