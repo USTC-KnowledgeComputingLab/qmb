@@ -87,6 +87,7 @@ class _PositionalEmbedding(nnx.Module):
         initializer = nnx.initializers.normal(stddev=0.02)
         self.table = nnx.Param(initializer(rngs.params(), (sites, physical_dim, embedding_dim), jnp.float64))
 
+    @functools.partial(nnx.jit, static_argnums=(2,))
     def __call__(self, tokens: Array, position: int = 0) -> Array:
         sequence_length = tokens.shape[1]
         table = self.table[...][position : position + sequence_length]
@@ -101,6 +102,7 @@ class _FeedForward(nnx.Module):
         self.up = nnx.Linear(embedding_dim, hidden_dim, param_dtype=jnp.float64, rngs=rngs)
         self.down = nnx.Linear(hidden_dim, embedding_dim, param_dtype=jnp.float64, rngs=rngs)
 
+    @nnx.jit
     def __call__(self, inputs: Array) -> Array:
         return self.down(jax.nn.gelu(self.up(inputs)))
 
@@ -164,6 +166,7 @@ class _Tail(nnx.Module):
             hidden_dim, output_dim, kernel_init=nnx.initializers.zeros, param_dtype=jnp.float64, rngs=rngs
         )
 
+    @nnx.jit
     def __call__(self, inputs: Array) -> Array:
         return self.down(jax.nn.gelu(self.up(inputs)))
 
@@ -203,17 +206,21 @@ class _TransformerWaveFunctionBase(nnx.Module):
 
     # ---- shared helpers ----
 
+    @nnx.jit
     def _ordering_array(self) -> Array:
         return jnp.asarray(self._ordering, dtype=jnp.int32)
 
+    @nnx.jit
     def _ordering_reversed_array(self) -> Array:
         return jnp.asarray(self._ordering_reversed, dtype=jnp.int32)
 
+    @nnx.jit
     def _split_tail(self, hidden: Array) -> tuple[Array, Array]:
         """Split a tail activation into ``(raw_amplitude, phase)`` over the state axis."""
         tail = self.tail(hidden)
         return tail[..., : self.states_per_site], tail[..., self.states_per_site :]
 
+    @functools.partial(nnx.jit, static_argnums=(3,))
     def _conditional_log_amplitude(self, raw_amplitude: Array, prefix_values: Array, site_index: int) -> Array:
         """Normalise a raw amplitude slice ``[batch, states]`` under the particle-number mask."""
         mask = self._local_mask(prefix_values, site_index)
@@ -366,14 +373,17 @@ class WaveFunctionNormal(_TransformerWaveFunctionBase):
         self._ordering_reversed = _invert_permutation(self._ordering)
         self._build_networks(embedding_dim, heads_num, feed_forward_dim, depth, tail_hidden_dim, rngs)
 
+    @nnx.jit
     def _config_to_site_values(self, configs: Array) -> Array:
         site_values = unpack_int(configs, size=self._bit_size, last_dim=self.sites).astype(jnp.int32)
         return site_values[:, self._ordering_reversed_array()]
 
+    @nnx.jit
     def _site_values_to_config(self, site_values: Array) -> Array:
         user_order = site_values[:, self._ordering_array()]
         return pack_int(user_order.astype(jnp.uint8), size=self._bit_size)
 
+    @functools.partial(nnx.jit, static_argnums=(2,))
     def _local_mask(self, prefix_values: Array, site_index: int) -> Array:
         batch_size = prefix_values.shape[0]
         return jnp.ones((batch_size, self.states_per_site), dtype=bool)
@@ -402,14 +412,17 @@ class WaveFunctionElectron(_TransformerWaveFunctionBase):
         self._ordering_reversed = _invert_permutation(self._ordering)
         self._build_networks(embedding_dim, heads_num, feed_forward_dim, depth, tail_hidden_dim, rngs)
 
+    @nnx.jit
     def _config_to_site_values(self, configs: Array) -> Array:
         site_values = unpack_int(configs, size=1, last_dim=self.sites).astype(jnp.int32)
         return site_values[:, self._ordering_reversed_array()]
 
+    @nnx.jit
     def _site_values_to_config(self, site_values: Array) -> Array:
         user_order = site_values[:, self._ordering_array()]
         return pack_int(user_order.astype(jnp.uint8), size=1)
 
+    @functools.partial(nnx.jit, static_argnums=(2,))
     def _local_mask(self, prefix_values: Array, site_index: int) -> Array:
         electron_count = jnp.sum(prefix_values, axis=1)
         sites_filled = jnp.asarray(site_index)
@@ -447,12 +460,14 @@ class WaveFunctionElectronUpDown(_TransformerWaveFunctionBase):
         self._ordering_reversed = _invert_permutation(self._ordering)
         self._build_networks(embedding_dim, heads_num, feed_forward_dim, depth, tail_hidden_dim, rngs)
 
+    @nnx.jit
     def _config_to_site_values(self, configs: Array) -> Array:
         qubits = unpack_int(configs, size=1, last_dim=self.double_sites).astype(jnp.int32)
         pairs = qubits.reshape(qubits.shape[0], self.sites, 2)
         site_values = pairs[:, :, 0] * 2 + pairs[:, :, 1]
         return site_values[:, self._ordering_reversed_array()]
 
+    @nnx.jit
     def _site_values_to_config(self, site_values: Array) -> Array:
         user_order = site_values[:, self._ordering_array()]
         up = user_order // 2
@@ -460,6 +475,7 @@ class WaveFunctionElectronUpDown(_TransformerWaveFunctionBase):
         qubits = jnp.stack([up, down], axis=-1).reshape(user_order.shape[0], self.double_sites)
         return pack_int(qubits.astype(jnp.uint8), size=1)
 
+    @functools.partial(nnx.jit, static_argnums=(2,))
     def _local_mask(self, prefix_values: Array, site_index: int) -> Array:
         up_count = jnp.sum(prefix_values // 2, axis=1)
         down_count = jnp.sum(prefix_values % 2, axis=1)

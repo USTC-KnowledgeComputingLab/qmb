@@ -28,7 +28,7 @@
 2. Transformer decoder 使用 **dense FeedForward**，不含 DeepSeekMoE（无 shared/routed experts、centroid、负载均衡 bias）
 3. `generate` 与 `generate_unique` **显式接收 PRNG key**（随机性无内部状态；注意 Transformer 生成会在模块上留下 KV-cache 变量，见 §9）
 4. 顺带实现 **JAX 版 `utility/bitspack.py`**
-5. 生成循环使用 **unrolled Python for**（sites 数在构造时静态已知，逐 site 展开）。`__call__`（估值）用 `@nnx.jit` 修饰；每步前向（MLP `_conditional_log_amplitude` / Transformer `_decode_step`）用 `nnx.jit` + 静态 `site_index` 修饰并跨步缓存。`generate` / `generate_unique` 因末尾用 `jnp.unique` / 布尔过滤产生动态形状，**整体不可 jit**，保持 eager 并调用上述被 jit 的静态方法
+5. 生成循环使用 **unrolled Python for**（sites 数在构造时静态已知，逐 site 展开）。所有静态形状的数值函数均显式 `jit`（`__call__`、每步前向、backbone 构件、变体 hook、`_autoregressive` 与 `bitspack` 全部；形状相关量用 `static_argnums`/`static_argnames` 标静态）。`generate` / `generate_unique` 因末尾 `jnp.unique` / 布尔过滤产生动态形状**整体不可 jit**，保持 eager 并调用上述被 jit 的方法；`_DecoderUnit`/`_Transformers` 因 `mask`/`decode` 无法标静态且总在父 jit 内运行，不独立 jit
 6. Normal 变体支持**任意 physical_dim**（qudit）
 7. 测试为**内部自洽 unit test**，不与旧 PyTorch 实现数值对拍
 
