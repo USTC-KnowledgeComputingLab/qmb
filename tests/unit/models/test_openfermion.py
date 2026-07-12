@@ -141,7 +141,7 @@ def test_openfermion_network_dict_keys() -> None:
 def test_openfermion_mlp_u1u1_construction(h2_molecule_file: str) -> None:
     """mlp/u1u1 builds a normalised spin-resolved wave function for H2."""
     model = Model(ModelConfig(model_path=h2_molecule_file))  # n_qubits=4, N=2, multiplicity 1
-    network = MlpUpDownConfig(hidden_size=(8,)).create(model, rngs=nnx.Rngs(0))
+    network = MlpUpDownConfig(hidden_size=[8]).create(model, rngs=nnx.Rngs(0))
     psi = network(_all_configs(model.n_qubits))
     assert jnp.allclose(jnp.sum(jnp.abs(psi) ** 2), 1.0)
 
@@ -149,7 +149,7 @@ def test_openfermion_mlp_u1u1_construction(h2_molecule_file: str) -> None:
 def test_openfermion_mlp_u1_construction(h2_molecule_file: str) -> None:
     """mlp/u1 builds a normalised total-electron wave function."""
     model = Model(ModelConfig(model_path=h2_molecule_file))
-    network = MlpElectronConfig(hidden_size=(8,)).create(model, rngs=nnx.Rngs(0))
+    network = MlpElectronConfig(hidden_size=[8]).create(model, rngs=nnx.Rngs(0))
     psi = network(_all_configs(model.n_qubits))
     assert jnp.allclose(jnp.sum(jnp.abs(psi) ** 2), 1.0)
 
@@ -173,7 +173,7 @@ def test_openfermion_transformers_u1_construction(h2_molecule_file: str) -> None
 def test_openfermion_mlp_u1u1_conservation(h2_molecule_file: str) -> None:
     """mlp/u1u1 enforces spin-resolved conservation for H2 (spin_up=spin_down=1)."""
     model = Model(ModelConfig(model_path=h2_molecule_file))
-    network = MlpUpDownConfig(hidden_size=(8,)).create(model, rngs=nnx.Rngs(0))
+    network = MlpUpDownConfig(hidden_size=[8]).create(model, rngs=nnx.Rngs(0))
     psi = network(_all_configs(model.n_qubits))
     values = jnp.array(list(itertools.product([0, 1], repeat=model.n_qubits)), dtype=jnp.uint8)
     up = values[:, 0] + values[:, 2]
@@ -184,7 +184,7 @@ def test_openfermion_mlp_u1u1_conservation(h2_molecule_file: str) -> None:
 def test_openfermion_mlp_u1_conservation(h2_molecule_file: str) -> None:
     """mlp/u1 enforces total-electron conservation for H2 (N=2)."""
     model = Model(ModelConfig(model_path=h2_molecule_file))
-    network = MlpElectronConfig(hidden_size=(8,)).create(model, rngs=nnx.Rngs(0))
+    network = MlpElectronConfig(hidden_size=[8]).create(model, rngs=nnx.Rngs(0))
     psi = network(_all_configs(model.n_qubits))
     values = jnp.array(list(itertools.product([0, 1], repeat=model.n_qubits)), dtype=jnp.uint8)
     assert jnp.all(jnp.abs(psi)[values.sum(axis=1) != 2] < 1e-12)
@@ -193,7 +193,7 @@ def test_openfermion_mlp_u1_conservation(h2_molecule_file: str) -> None:
 def test_openfermion_network_generate_unique(h2_molecule_file: str) -> None:
     """generate_unique yields unique conserving configs consistent with __call__."""
     model = Model(ModelConfig(model_path=h2_molecule_file))
-    network = MlpElectronConfig(hidden_size=(8,)).create(model, rngs=nnx.Rngs(0))
+    network = MlpElectronConfig(hidden_size=[8]).create(model, rngs=nnx.Rngs(0))
     configs, psi = network.generate_unique(6, key=jax.random.key(0))
     assert len(jnp.unique(configs, axis=0)) == configs.shape[0]
     assert jnp.allclose(psi, network(configs))
@@ -204,7 +204,7 @@ def test_openfermion_network_generate_unique(h2_molecule_file: str) -> None:
 def test_openfermion_network_prng_determinism(h2_molecule_file: str) -> None:
     """Same rngs seed builds identical networks."""
     model = Model(ModelConfig(model_path=h2_molecule_file))
-    first = MlpElectronConfig(hidden_size=(8,)).create(model, rngs=nnx.Rngs(5))
-    second = MlpElectronConfig(hidden_size=(8,)).create(model, rngs=nnx.Rngs(5))
+    first = MlpElectronConfig(hidden_size=[8]).create(model, rngs=nnx.Rngs(5))
+    second = MlpElectronConfig(hidden_size=[8]).create(model, rngs=nnx.Rngs(5))
     configs = _all_configs(model.n_qubits)
     assert jnp.allclose(first(configs), second(configs))

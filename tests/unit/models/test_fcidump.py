@@ -217,7 +217,7 @@ def _all_configs(n_qubits: int) -> jnp.ndarray:
 def test_fcidump_mlp_u1u1_construction(tmp_path) -> None:
     """mlp/u1u1 builds a normalised spin-resolved wave function for the H2 FCIDUMP."""
     model = Model(ModelConfig(model_path=_write_fcidump(tmp_path)))  # n_qubits=4, N=2, MS2=0
-    network = MlpUpDownConfig(hidden_size=(8,)).create(model, rngs=nnx.Rngs(0))
+    network = MlpUpDownConfig(hidden_size=[8]).create(model, rngs=nnx.Rngs(0))
     psi = network(_all_configs(model.n_qubits))
     assert jnp.allclose(jnp.sum(jnp.abs(psi) ** 2), 1.0)
 
@@ -225,7 +225,7 @@ def test_fcidump_mlp_u1u1_construction(tmp_path) -> None:
 def test_fcidump_mlp_u1_construction(tmp_path) -> None:
     """mlp/u1 builds a normalised total-electron wave function."""
     model = Model(ModelConfig(model_path=_write_fcidump(tmp_path)))
-    network = MlpElectronConfig(hidden_size=(8,)).create(model, rngs=nnx.Rngs(0))
+    network = MlpElectronConfig(hidden_size=[8]).create(model, rngs=nnx.Rngs(0))
     psi = network(_all_configs(model.n_qubits))
     assert jnp.allclose(jnp.sum(jnp.abs(psi) ** 2), 1.0)
 
@@ -249,7 +249,7 @@ def test_fcidump_transformers_u1_construction(tmp_path) -> None:
 def test_fcidump_mlp_u1u1_conservation(tmp_path) -> None:
     """mlp/u1u1 enforces spin-resolved conservation (H2: spin_up=spin_down=1)."""
     model = Model(ModelConfig(model_path=_write_fcidump(tmp_path)))
-    network = MlpUpDownConfig(hidden_size=(8,)).create(model, rngs=nnx.Rngs(0))
+    network = MlpUpDownConfig(hidden_size=[8]).create(model, rngs=nnx.Rngs(0))
     psi = network(_all_configs(model.n_qubits))
     values = jnp.array(list(itertools.product([0, 1], repeat=model.n_qubits)), dtype=jnp.uint8)
     up = values[:, 0] + values[:, 2]
@@ -260,7 +260,7 @@ def test_fcidump_mlp_u1u1_conservation(tmp_path) -> None:
 def test_fcidump_mlp_u1_conservation(tmp_path) -> None:
     """mlp/u1 enforces total-electron conservation (H2: N=2)."""
     model = Model(ModelConfig(model_path=_write_fcidump(tmp_path)))
-    network = MlpElectronConfig(hidden_size=(8,)).create(model, rngs=nnx.Rngs(0))
+    network = MlpElectronConfig(hidden_size=[8]).create(model, rngs=nnx.Rngs(0))
     psi = network(_all_configs(model.n_qubits))
     values = jnp.array(list(itertools.product([0, 1], repeat=model.n_qubits)), dtype=jnp.uint8)
     assert jnp.all(jnp.abs(psi)[values.sum(axis=1) != 2] < 1e-12)
@@ -269,7 +269,7 @@ def test_fcidump_mlp_u1_conservation(tmp_path) -> None:
 def test_fcidump_network_generate_unique(tmp_path) -> None:
     """generate_unique yields unique conserving configs consistent with __call__."""
     model = Model(ModelConfig(model_path=_write_fcidump(tmp_path)))
-    network = MlpElectronConfig(hidden_size=(8,)).create(model, rngs=nnx.Rngs(0))
+    network = MlpElectronConfig(hidden_size=[8]).create(model, rngs=nnx.Rngs(0))
     configs, psi = network.generate_unique(6, key=jax.random.key(0))
     assert len(jnp.unique(configs, axis=0)) == configs.shape[0]
     assert jnp.allclose(psi, network(configs))
@@ -280,8 +280,8 @@ def test_fcidump_network_generate_unique(tmp_path) -> None:
 def test_fcidump_network_prng_determinism(tmp_path) -> None:
     """Same rngs seed builds identical networks."""
     model = Model(ModelConfig(model_path=_write_fcidump(tmp_path)))
-    first = MlpElectronConfig(hidden_size=(8,)).create(model, rngs=nnx.Rngs(3))
-    second = MlpElectronConfig(hidden_size=(8,)).create(model, rngs=nnx.Rngs(3))
+    first = MlpElectronConfig(hidden_size=[8]).create(model, rngs=nnx.Rngs(3))
+    second = MlpElectronConfig(hidden_size=[8]).create(model, rngs=nnx.Rngs(3))
     configs = _all_configs(model.n_qubits)
     assert jnp.allclose(first(configs), second(configs))
 

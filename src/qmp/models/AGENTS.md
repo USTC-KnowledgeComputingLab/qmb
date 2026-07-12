@@ -96,7 +96,7 @@ model 通过在模块底部执行 `model_dict[name] = Model` 和 `model_config_d
 | `transformers/u1` | `TransformersElectronConfig` | Transformer | 总电子数守恒 |
 
 每个配置类：
-- 是 `@dataclass`，字段为该网络的超参（MLP: `hidden_size`, `ordering`；Transformer: `embedding_dim`, `heads_num`, `feed_forward_dim`, `depth`, `tail_hidden_dim`, `ordering`），带默认值。
+- 是 `@dataclass`，字段为该网络的超参（MLP: `hidden_size: list[int]`, `ordering`；Transformer: `embedding_dim`, `heads_num`, `feed_forward_dim`, `depth`, `tail_hidden_dim`, `ordering`），带默认值。字段用 `list[int]` 而非 `tuple`，便于 dacite 从 YAML 反序列化（`create` 内部按需转 tuple）。
 - 有 `create(self, model, *, rngs: nnx.Rngs) -> NetworkProto` 方法：从 model 元数据（`n_qubits`、电子数、`n_spins`）导出网络的 site/spin 参数，用配置字段填充超参，显式传入 `rngs`（nnx 网络需要 PRNG）。
 
 **与旧代码的差异**（因架构迁移）：
