@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from qmp.algorithms.trim import Trim, TrimConfig
+import jax
+import jax.numpy as jnp
+from flax import nnx
+
+from qmp.algorithms._registry import action_class_dict, action_config_dict
+from qmp.algorithms.trim import Trim, TrimConfig, _expand_pool, _local_trim
+from qmp.models.hubbard import Model, ModelConfig
 
 
 def test_trim_config_defaults() -> None:
@@ -18,18 +24,8 @@ def test_trim_config_defaults() -> None:
 
 
 def test_trim_registration() -> None:
-    from qmp.algorithms._registry import action_class_dict, action_config_dict
-
     assert action_config_dict["trim"] is TrimConfig
     assert action_class_dict["trim"] is Trim
-
-
-import jax
-import jax.numpy as jnp
-from flax import nnx
-
-from qmp.algorithms.trim import _expand_pool
-from qmp.models.hubbard import Model, ModelConfig
 
 
 def _small_hubbard() -> Model:
@@ -47,9 +43,6 @@ def test_expand_pool_grows_and_unique() -> None:
     flat = pool_c.reshape(pool_c.shape[0], -1)
     unique = jnp.unique(flat, axis=0)
     assert unique.shape[0] == pool_c.shape[0]  # no duplicate configs
-
-
-from qmp.algorithms.trim import _local_trim
 
 
 def test_local_trim_reduces_and_unique() -> None:

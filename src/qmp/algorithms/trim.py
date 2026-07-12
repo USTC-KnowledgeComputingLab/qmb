@@ -1,4 +1,4 @@
-"""TrimCI × HAAR hybrid algorithm.
+"""TrimCI x HAAR hybrid algorithm.
 
 Combines TrimCI's expansion + two-level (local block / global) trimming
 determinant selection with HAAR's neural-quantum-state fitting loop.
@@ -148,8 +148,7 @@ def _local_trim(
     perm = jax.random.permutation(key, n)
     groups = jnp.array_split(perm, num_groups)
 
-    survived_c: Array | None = None
-    survived_p: Array | None = None
+    survived: tuple[Array, Array] | None = None
     for group_idx in groups:
         if group_idx.shape[0] == 0:
             continue
@@ -171,12 +170,9 @@ def _local_trim(
         k = min(keep_count, cfg.shape[0])
         top = jnp.argsort((ritz.conj() * ritz).real)[::-1][:k]
         kept_c, kept_p = cfg[top], ritz[top]
-        if survived_c is None:
-            survived_c, survived_p = kept_c, kept_p
-        else:
-            survived_c, survived_p = _merge_pools(survived_c, survived_p, kept_c, kept_p)
-    assert survived_c is not None and survived_p is not None
-    return survived_c, survived_p
+        survived = (kept_c, kept_p) if survived is None else _merge_pools(survived[0], survived[1], kept_c, kept_p)
+    assert survived is not None
+    return survived
 
 
 def _init_state() -> dict[str, typing.Any]:
@@ -191,7 +187,7 @@ def _init_state() -> dict[str, typing.Any]:
 
 
 class Trim:
-    """TrimCI × HAAR algorithm."""
+    """TrimCI x HAAR algorithm."""
 
     def __init__(self, config: TrimConfig) -> None:
         self._config = config
@@ -210,9 +206,8 @@ class Trim:
         loss_fn = _AVAILABLE_LOSSES[config.loss_name]
 
         state: dict[str, typing.Any]
-        state = _load_checkpoint(config.checkpoint_path) if config.checkpoint_path else _init_state()
-        if state is None:
-            state = _init_state()
+        loaded = _load_checkpoint(config.checkpoint_path) if config.checkpoint_path else None
+        state = loaded if loaded is not None else _init_state()
         self._state = state
 
         cycle = state["trim"]["global"]
@@ -224,7 +219,7 @@ class Trim:
             key = jax.random.key(cycle * config.sampling_count_from_network)
 
             # --- 1. sample ---
-            c_net, p_net = self._network.generate_unique(config.sampling_count_from_network, key=key)  # ty: ignore — network dynamic
+            c_net, p_net = self._network.generate_unique(config.sampling_count_from_network, key=key)
             key2 = jax.random.fold_in(key, 1)
             c_pool, p_pool = _sample_from_pool(state["trim"]["pool"], config.sampling_count_from_pool, key2)
             core_c, core_p = _merge_pools(c_net, p_net, c_pool, p_pool)
@@ -273,7 +268,7 @@ class Trim:
             for _e, _cfg, p in results:
                 target_prob = target_prob + (p.conj() * p).real
             target_psi = jnp.sqrt(target_prob).astype(jnp.complex128)
-            max_idx = jnp.argmax(jnp.abs(target_psi))
+            max_idx = int(jnp.argmax(jnp.abs(target_psi)))
             target_psi = target_psi / target_psi[max_idx]
 
             # --- 6. local optimization ---
