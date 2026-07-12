@@ -726,6 +726,26 @@ __global__ void find_topk_kernel(
     }
 }
 
+/* Canonical slot for a topk key: first slot holding it on its probe run.
+   Same contiguous-occupied-run argument as find_canonical_slot. */
+template <int n_qubytes>
+__device__ int64_t topk_canonical_slot(
+    const topk_slot<n_qubytes>* table, int64_t cap, const uint8_t* key)
+{
+    uint64_t h = wyhash64<n_qubytes>(key, 2);
+    int64_t idx = h % cap;
+    for (int64_t p = 0; p < cap; ++p) {
+        const topk_slot<n_qubytes>& slot = table[idx];
+        if (!slot.occupied) return idx;
+        bool match = true;
+        for (int q = 0; q < n_qubytes; ++q)
+            if (slot.key[q] != key[q]) { match = false; break; }
+        if (match) return idx;
+        idx = (idx + 1) % cap;
+    }
+    return idx;
+}
+
 template <int n_qubytes>
 __global__ void find_topk_collect_kernel(
     const topk_slot<n_qubytes>* table, int64_t cap,
@@ -735,10 +755,33 @@ __global__ void find_topk_collect_kernel(
     int64_t stride = blockDim.x * gridDim.x;
     for (int64_t s = idx; s < cap; s += stride) {
         const topk_slot<n_qubytes>& slot = table[s];
-        // Unoccupied slots keep weight 0 and zero key; they sort to the bottom.
-        out_weights[s] = slot.occupied ? slot.weight : 0.0;
         for (int q = 0; q < n_qubytes; ++q)
             out_keys[s * n_qubytes + q] = slot.occupied ? slot.key[q] : 0;
+        if (!slot.occupied) {
+            out_weights[s] = 0.0;  // empty slot sorts to the bottom
+            continue;
+        }
+        // Concurrent insertion may have created duplicate slots for one key
+        // (mid-publish skip). Only the canonical slot represents the key; it
+        // emits the max weight over all its duplicates, the rest emit 0 so a
+        // config never takes more than one top-K position.
+        int64_t canonical = topk_canonical_slot<n_qubytes>(table, cap, slot.key);
+        if (canonical != s) {
+            out_weights[s] = 0.0;
+            continue;
+        }
+        double w = slot.weight;
+        int64_t j = (topk_canonical_slot<n_qubytes>(table, cap, slot.key) + 1) % cap;
+        for (int64_t p = 0; p < cap; ++p) {
+            const topk_slot<n_qubytes>& other = table[j];
+            if (!other.occupied) break;  // end of this key's probe run
+            bool match = true;
+            for (int q = 0; q < n_qubytes; ++q)
+                if (other.key[q] != slot.key[q]) { match = false; break; }
+            if (match && other.weight > w) w = other.weight;
+            j = (j + 1) % cap;
+        }
+        out_weights[s] = w;
     }
 }
 

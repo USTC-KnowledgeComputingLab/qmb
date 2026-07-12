@@ -326,6 +326,27 @@ def test_cuda_find_topk_k_one() -> None:
     assert cr.shape == jr.shape == (1, c.shape[1])
 
 
+def test_cuda_find_topk_no_duplicate_configs() -> None:
+    # Multiple terms let several (term, config) paths reach the same new config,
+    # so concurrent insertion is prone to duplicate slots. The canonical-slot
+    # merge in collect must ensure a config never occupies more than one top-K
+    # row (no duplicate configs among the distinct ones returned).
+    hamiltonian: dict[tuple[tuple[int, int], ...], complex] = {
+        ((1, 1), (0, 0)): -1.0 + 0j,
+        ((2, 1), (1, 0)): -1.0 + 0j,
+        ((0, 1), (0, 0)): 0.5 + 0j,
+    }
+    h = FermiHamiltonian(hamiltonian, n_qubits=4, devices=["localhost:cuda:0"])
+    c = _c4()
+    pi = jnp.ones((4, 2), dtype=jnp.float64)
+    exclude = jnp.zeros((0, 1), dtype=jnp.uint8)
+    selected = h.find_topk_relative_configs(c, pi, 4, exclude)
+    rows = [tuple(int(b) for b in row) for row in np.asarray(selected)]
+    # Non-zero (real) configs must be distinct; zero padding rows may repeat.
+    nonzero = [r for r in rows if any(r)]
+    assert len(nonzero) == len(set(nonzero))
+
+
 # ---- multi-byte qubits (n_qubits > 8 → n_qubytes >= 2) ----
 
 
