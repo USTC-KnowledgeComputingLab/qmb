@@ -7,7 +7,7 @@ from typing import ClassVar
 
 import pytest
 
-from qmp.models._model import ModelProto, model_dict
+from qmp.models._model import ModelProto, model_config_dict, model_dict
 
 _MODEL_NAMES = ("fcidump", "hubbard", "openfermion")
 _REQUIRED_METHODS = (
@@ -16,6 +16,7 @@ _REQUIRED_METHODS = (
     "find_all_relative_configs",
     "find_topk_relative_configs",
     "show_config",
+    "create_network",
 )
 
 
@@ -32,6 +33,11 @@ def _register_models() -> None:
 def test_model_dict_is_dict() -> None:
     """model_dict is a mutable dict usable as a registry."""
     assert isinstance(model_dict, dict)
+
+
+def test_model_config_dict_is_dict() -> None:
+    """model_config_dict is a mutable dict usable as a registry."""
+    assert isinstance(model_config_dict, dict)
 
 
 def test_model_dict_registration() -> None:

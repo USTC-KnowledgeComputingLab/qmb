@@ -1,7 +1,7 @@
 # Spec: CLI 子系统与 Registry 架构
 
 **日期**: 2026-07-13
-**状态**: in-progress
+**状态**: implemented（`build_from_ref` 已重构为 `build_model` + `model.create_network`；本文档反映当前实现）
 
 ## 1. 目标
 

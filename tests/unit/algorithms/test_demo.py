@@ -57,3 +57,37 @@ def test_demo_run_with_model_only() -> None:
 def test_demo_config_registration() -> None:
     assert action_config_dict["demo"] is DemoConfig
     assert action_class_dict["demo"] is Demo
+
+
+# ---- end-to-end: model + network ----
+
+
+def test_demo_init_builds_network_via_model() -> None:
+    """With both refs, Demo builds the network through model.create_network."""
+    cfg = DemoConfig(
+        model=SubConfigRef(name="hubbard", params={"m": 2, "n": 1, "u": 4.0}),
+        network=SubConfigRef(name="mlp/u1", params={"hidden_size": [16]}),
+    )
+    demo = Demo(cfg)
+    assert demo._model is not None
+    assert demo._network is not None
+
+
+def test_demo_run_with_model_and_network() -> None:
+    """The full run computes a finite <H> from a real model + network."""
+    cfg = DemoConfig(
+        model=SubConfigRef(name="hubbard", params={"m": 2, "n": 1, "u": 4.0}),
+        network=SubConfigRef(name="mlp/u1", params={"hidden_size": [16]}),
+        sample_count=32,
+    )
+    demo = Demo(cfg)
+    demo.run()  # must not raise; exercises generate + apply_within_subspace
+
+
+def test_demo_network_ref_without_model_stays_none() -> None:
+    """A network ref without a model ref leaves the network unbuilt (guarded)."""
+    cfg = DemoConfig(network=SubConfigRef(name="mlp/u1", params={"hidden_size": [16]}))
+    demo = Demo(cfg)
+    assert demo._model is None
+    assert demo._network is None
+    demo.run()  # must not raise
