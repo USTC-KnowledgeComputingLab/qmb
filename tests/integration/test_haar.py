@@ -14,6 +14,7 @@ import math
 
 import jax
 import jax.numpy as jnp
+import openfermion
 import pytest
 from flax import nnx
 
@@ -22,11 +23,6 @@ from qmp.models._build import SubConfigRef
 from qmp.models.openfermion import Model, ModelConfig
 from qmp.networks.mlp import WaveFunctionElectron as MlpElectron
 from qmp.utility._losses import sum_filtered_angle_scaled_log
-
-# pre-computed H2/STO-3G values (electronic part = FCI - nuclear_repulsion)
-_H2_FCI_TOTAL = -1.1372701747
-_H2_NUCLEAR = 0.7137539937
-_H2_ELECTRONIC = _H2_FCI_TOTAL - _H2_NUCLEAR
 
 
 def _make_h2_molecule(path: str) -> None:
@@ -40,15 +36,14 @@ def _make_h2_molecule(path: str) -> None:
         run_pyscf(mol, run_fci=True)
     except ImportError:
         import numpy as np
-        import openfermion
 
         geom = [("H", (0.0, 0.0, 0.0)), ("H", (0.0, 0.0, 0.7414))]
         mol = openfermion.MolecularData(geom, basis="sto-3g", multiplicity=1, charge=0, filename=path)
         mol.n_orbitals = 2
         mol.n_qubits = 4
         mol.n_electrons = 2
-        mol.fci_energy = _H2_FCI_TOTAL
-        mol.nuclear_repulsion = _H2_NUCLEAR
+        mol.fci_energy = -1.1372701747
+        mol.nuclear_repulsion = 0.7137539937
         mol.one_body_integrals = np.array([[-1.252463573, -0.0], [-0.0, -0.475948715]])
         mol.two_body_integrals = np.zeros((2, 2, 2, 2))
         mol.two_body_integrals[0, 0, 0, 0] = 0.674493166
@@ -103,8 +98,44 @@ def test_krylov_energy_decreases(h2_model: Model, h2_network: MlpElectron) -> No
     assert len(energies) >= 4
     assert energies[0] > -2.0
     assert energies[-1] < energies[0]
-    # Krylov should converge to the electronic energy (no nuclear repulsion)
-    assert energies[-1] >= _H2_ELECTRONIC - 1e-6
+
+
+def test_krylov_vs_exact_diagonalization(h2_model: Model, h2_network: MlpElectron) -> None:
+    """Krylov electronic ground state matches exact diagonalization of H in the config space (4-qubit full CI)."""
+    # enumerate all 16 configs for 4 qubits
+    all_configs = jnp.array([[i] for i in range(16)], dtype=jnp.uint8)
+
+    # compute full H matrix via apply_within_subspace (each column = H·|c_j>)
+    n = all_configs.shape[0]
+    h_mat = jnp.zeros((n, n), dtype=jnp.float64)
+    for j in range(n):
+        cfg_j = all_configs[j : j + 1]
+        psi_one = jnp.array([[1.0, 0.0]], dtype=jnp.float64)
+        h_col = h2_model.apply_within_subspace(cfg_j, psi_one, all_configs)
+        h_mat = h_mat.at[:, j].set(h_col[:, 0])
+
+    # exact electronic ground state energy （电子哈密顿量，不含核排斥）
+    exact_electronic = float(jnp.linalg.eigh(h_mat)[0][0])
+
+    # Krylov in the same config space
+    key = jax.random.key(42)
+    configs, psi = h2_network.generate_unique(64, key=key)
+    lanczos = _DynamicLanczos(
+        model=h2_model,
+        configs=configs,
+        psi=psi,
+        max_steps=12,
+        stop_norm=1e-8,
+        random_period=99,
+        extend_count=32,
+        strategy=KrylovBasisStrategy.FIXED,
+        state_count=1,
+    )
+    krylov_e = 0.0
+    for r in lanczos.run():
+        krylov_e = r[0][0]
+
+    assert abs(krylov_e - exact_electronic) < 5e-3
 
 
 def test_krylov_energy_finite(h2_model: Model, h2_network: MlpElectron) -> None:
