@@ -142,49 +142,54 @@ def prepare(operators, n_qubits):
 
 计算 H 在每个 config 上的对角元期望值。只有 `flip_mask[t] == 0` 的 term（不改变构型）才对对角有贡献。
 
+**算法**: 每个对角元 `psi[i]` 相互独立，故一个线程负责一个 config，在寄存器里累加该 config 上所有（对角）term 的贡献，最后一次性写回 `psi[i]`。无 atomicAdd、无 shared-memory 归约、无需预先 memset。
+
 ```
-for each term_t:
-    for each config_i:
+for each config_i (one thread per config, grid-stride over configs):
+    acc_re = acc_im = 0
+    for each term_t (diagonal subset, flip_mask == 0):
         if not is_applicable(config_i, create_mask[t], annihilate_mask[t]): continue
-        if flip_mask[t] != 0: continue   # 对角条件: 无净翻转
-
-        parity = parity_const[t] XOR popcount(parity_mask[t] & config_i) & 1
+        if flip_mask[t] != 0: continue   # 冗余保险: 预过滤后子集已满足
+        parity = parity_const[t] XOR (popcount(parity_mask[t] & config_i) & 1)
         sign = -1.0 if parity else 1.0
-
-        atomicAdd(psi[i,0], sign * coef[t,0])
-        atomicAdd(psi[i,1], sign * coef[t,1])
+        acc_re += sign * coef[t,0]
+        acc_im += sign * coef[t,1]
+    psi[i,0] = acc_re
+    psi[i,1] = acc_im
 ```
 
-**并行度**: grid-stride loop，grid 大小按 SM 数量 × 最大 occupancy 设定（~10^5 blocks 级别，而非 T×B = 10^12）。每个 block 内循环处理多个 term × config 对。
+**并行度**: grid-stride over configs（一线程一 config，~10^6 线程级别），非 T×B 网格。每线程内层只遍历对角 term 子集。
 
 **预过滤** (implemented): `FermiHamiltonian` 初始化时按 `flip_mask[t] == 0` 切出对角 term 子集 (`_diag_*` 数组)。`compute_diagonal_within_subspace` 只把该子集传给 kernel/fallback，跳过绝大多数非对角 term (对角 term 通常仅占 1-10%)。kernel 内仍保留 `flip_mask[t]==0` 检查作为冗余保险。
 
-**归约** (implemented, one-thread-per-config): 对角元 `psi[i]` 互相独立，因此分配一个线程负责一个 config，在寄存器里累加所有对角 term 的贡献，最后一次性写回 `psi[i]`（无 atomicAdd、无 shared-memory 归约、无需 memset）。这比原设计的 shared-memory 块级归约更彻底地消除了 L2 原子争用。配合上面的对角 term 预过滤，每线程只遍历对角 term 子集。
+**为何不用 atomicAdd / shared-memory 归约**: 由于对角元互相独立、一线程独占一个 `psi[i]`，无需任何原子操作或 block 内归约即可零争用写回——这比"每 (term,config) 对 atomicAdd"或"shared-memory 块级归约"都更简单且更快。（初版曾尝试 `s_re[i % 256]` shared-mem 归约，在 `B > 256` / 多 block 时有 slot 串号 bug，已弃用。）
 
 #### 3.2.2 `apply_within_subspace` — 稀疏 H·psi 投影
 
 计算 `ψ_j = H · ψ_i` 投影到 `configs_j` 子空间。支持 forward/backward 双向。
 
 ```
-预处理: 对 dst_configs 构建自定义线性探测哈希表 (apply_hash_slot, key=config bytes, value=index)
-         哈希: wyhash64, load factor 60%
+方向语义: forward (dir 0) src=configs_i, dst=configs_j; backward (dir 1, H^†) src=configs_j, dst=configs_i。
+遍历侧: 令 traverse = argmin(B_src, B_dst)，lookup = 另一侧; 对 lookup 侧构建线性探测哈希表
+        (apply_hash_slot, key=config bytes, value=该侧下标; wyhash64, load factor 60%)。
+        因 flip 自逆，遍历 src 侧或 dst 侧枚举的 (src,dst) 连接对集合相同。
 
-for each term_t:
-    for each src_i:                              # forward: src=configs_i; backward: src=configs_j
-        # backward 时需检查 config_i (= config_j XOR flip[t]) 是否满足约束
-        check_config = src_i XOR flip_mask[t] if direction == 1 else src_i
-        if not is_applicable(check_config, create_mask[t], annihilate_mask[t]): continue
-        new_config = src_i XOR flip_mask[t]
-
-        idx = apply_hash_lookup(new_config)       # forward: lookup in configs_j; backward: lookup in configs_i
-        if idx < 0: continue
-
-        parity = parity_const[t] XOR popcount(parity_mask[t] & check_config) & 1
-        sign = -1.0 if parity else 1.0
-        cf = (coef[t,0], -coef[t,1]) if direction == 1 else (coef[t,0], coef[t,1])  # conj for H^†
-        contribution = sign * complex_mul(cf, psi_src[i])
-        atomicAdd(psi_j[idx,0], contribution.real)
-        atomicAdd(psi_j[idx,1], contribution.imag)
+for each t, for each m in traverse side (one thread per (t, m) pair):
+    if traverse == src side:
+        src_c = traverse[m];  new_c = src_c XOR flip[t]
+        out_idx = lookup(new_c);   psi_idx = m
+    else:  # traverse == dst side
+        dst_c = traverse[m];  src_c = dst_c XOR flip[t]     # flip 自逆
+        psi_idx = lookup(src_c);   out_idx = m
+    if lookup miss: continue
+    check_config = src_c XOR flip[t] if direction == 1 else src_c   # H^† 检查作用于 config_i
+    if not is_applicable(check_config, create_mask[t], annihilate_mask[t]): continue
+    parity = parity_const[t] XOR (popcount(parity_mask[t] & check_config) & 1)
+    sign = -1.0 if parity else 1.0
+    cf = (coef[t,0], -coef[t,1]) if direction == 1 else (coef[t,0], coef[t,1])  # conj for H^†
+    contribution = sign * complex_mul(cf, psi_src[psi_idx])
+    atomicAdd(psi_j[out_idx,0], contribution.real)
+    atomicAdd(psi_j[out_idx,1], contribution.imag)
 ```
 
 **方向选择与择小侧遍历** (implemented): `direction` 由调用方指定语义 (forward = H, backward = H^†)，据此固定 src/dst——forward: src=configs_i、dst=configs_j、输出 `[B_j,2]`；backward: src=configs_j、dst=configs_i、输出 `[B_i,2]`，系数取共轭。在此语义之上，kernel 总是遍历 `min(B_src, B_dst)` 较小侧、把哈希表建在被查找的另一侧以最小化总线程数 (`T × 较小侧`)。因 flip 自逆，两种遍历模式枚举的 (src, dst) 连接对集合相同，`psi_j` 逐位一致；`src_psi` 始终按 src 侧下标索引。
