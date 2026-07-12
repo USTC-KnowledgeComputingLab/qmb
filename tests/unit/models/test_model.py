@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from qmp.models._model import ModelProto, model_dict
 
 
@@ -15,7 +17,7 @@ def test_model_dict_registration() -> None:
 
     class _Dummy(ModelProto[object]):
         ref_energy = 0.0
-        network_dict: dict[str, object] = {}
+        network_dict: ClassVar[dict[str, object]] = {}
 
     model_dict["_test_entry"] = _Dummy
     assert model_dict["_test_entry"] is _Dummy

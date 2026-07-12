@@ -272,7 +272,7 @@ for chunk_start in [0, chunk_size, 2*chunk_size, ..., T-1]:
 ```python
 def load_cuda_module(n_qubytes: int) -> ctypes.CDLL:
     key = f"qmp_hamiltonian_{n_qubytes}"
-    cache_dir = platformdirs.user_cache_path("qmp", "kclab") / key
+    cache_dir = platformdirs.user_cache_path("qmp", "kclab") / "hamiltonian" / "fermi" / key
     so_path = cache_dir / "lib.so"
 
     if not so_path.exists():

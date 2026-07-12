@@ -7,7 +7,7 @@ themselves at import time via ``model_dict[name] = Model``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, TypeVar
+from typing import TYPE_CHECKING, ClassVar, Protocol, TypeVar
 
 if TYPE_CHECKING:
     import jax
@@ -19,7 +19,7 @@ class ModelProto(Protocol[config_t]):
     """Uniform interface implemented by all models."""
 
     ref_energy: float
-    network_dict: dict[str, object]
+    network_dict: ClassVar[dict[str, object]]
 
     def __init__(self, config: config_t) -> None:
         """Build the model from its configuration."""

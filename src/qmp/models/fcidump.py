@@ -9,6 +9,7 @@ import logging
 import pathlib
 import pickle
 import re
+from typing import ClassVar
 
 import jax
 import jax.numpy as jnp
@@ -122,7 +123,7 @@ class ModelConfig:
 class Model(ModelProto[ModelConfig]):
     """FCIDUMP file model wrapping a FermiHamiltonian."""
 
-    network_dict: dict[str, object] = {}
+    network_dict: ClassVar[dict[str, object]] = {}
 
     def __init__(self, config: ModelConfig) -> None:
         model_path = pathlib.Path(config.model_path)

@@ -961,7 +961,7 @@ _SOURCE_DIR = Path(__file__).resolve().parent
 def load_cuda_module(n_qubytes: int) -> ctypes.CDLL:
     """Compile and load a CUDA shared library for the given parameters.
 
-    The library is cached in ~/.cache/qmp/kclab/{key}/lib.so.
+    The library is cached in ~/.cache/qmp/hamiltonian/fermi/{key}/lib.so.
     invoked to compile _hamiltonian_cuda.cu with the appropriate macros.
     Subsequent calls load the cached .so directly via ctypes.
 
@@ -977,7 +977,7 @@ def load_cuda_module(n_qubytes: int) -> ctypes.CDLL:
         The loaded shared library.
     """
     key = f"qmp_hamiltonian_{n_qubytes}"
-    cache_dir = platformdirs.user_cache_path("qmp", "kclab") / key
+    cache_dir = platformdirs.user_cache_path("qmp", "kclab") / "hamiltonian" / "fermi" / key
     so_path = cache_dir / "lib.so"
 
     if not so_path.exists():

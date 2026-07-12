@@ -7,6 +7,7 @@ import openfermion
 import pytest
 
 from qmp.models._model import model_dict
+from qmp.models.openfermion import Model, ModelConfig
 
 
 @pytest.fixture
@@ -35,15 +36,11 @@ def h2_molecule_file(tmp_path) -> str:
 
 def test_openfermion_registered() -> None:
     """OpenFermion model registers itself."""
-    from qmp.models.openfermion import Model
-
     assert model_dict["openfermion"] is Model
 
 
 def test_openfermion_metadata(h2_molecule_file: str) -> None:
     """Metadata (n_qubits, n_electrons, n_spins, ref_energy) read correctly."""
-    from qmp.models.openfermion import Model, ModelConfig
-
     model = Model(ModelConfig(model_path=h2_molecule_file))
     assert model.n_qubits == 4
     assert model.n_electrons == 2
@@ -53,8 +50,6 @@ def test_openfermion_metadata(h2_molecule_file: str) -> None:
 
 def test_openfermion_spin_from_multiplicity(tmp_path) -> None:
     """n_spins = multiplicity - 1 (triplet -> 2)."""
-    from qmp.models.openfermion import Model, ModelConfig
-
     geometry = [("H", (0.0, 0.0, 0.0)), ("H", (0.0, 0.0, 0.7414))]
     molecule = openfermion.MolecularData(
         geometry=geometry,

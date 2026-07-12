@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+from typing import ClassVar
 
 import jax
 import jax.numpy as jnp
@@ -42,7 +43,7 @@ class ModelConfig:
 class Model(ModelProto[ModelConfig]):
     """Hubbard model wrapping a FermiHamiltonian."""
 
-    network_dict: dict[str, object] = {}
+    network_dict: ClassVar[dict[str, object]] = {}
 
     @classmethod
     def _prepare_hamiltonian(cls, config: ModelConfig) -> dict[tuple[tuple[int, int], ...], complex]:
