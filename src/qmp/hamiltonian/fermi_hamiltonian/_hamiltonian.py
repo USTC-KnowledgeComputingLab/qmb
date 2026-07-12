@@ -197,7 +197,7 @@ class FermiHamiltonian:
                 self._to_dev(self._parity_mask),
                 self._to_dev(self._parity_const),
                 self._to_dev(self._coef),
-                hash_capacity,
+                hash_capacity=int(hash_capacity),
             )
         return _jax_find_all_relative_configs(
             self._to_dev(configs_i),

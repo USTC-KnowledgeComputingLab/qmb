@@ -328,7 +328,8 @@ struct __align__(8) findall_slot {
     uint8_t key[n_qubytes];
     double  real_val;
     double  imag_val;
-    bool    occupied;
+    int     occupied;
+    int     claimed;
 };
 
 template <int n_qubytes>
@@ -371,12 +372,17 @@ __global__ void find_all_kernel(
         for (int64_t p = 0; p < cap && p < 100; ++p) {
             auto& slot = table[slot_idx];
             if (!slot.occupied) {
-                if (atomicCAS((int*)&slot.occupied, 0, 1) == 0) {
+                if (atomicCAS(&slot.occupied, 0, 1) == 0) {
                     for (int q = 0; q < n_qubytes; ++q) slot.key[q] = new_c[q];
-                    slot.real_val = vr; slot.imag_val = vi;
+                    __threadfence();
+                    slot.claimed = 1;
+                    atomicAdd(&slot.real_val, vr);
+                    atomicAdd(&slot.imag_val, vi);
                     break;
                 }
             }
+            // Wait until the claiming thread has published the key.
+            while (slot.occupied && !slot.claimed) { __threadfence(); }
             bool match = true;
             for (int q = 0; q < n_qubytes; ++q)
                 if (slot.key[q] != new_c[q]) { match = false; break; }
@@ -388,6 +394,23 @@ __global__ void find_all_kernel(
             slot_idx = (slot_idx + 1) % cap;
             if (p == 99) { *overflow = 1; }
         }
+    }
+}
+
+template <int n_qubytes>
+__global__ void find_all_collect_kernel(
+    const findall_slot<n_qubytes>* table, int64_t cap,
+    uint8_t* new_configs, double* psi_j, int* out_count)
+{
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t stride = blockDim.x * gridDim.x;
+    for (int64_t s = idx; s < cap; s += stride) {
+        const findall_slot<n_qubytes>& slot = table[s];
+        if (!slot.occupied) continue;
+        int out = atomicAdd(out_count, 1);
+        for (int q = 0; q < n_qubytes; ++q) new_configs[out * n_qubytes + q] = slot.key[q];
+        psi_j[out * 2] = slot.real_val;
+        psi_j[out * 2 + 1] = slot.imag_val;
     }
 }
 
@@ -410,13 +433,17 @@ ffi::Error FindAllRelativeConfigsImpl(
     // allocate hash table
     findall_slot<N_QUBYTES>* d_table = nullptr;
     int* d_overflow = nullptr;
+    int* d_count = nullptr;
     cudaMallocAsync(&d_table, cap * sizeof(findall_slot<N_QUBYTES>), stream);
     cudaMallocAsync(&d_overflow, sizeof(int), stream);
+    cudaMallocAsync(&d_count, sizeof(int), stream);
     cudaMemsetAsync(d_table, 0, cap * sizeof(findall_slot<N_QUBYTES>), stream);
     cudaMemsetAsync(d_overflow, 0, sizeof(int), stream);
+    cudaMemsetAsync(d_count, 0, sizeof(int), stream);
     cudaMemsetAsync(new_configs->untyped_data(), 0, new_configs->size_bytes(), stream);
     cudaMemsetAsync(psi_j->untyped_data(), 0, psi_j->size_bytes(), stream);
     int threads = 256, blocks = static_cast<int>(std::min<int64_t>((total + 255) / 256, 65535LL));
+    if (blocks < 1) blocks = 1;
     find_all_kernel<N_QUBYTES><<<blocks, threads, 0, stream>>>(
         B, T, total,
         configs_i.typed_data(), reinterpret_cast<const double*>(psi_i.typed_data()),
@@ -425,11 +452,18 @@ ffi::Error FindAllRelativeConfigsImpl(
         parity_const.typed_data(), reinterpret_cast<const double*>(coef.typed_data()),
         configs_exclude.typed_data(), configs_exclude.dimensions()[0],
         d_table, cap, d_overflow);
-    // Post-kernel: linear scan to collect non-empty slots
-    *reinterpret_cast<int32_t*>(count->untyped_data()) = 0;
-    // ... deferred to host-side scan
+    // Compact non-empty slots into the output buffers and count distinct configs.
+    int cblocks = static_cast<int>(std::min<int64_t>((cap + 255) / 256, 65535LL));
+    if (cblocks < 1) cblocks = 1;
+    find_all_collect_kernel<N_QUBYTES><<<cblocks, 256, 0, stream>>>(
+        d_table, cap,
+        reinterpret_cast<uint8_t*>(new_configs->untyped_data()),
+        reinterpret_cast<double*>(psi_j->untyped_data()),
+        d_count);
+    cudaMemcpyAsync(count->untyped_data(), d_count, sizeof(int), cudaMemcpyDeviceToDevice, stream);
     cudaFreeAsync(d_table, stream);
     cudaFreeAsync(d_overflow, stream);
+    cudaFreeAsync(d_count, stream);
     return ffi::Error::Success();
 }
 
