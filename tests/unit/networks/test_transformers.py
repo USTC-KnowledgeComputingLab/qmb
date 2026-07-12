@@ -315,3 +315,54 @@ def test_gradient_flows_through_call() -> None:
     assert leaves
     assert all(bool(jnp.all(jnp.isfinite(leaf))) for leaf in leaves)
     assert any(float(jnp.sum(jnp.abs(leaf))) > 0.0 for leaf in leaves)
+
+
+# ---- amplitude invariances ----
+
+
+def test_call_batch_invariance() -> None:
+    """Amplitudes are independent of how configs are batched (no cross-row leakage)."""
+    net = WaveFunctionElectron(sites=4, electrons=2, rngs=nnx.Rngs(30), **_HYPERPARAMS)
+    all_configs = _all_configs(2, 4, 1)
+    batched = net(all_configs)
+    one_by_one = jnp.concatenate([net(all_configs[index : index + 1]) for index in range(all_configs.shape[0])])
+    assert jnp.allclose(batched, one_by_one)
+
+
+def test_call_jit_matches_eager() -> None:
+    net = WaveFunctionElectron(sites=4, electrons=2, rngs=nnx.Rngs(31), **_HYPERPARAMS)
+    all_configs = _all_configs(2, 4, 1)
+    graphdef, state = nnx.split(net)
+    eager = net(all_configs)
+    jitted = jax.jit(lambda s, c: nnx.merge(graphdef, s)(c))(state, all_configs)
+    assert jnp.allclose(eager, jitted)
+
+
+def test_config_round_trip_identity() -> None:
+    net = WaveFunctionElectronUpDown(double_sites=6, spin_up=1, spin_down=1, rngs=nnx.Rngs(33), **_HYPERPARAMS)
+    configs, _ = net.generate_unique(9, key=jax.random.key(0))
+    site_values = net._config_to_site_values(configs)
+    round_tripped = net._site_values_to_config(site_values)
+    assert jnp.array_equal(configs, round_tripped)
+
+
+def test_generate_unique_subset_probability_bounded() -> None:
+    net = WaveFunctionElectron(sites=6, electrons=3, rngs=nnx.Rngs(34), **_HYPERPARAMS)
+    _, psi = net.generate_unique(3, key=jax.random.key(0))
+    total = float(jnp.sum(jnp.abs(psi) ** 2))
+    assert 0.0 < total < 1.0 + 1e-9
+
+
+def test_normal_qudit_physical_dim_four() -> None:
+    net = WaveFunctionNormal(
+        sites=3,
+        physical_dim=4,
+        embedding_dim=8,
+        heads_num=2,
+        feed_forward_dim=16,
+        depth=2,
+        tail_hidden_dim=8,
+        rngs=nnx.Rngs(35),
+    )
+    psi = net(_all_configs(4, 3, 2))
+    assert jnp.allclose(jnp.sum(jnp.abs(psi) ** 2), 1.0)

@@ -37,6 +37,23 @@ def test_normalize_handles_masked_states() -> None:
     assert jnp.allclose(probability[0, 1], 0.0)
 
 
+def test_normalize_batched_independent_rows() -> None:
+    """Each row normalises independently along the chosen axis."""
+    log_amplitude = jnp.array([[0.3, -1.2, 0.7], [2.0, 0.0, -0.5]])
+    normalized = normalize_log_amplitude(log_amplitude, axis=-1)
+    probability = jnp.sum(jnp.exp(2.0 * normalized), axis=-1)
+    assert jnp.allclose(probability, jnp.ones(2))
+
+
+def test_normalize_is_shift_by_constant() -> None:
+    """Normalisation subtracts a per-row constant, preserving amplitude ratios."""
+    log_amplitude = jnp.array([[0.3, -1.2, 0.7, 2.1]])
+    normalized = normalize_log_amplitude(log_amplitude, axis=-1)
+    difference = log_amplitude - normalized
+    # The subtracted quantity must be constant across the normalised axis.
+    assert jnp.allclose(difference, difference[:, :1])
+
+
 # ---- masks ----
 
 

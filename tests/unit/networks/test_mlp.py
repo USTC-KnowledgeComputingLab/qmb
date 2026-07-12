@@ -267,3 +267,69 @@ def test_gradient_flows_through_call() -> None:
     assert leaves
     assert all(bool(jnp.all(jnp.isfinite(leaf))) for leaf in leaves)
     assert any(float(jnp.sum(jnp.abs(leaf))) > 0.0 for leaf in leaves)
+
+
+# ---- amplitude invariances ----
+
+
+def test_call_batch_invariance() -> None:
+    """Amplitudes are independent of how configs are batched."""
+    net = WaveFunctionElectron(sites=4, electrons=2, hidden_size=(16,), rngs=nnx.Rngs(30))
+    all_configs = _all_configs(2, 4, 1)
+    batched = net(all_configs)
+    one_by_one = jnp.concatenate([net(all_configs[index : index + 1]) for index in range(all_configs.shape[0])])
+    assert jnp.allclose(batched, one_by_one)
+
+
+def test_call_jit_matches_eager() -> None:
+    """Amplitudes under jit equal eager evaluation."""
+    net = WaveFunctionElectron(sites=4, electrons=2, hidden_size=(16,), rngs=nnx.Rngs(31))
+    all_configs = _all_configs(2, 4, 1)
+    graphdef, state = nnx.split(net)
+    eager = net(all_configs)
+    jitted = jax.jit(lambda s, c: nnx.merge(graphdef, s)(c))(state, all_configs)
+    assert jnp.allclose(eager, jitted)
+
+
+def test_born_distribution_independent_of_phase() -> None:
+    """Perturbing only the phase network leaves |psi|^2 unchanged but changes psi."""
+    net = WaveFunctionElectron(sites=4, electrons=2, hidden_size=(16,), rngs=nnx.Rngs(32))
+    all_configs = _all_configs(2, 4, 1)
+    baseline = net(all_configs)
+
+    graphdef, state = nnx.split(net)
+
+    def bump_phase(path: tuple, leaf: jax.Array) -> jax.Array:
+        if any("phase" in str(key) for key in path):
+            return leaf + 1.0
+        return leaf
+
+    perturbed_state = jax.tree_util.tree_map_with_path(bump_phase, state)
+    perturbed = nnx.merge(graphdef, perturbed_state)(all_configs)
+
+    assert jnp.allclose(jnp.abs(baseline) ** 2, jnp.abs(perturbed) ** 2)
+    assert jnp.max(jnp.abs(baseline - perturbed)) > 1e-6
+
+
+def test_config_round_trip_identity() -> None:
+    """decode(encode(config)) == config for the internal site-value mapping."""
+    net = WaveFunctionElectronUpDown(double_sites=6, spin_up=1, spin_down=1, hidden_size=(8,), rngs=nnx.Rngs(33))
+    configs, _ = net.generate_unique(9, key=jax.random.key(0))
+    site_values = net._config_to_site_values(configs)
+    round_tripped = net._site_values_to_config(site_values)
+    assert jnp.array_equal(configs, round_tripped)
+
+
+def test_generate_unique_subset_probability_bounded() -> None:
+    """A strict subset of the support carries total probability < 1."""
+    net = WaveFunctionElectron(sites=6, electrons=3, hidden_size=(8,), rngs=nnx.Rngs(34))
+    _, psi = net.generate_unique(3, key=jax.random.key(0))
+    total = float(jnp.sum(jnp.abs(psi) ** 2))
+    assert 0.0 < total < 1.0 + 1e-9
+
+
+def test_normal_qudit_physical_dim_four() -> None:
+    """Normal variant normalises for a non-binary qudit (physical_dim=4)."""
+    net = WaveFunctionNormal(sites=3, physical_dim=4, hidden_size=(8,), rngs=nnx.Rngs(35))
+    psi = net(_all_configs(4, 3, 2))
+    assert jnp.allclose(jnp.sum(jnp.abs(psi) ** 2), 1.0)
