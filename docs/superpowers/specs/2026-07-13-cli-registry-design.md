@@ -69,67 +69,67 @@ action_class_dict["haar"] = Haar
 
 ## 5. 构造机制
 
-### 5.1 Model: `build_from_ref`
+### 5.1 Model: `build_model`
 
 ```python
-def build_from_ref(ref: SubConfigRef | None, subsystem: str, *,
-                   config_dict: dict, impl_dict: dict) -> typing.Any:
+def build_model(ref: SubConfigRef | None) -> typing.Any:
     if ref is None:
         return None
-    if ref.name not in config_dict:
+    if ref.name not in model_config_dict:
         try:
-            importlib.import_module(f"qmp.{subsystem}.{ref.name}")
+            importlib.import_module(f"qmp.models.{ref.name}")
         except ModuleNotFoundError:
-            raise KeyError(f"Unknown {subsystem}: {ref.name!r}") from None
-    cfg_cls = config_dict[ref.name]
+            raise KeyError(f"Unknown model: {ref.name!r}") from None
+    cfg_cls = model_config_dict[ref.name]
     cfg = dacite.from_dict(cfg_cls, ref.params)
-    impl_cls = impl_dict[ref.name]
+    impl_cls = model_dict[ref.name]
     return impl_cls(cfg)
 ```
 
-放置位置：`src/qmp/utility/_build.py`。
+放置位置：`src/qmp/models/_build.py`。
 
 ### 5.2 Network: `model.create_network`
 
-network 无全局注册表。每个 model 类拥有 `network_dict`（支持哪些 network config 类型）和 `create_network(name, params)` 方法。
+network 无全局注册表。每个 model 类拥有 `network_dict`（支持哪些 network config 类型）；network config dataclass 含 `create(self, model, *, rngs)` 工厂方法。model 的 `create_network` 是薄包装：
 
 ```python
 # models/hubbard.py
-class Model(ModelProto[ModelConfig]):
-    network_dict: ClassVar = {"mlp": MLPConfig}
+def create_network(self, name: str, params: dict, *, rngs: nnx.Rngs) -> NetworkProto:
+    cfg_cls = self.network_dict[name]
+    cfg = dacite.from_dict(cfg_cls, params)
+    return cfg.create(self, rngs=rngs)
+```
 
-    def create_network(self, name: str, params: dict) -> typing.Any:
-        cfg_cls = self.network_dict[name]
-        cfg = dacite.from_dict(cfg_cls, params)
+network config 是纯数据 + 工厂：
+
+```python
+@dataclass
+class MlpUpDownConfig:
+    hidden_size: list[int] = field(default_factory=lambda: [512])
+    ordering: int = 1
+
+    def create(self, model: Model, *, rngs: nnx.Rngs) -> NetworkProto:
         return WaveFunctionElectron(
-            sites=self.n_qubits // 2,
-            n_electrons=self.n_electrons,
-            **dataclasses.asdict(cfg),
+            double_sites=model.n_qubits,
+            spin_up=model.electron_number // 2,
+            hidden_size=tuple(self.hidden_size),
+            ordering=self.ordering,
+            rngs=rngs,
         )
 ```
 
-```python
-# networks/mlp.py — network config 纯数据
-@dataclass
-class MLPConfig:
-    hidden: list[int] = field(default_factory=lambda: [512, 512])
-    activation: str = "gelu"
-```
-
-action 调用: `network = model.create_network(ref.name, ref.params)`。
+action 调用: `network = model.create_network(ref.name, ref.params, rngs=nnx.Rngs(42))`。
 
 ## 6. Action 实现示例
 
 ```python
-# algorithms/demo.py
 class Demo:
     def __init__(self, config: DemoConfig):
-        self._model = build_from_ref(config.model, "models",
-                                      config_dict=model_config_dict, impl_dict=model_dict)
+        self._model = build_model(config.model)
         self._network = None
         if config.network is not None and self._model is not None:
             self._network = self._model.create_network(
-                config.network.name, config.network.params
+                config.network.name, config.network.params, rngs=nnx.Rngs(42)
             )
 ```
 
@@ -152,7 +152,7 @@ def main():
 |------|---------|------|
 | 配置 schema | 隐式 | dataclass |
 | model/network 位置 | 顶层 | 下沉到 action params |
-| model 构造 | context 统一构造 | `build_from_ref` (全局 registry) |
+| model 构造 | context 统一构造 | `build_model(ref)` (全局 registry) |
 | network 构造 | `config.create(model)` 在 network 侧 | `model.create_network(name, params)` 在 model 侧 |
 | 依赖 | hydra-core, omegaconf, dacite | tyro, omegaconf, dacite |
 

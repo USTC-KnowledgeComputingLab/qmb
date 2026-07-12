@@ -25,7 +25,7 @@ src/qmp/                # 源码 (src layout)
 ├── hamiltonian/         # Hamiltonian 子系统
 │   └── fermi_hamiltonian/  # Fermi Hamiltonian CUDA kernel + Python wrapper
 ├── networks/            # MLP / Transformers / MPS (Flax)
-├── algorithms/          # HAAR / VMC / Lanczos
+├── algorithms/          # Action registry + demo
 ├── models/              # FCIDUMP / Hubbard / Ising / PySCF / OpenFermion
 ├── plugins/             # 第三方框架接口
 └── utility/             # bitspack, losses, context, optimizer
@@ -39,7 +39,7 @@ old/                     # 旧 main 分支参考代码 (如存在)
 
 `qmp --config config.yaml` 入口在 `__main__.py`。YAML 仅含 `action` 顶层节；model/network 作为 `SubConfigRef(name, params)` 嵌入 action params。
 
-三个子系统各自维护双注册表（`xxx_config_dict` + `xxx_class_dict`），模块导入时自注册。action 内部通过 `qmp.utility._build.build_from_ref` 从 `SubConfigRef` 构造 model/network 实例。
+model 和 action 维护双注册表（`xxx_config_dict` + `xxx_class_dict`），模块导入时自注册。action 内部通过 `qmp.models._build.build_model` 从 `SubConfigRef` 构造 model；network 通过 `model.create_network(name, params, *, rngs)` 构造（network 不设全局注册表，由 model 内聚）。
 
 ## 类型注解约定
 

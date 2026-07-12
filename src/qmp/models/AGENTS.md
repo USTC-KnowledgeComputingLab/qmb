@@ -52,7 +52,8 @@ model 通过在模块底部执行 `model_dict[name] = Model` 和 `model_config_d
 | `find_topk_relative_configs(configs_i, psi_i, count_selected, configs_exclude=None)` | Top-K 最重要新构型 |
 | `show_config(config) -> str` | 位编码构型渲染为可读字符串 |
 | `ref_energy: float` | 参考能量 |
-| `network_dict: ClassVar[dict]` | 兼容网络注册表 (本轮空) |
+| `network_dict: ClassVar[dict]` | 兼容网络注册表（`{"mlp/u1": MLPConfig, ...}`） |
+| `create_network(name, params, *, rngs)` | 构造 network 实例（dacite → cfg.create(model, rngs)） |
 
 `configs_exclude` 为 `None` 时，转发层填入空数组 `jnp.zeros((0, n_qubytes), uint8)`；`FermiHamiltonian` 的这两个方法要求该参数非可选。
 
