@@ -159,7 +159,7 @@ for each term_t:
 
 **预过滤** (planned, not yet in active path): Python 层预处理阶段将 term 按 `flip_mask[t] == 0` 分为对角 term 和非对角 term。`compute_diagonal_within_subspace` 可仅遍历对角 term 子集（diagonal terms 通常只占 1-10% 总 term 数），减少 90-99% 无用线程。当前实现中 `_diag_idx` 已计算并写入日志，但 kernel 仍遍历全部 terms 并在运行时检查 `flip_mask[t] == 0`。
 
-**归约** (当前实现): 每个 (term, config) 对直接 `atomicAdd` 到全局 `psi[i]`，无 shared-memory 中间归约。规划中可用 shared memory 做 intra-block 归约以减少 diagonal term 密集时的 L2 原子争用，但当前实现为求正确性简单起见直接原子累加。
+**块级归约** (planned, not yet implemented): 每个 block 的多个线程可能对同一个 `psi[i]` 累加贡献。设计上先用 shared memory 做 intra-block 归约，最后每个 block 只发一次 `atomicAdd`，在 diagonal term 密集时（多 term 对应同一 config）显著减少 L2 原子争用。当前实现为求正确性简单起见，每个 (term, config) 对直接 `atomicAdd` 到全局 `psi[i]`（初版的 `s_re[i % 256]` shared-mem 归约在 `B > 256` / 多 block 时有 slot 串号 bug，已移除）。
 
 #### 3.2.2 `apply_within_subspace` — 稀疏 H·psi 投影
 
@@ -187,9 +187,9 @@ for each term_t:
         atomicAdd(psi_j[idx,1], contribution.imag)
 ```
 
-**方向选择**: `direction` 由调用方指定语义 (forward = H, backward = H^†)，据此固定 src/dst——forward: src=configs_i、dst=configs_j、输出 `[B_j,2]`；backward: src=configs_j、dst=configs_i、输出 `[B_i,2]`，系数取共轭。当前实现不自动挑 B_i/B_j 中较小侧遍历 (规划中的线程数优化，尚未实现)。
+**方向选择**: `direction` 由调用方指定语义 (forward = H, backward = H^†)，据此固定 src/dst——forward: src=configs_i、dst=configs_j、输出 `[B_j,2]`；backward: src=configs_j、dst=configs_i、输出 `[B_i,2]`，系数取共轭。规划中可进一步在 forward/backward 内部选 B_i/B_j 中较小侧遍历以最小化总线程数 (planned, not yet implemented——当前按 direction 固定 src 侧遍历)。
 
-- **`__ldg()` 读取**: coef / psi / parity_const 及 n_qubytes>8 的逐字节路径通过 `__ldg()` 走 read-only cache；config 字节与 n_qubytes≤8 的 uint64 快路径为普通读取 (非全部只读输入)。
+- **`__ldg()` 读取** (partially implemented): 设计上所有只读输入 (configs, 各 mask, parity_const, coef) 都通过 `__ldg()` 走 read-only cache 减少 L1 压力。当前实现中 coef / psi / parity_const 及 n_qubytes>8 的逐字节路径已用 `__ldg()`；config 字节与 n_qubytes≤8 的 uint64 快路径 (`load_u64` 经 `__builtin_memcpy`) 仍为普通读取，尚未全面覆盖。
 - **哈希表跨调用缓存** (planned, placeholder only): 若 `configs_j` 在多轮迭代中不变（Lanczos 内循环常见），复用哈希表省 50-200ms 构建时间。`FermiHamiltonian` 中已预留 `_apply_hash_cache` 字段，但 CUDA kernel 当前每次调用均重新构建哈希表。
 - **哈希函数**: 使用 wyhash。config bytes 非随机（受占据数、自旋守恒约束），wyhash 使用 multiply-and-xor 链 (wymum) 对结构化 occupation-number 字节有良好扩散。
 

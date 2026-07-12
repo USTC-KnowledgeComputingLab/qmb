@@ -4,15 +4,15 @@ Template parameter n_qubytes = ceil(n_qubits/8).
 Compiled per-n_qubytes by nvcc -DN_QUBYTES=X.
 XLA FFI handlers for four operations.
 
-Implementation notes:
+Implementation notes (see spec 3.2 for the full design, incl. planned items):
 - if constexpr (n_qubytes <= 8): pack masks into a single uint64_t register path
   (loaded via __builtin_memcpy — config/mask rows are only 1-byte aligned, so a
   reinterpret_cast to uint64_t* would be a misaligned/UB load).
-- __ldg() read-only cache is used for coef/psi/parity_const and the n_qubytes>8
-  byte-loop path (not for config bytes nor the uint64 fast path).
-- diagonal_term accumulates directly to global psi via atomicAdd (no shared-mem
-  reduction).
 - inline wyhash64 + custom linear-probing hash tables (no cuCollections).
+- __ldg() read-only cache: partially applied (coef/psi/parity_const and the
+  n_qubytes>8 byte-loop path). Full coverage of all read-only inputs is planned.
+- diagonal_term: currently accumulates directly to global psi via atomicAdd.
+  Shared-memory block reduction (spec 3.2.1) is planned, not yet implemented.
 */
 
 #include <algorithm>

@@ -80,7 +80,7 @@ CUDA kernel 与纯 JAX fallback 两套实现，输出语义一致 (`allclose` �
 
 ### compute_diagonal_within_subspace
 
-对每个 config 累加不改变构型的哈密顿项系数 (对角元)。`flip_mask[t] == 0` 项才对对角有贡献。CUDA: grid-stride 遍历 (term, config) 对，直接 `atomicAdd` 到全局 `psi`。
+对每个 config 累加不改变构型的哈密顿项系数 (对角元)。`flip_mask[t] == 0` 项才对对角有贡献。CUDA: grid-stride 遍历 (term, config) 对，直接 `atomicAdd` 到全局 `psi`(shared-memory 块级归约见 spec §3.2.1，计划中未实现)。
 
 ### apply_within_subspace
 
