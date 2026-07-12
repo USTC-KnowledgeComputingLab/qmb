@@ -1390,10 +1390,10 @@ Spec §5.1-5.3 要求但 plan 初始未包含的测试（均已添加）:
 - `test_forward_backward_value_consistency`: ✓ `test_apply_within_forward_backward`, `test_apply_within_hermitian`, `test_cuda_apply_forward`, `test_cuda_apply_backward`
 - `test_diagonal_hand_calculated`: ✓ `test_diagonal_exact`, `test_diagonal_all_hopping`, `test_diagonal_complex_coef`, `test_diagonal_only_hamiltonian`
 - `test_hash_table_overflow_retry`: ✓ `test_cuda_overflow_retry`
-- `test_cuda_apply_within`, `test_cuda_find_all`, `test_cuda_find_topk`: ✓ 全部 24 个 CUDA 测试
-- 总计: 96 tests (fermi_hamiltonian 子系统: prepare 32 + fallback 40 + cuda 24; 全仓库 143)
+- `test_cuda_apply_within`, `test_cuda_find_all`, `test_cuda_find_topk`: ✓ 全部 30 个 CUDA 测试
+- 总计: fermi_hamiltonian 子系统 prepare 32 + fallback 40 + cuda 30 = 102; 全仓库 149
 
-> **CUDA 状态更新 (后续修复轮次)**: Task 8 初版的 CUDA kernel 无法编译且三个操作为未完成 stub，`_try_register_ffi` 的 try/except 静默吞掉编译失败使 GPU 上实际跑的是 fallback (测试形同虚设)。后续修复轮次已让 CUDA 完整可用: 修全部编译错误、补 apply/find_all/find_topk 的哈希表构建与结果回填、修 misaligned uint64 读取 (改 `__builtin_memcpy`)、去除 SIMT 自旋死锁、atomicMax-double 改 CAS-loop。24 个 CUDA 测试现在真正在 GPU 上执行并与 fallback `allclose` 对拍通过 (需 `jax_enable_x64`, 见 `tests/conftest.py`)。
+> **CUDA 状态更新 (后续修复轮次)**: Task 8 初版的 CUDA kernel 无法编译且三个操作为未完成 stub，`_try_register_ffi` 的 try/except 静默吞掉编译失败使 GPU 上实际跑的是 fallback (测试形同虚设)。后续修复轮次已让 CUDA 完整可用: 修全部编译错误、补 apply/find_all/find_topk 的哈希表构建与结果回填、修 misaligned uint64 读取 (改 `__builtin_memcpy`)、去除 SIMT 自旋死锁、atomicMax-double 改 CAS-loop。30 个 CUDA 测试现在真正在 GPU 上执行并与 fallback `allclose` 对拍通过 (需 `jax_enable_x64`, 见 `tests/conftest.py`)。
 
 ### 补充 5: AGENTS.md 名称确认与更新（Task 1）
 
