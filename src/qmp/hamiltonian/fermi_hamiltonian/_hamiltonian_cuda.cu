@@ -180,7 +180,7 @@ template <int n_qubytes>
 struct __align__(8) apply_hash_slot {
     uint8_t key[n_qubytes];
     int64_t index;
-    bool    occupied;
+    int     occupied;
 };
 
 template <int n_qubytes>
@@ -199,6 +199,29 @@ __device__ int64_t apply_hash_lookup(
         idx = (idx + 1) % cap;
     }
     return -1;
+}
+
+template <int n_qubytes>
+__global__ void apply_build_table_kernel(
+    int64_t B_dst, const uint8_t* dst_configs,
+    apply_hash_slot<n_qubytes>* table, int64_t cap)
+{
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t stride = blockDim.x * gridDim.x;
+    for (int64_t i = idx; i < B_dst; i += stride) {
+        const uint8_t* cfg = dst_configs + i * n_qubytes;
+        uint64_t h = wyhash64<n_qubytes>(cfg, 0);
+        int64_t slot_idx = h % cap;
+        for (int64_t p = 0; p < cap; ++p) {
+            apply_hash_slot<n_qubytes>& slot = table[slot_idx];
+            if (atomicCAS(&slot.occupied, 0, 1) == 0) {
+                for (int q = 0; q < n_qubytes; ++q) slot.key[q] = cfg[q];
+                slot.index = i;
+                break;
+            }
+            slot_idx = (slot_idx + 1) % cap;
+        }
+    }
 }
 
 template <int n_qubytes>
@@ -249,27 +272,37 @@ ffi::Error ApplyWithinSubspaceImpl(
     ffi::Buffer<ffi::U8> create_mask, ffi::Buffer<ffi::U8> annihilate_mask,
     ffi::Buffer<ffi::U8> flip_mask, ffi::Buffer<ffi::U8> parity_mask,
     ffi::Buffer<ffi::U8> parity_const, ffi::Buffer<ffi::F64> coef,
-    int32_t direction, ffi::ResultBuffer<ffi::F64> psi_j)
+    int64_t direction, ffi::ResultBuffer<ffi::F64> psi_j)
 {
     auto cd = configs_i.dimensions();
     int64_t B_i = cd[0], Q = cd[1];
     int64_t B_j = configs_j.dimensions()[0];
     int64_t T = create_mask.dimensions()[0];
-    int64_t B_src = (direction == 0) ? B_i : B_j;
     (void)Q;
-    // Build hash table from dst configs
-    int64_t hash_cap = static_cast<int64_t>((direction == 0 ? B_j : B_i) / 0.6);
+    // direction 0: src = configs_i, dst = configs_j
+    // direction 1: src = configs_j, dst = configs_i (H^dagger)
+    const uint8_t* src_configs = (direction == 0) ? configs_i.typed_data() : configs_j.typed_data();
+    const uint8_t* dst_configs = (direction == 0) ? configs_j.typed_data() : configs_i.typed_data();
+    int64_t B_src = (direction == 0) ? B_i : B_j;
+    int64_t B_dst = (direction == 0) ? B_j : B_i;
+    // Build linear-probe hash table over dst configs (key -> dst index).
+    int64_t hash_cap = static_cast<int64_t>(B_dst / 0.6) + 1;
     apply_hash_slot<N_QUBYTES>* d_table = nullptr;
     cudaMallocAsync(&d_table, hash_cap * sizeof(apply_hash_slot<N_QUBYTES>), stream);
     cudaMemsetAsync(d_table, 0, hash_cap * sizeof(apply_hash_slot<N_QUBYTES>), stream);
-    // Build table (simple linear probe insert)
-    // ... build on host or in a separate small kernel
+    {
+        int bt = 256, bb = static_cast<int>(std::min<int64_t>((B_dst + 255) / 256, 65535LL));
+        if (bb < 1) bb = 1;
+        apply_build_table_kernel<N_QUBYTES><<<bb, bt, 0, stream>>>(B_dst, dst_configs, d_table, hash_cap);
+    }
     cudaMemsetAsync(psi_j->untyped_data(), 0, psi_j->size_bytes(), stream);
     int64_t total = T * B_src;
     int threads = 256, blocks = static_cast<int>(std::min<int64_t>((total + 255) / 256, 65535LL));
+    if (blocks < 1) blocks = 1;
+    const double* src_psi = reinterpret_cast<const double*>(psi_i.typed_data());
     apply_within_kernel<N_QUBYTES><<<blocks, threads, 0, stream>>>(
-        B_src, B_j, T, total,
-        configs_i.typed_data(), reinterpret_cast<const double*>(psi_i.typed_data()),
+        B_src, B_dst, T, total,
+        src_configs, src_psi,
         create_mask.typed_data(), annihilate_mask.typed_data(),
         flip_mask.typed_data(), parity_mask.typed_data(),
         parity_const.typed_data(), reinterpret_cast<const double*>(coef.typed_data()),
@@ -285,7 +318,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(ApplyWithinSubspace, ApplyWithinSubspaceImpl,
     .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::U8>>()
     .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::U8>>()
     .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::U8>>()
-    .Arg<ffi::Buffer<ffi::F64>>().Attr<int32_t>("direction")
+    .Arg<ffi::Buffer<ffi::F64>>().Attr<int64_t>("direction")
     .Ret<ffi::Buffer<ffi::F64>>());
 
 /* ── find_all_relative_configs handler ── */
@@ -365,7 +398,7 @@ ffi::Error FindAllRelativeConfigsImpl(
     ffi::Buffer<ffi::U8> create_mask, ffi::Buffer<ffi::U8> annihilate_mask,
     ffi::Buffer<ffi::U8> flip_mask, ffi::Buffer<ffi::U8> parity_mask,
     ffi::Buffer<ffi::U8> parity_const, ffi::Buffer<ffi::F64> coef,
-    int32_t hash_capacity,
+    int64_t hash_capacity,
     ffi::ResultBuffer<ffi::U8> new_configs, ffi::ResultBuffer<ffi::F64> psi_j,
     ffi::ResultBuffer<ffi::S32> count)
 {
@@ -406,7 +439,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FindAllRelativeConfigs, FindAllRelativeConfigsImpl
     .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::U8>>()
     .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::U8>>()
     .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::U8>>()
-    .Arg<ffi::Buffer<ffi::F64>>().Attr<int32_t>("hash_capacity")
+    .Arg<ffi::Buffer<ffi::F64>>().Attr<int64_t>("hash_capacity")
     .Ret<ffi::Buffer<ffi::U8>>().Ret<ffi::Buffer<ffi::F64>>().Ret<ffi::Buffer<ffi::S32>>());
 
 /* ── find_topk_relative_configs handler ── */
@@ -479,7 +512,7 @@ __global__ void find_topk_kernel(
 ffi::Error FindTopKRelativeConfigsImpl(
     cudaStream_t stream,
     ffi::Buffer<ffi::U8> configs_i, ffi::Buffer<ffi::F64> psi_i,
-    int32_t count_selected, ffi::Buffer<ffi::U8> configs_exclude,
+    int64_t count_selected, ffi::Buffer<ffi::U8> configs_exclude,
     ffi::Buffer<ffi::U8> create_mask, ffi::Buffer<ffi::U8> annihilate_mask,
     ffi::Buffer<ffi::U8> flip_mask, ffi::Buffer<ffi::U8> parity_mask,
     ffi::Buffer<ffi::U8> parity_const, ffi::Buffer<ffi::F64> coef,
@@ -517,7 +550,7 @@ ffi::Error FindTopKRelativeConfigsImpl(
 XLA_FFI_DEFINE_HANDLER_SYMBOL(FindTopKRelativeConfigs, FindTopKRelativeConfigsImpl,
     ffi::Ffi::Bind().Ctx<ffi::PlatformStream<cudaStream_t>>()
     .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::F64>>()
-    .Attr<int32_t>("count_selected").Arg<ffi::Buffer<ffi::U8>>()
+    .Attr<int64_t>("count_selected").Arg<ffi::Buffer<ffi::U8>>()
     .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::U8>>()
     .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::U8>>()
     .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::F64>>()

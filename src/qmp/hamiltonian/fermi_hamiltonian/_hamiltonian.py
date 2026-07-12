@@ -145,9 +145,11 @@ class FermiHamiltonian:
         *,
         direction: int = 0,
     ) -> jax.Array:
-        batch_size_j = configs_j.shape[0]
         target = f"qmp_apply_within_subspace_{self._n_qubytes}"
-        inputs = (
+        # Output lives on the destination subspace: forward (dir 0) -> configs_j,
+        # backward (dir 1, H^dagger) -> configs_i.
+        batch_size_dst = configs_j.shape[0] if direction == 0 else configs_i.shape[0]
+        operands = (
             self._to_dev(configs_i),
             self._to_dev(psi_i),
             self._to_dev(configs_j),
@@ -157,15 +159,14 @@ class FermiHamiltonian:
             self._to_dev(self._parity_mask),
             self._to_dev(self._parity_const),
             self._to_dev(self._coef),
-            direction,
         )
         if self._use_cuda:
             return jax.ffi.ffi_call(
                 target,
-                jax.ShapeDtypeStruct((batch_size_j, 2), jnp.float64),
+                jax.ShapeDtypeStruct((batch_size_dst, 2), jnp.float64),
                 vmap_method="broadcast_all",
-            )(*inputs)
-        return _jax_apply_within_subspace(*inputs)
+            )(*operands, direction=int(direction))
+        return _jax_apply_within_subspace(*operands, direction)
 
     def find_all_relative_configs(
         self,
