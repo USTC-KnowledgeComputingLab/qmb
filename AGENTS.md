@@ -96,7 +96,7 @@ old/                     # 旧 main 分支参考代码 (如存在)
 
 - 自回归神经量子态 (ANQS)：`__call__(configs)->psi`、`generate`、`generate_unique`，契约见 `networks/_protocol.py`。
 - `generate` / `generate_unique` 显式接收 PRNG `key`（随机性无内部状态）。
-- 生成循环用 unrolled Python for（sites 静态已知，逐 site 展开；`__call__` 与每步前向用 `nnx.jit` 修饰，`generate*` 因动态形状不整体 jit）；共享逻辑（mask、归一化、Gumbel top-K 束搜索）在 `networks/_autoregressive.py`。
+- 生成循环用 unrolled Python for（sites 静态已知，逐 site 展开；所有静态形状函数显式 jit，`generate*` 因动态形状不整体 jit）；共享逻辑（mask、归一化、Gumbel top-K 束搜索）在 `networks/_autoregressive.py`。
 - Gumbel 条件截断用有限 sentinel + `jnp.where` 护栏防 `inf - inf = NaN`。
 
 ## 开发命令

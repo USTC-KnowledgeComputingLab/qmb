@@ -18,9 +18,21 @@ Hamiltonian 子系统负责量子多体哈密顿量的存储和操作。核心�
 
 ### JAX FFI → shard_map 兼容
 
-每个 CUDA kernel 通过 `XLA_FFI_DEFINE_HANDLER_SYMBOL` 导出，`jax.ffi.register_ffi_target` 注册，`jax.ffi.ffi_call` 调用。所有 kernel 采用 `vmap_method="broadcast_all"` 模式——kernel 自身处理 batch 维度，避免 XLA 插入 scan 循环。
+每个 CUDA kernel 通过 `XLA_FFI_DEFINE_HANDLER_SYMBOL` 导出，`jax.ffi.register_ffi_target` 注册，`jax.ffi.ffi_call` 调用。所有 kernel 采用 `vmap_method="broadcast_all"` 模式——kernel 自身处理 batch 维度，避免 XLA 插入 scan 循环。标量参数 (`direction`, `hash_capacity`, `count_selected`) 通过 FFI **attribute** (`.Attr<int64_t>`) 传入，Python 侧作为关键字实参传 Python `int`。
 
-`shard_map` 分发逻辑: configs 按 batch 维度分片，Hamiltonian 参数 (`create_mask` 等) 在 mesh 上复制 (`P(None)`)。每个设备独立执行 FFI kernel，无需跨设备通信。
+> **多卡 shard_map: 计划中，尚未实现。** 当前 `devices` 参数只取 `devices[0]` 落到单设备 (`jax.device_put`)；没有 `Mesh`/`shard_map`/`all_gather` 代码。多节点多卡是后续独立工作。
+
+### 后端选择: 由设备平台决定
+
+后端 (CUDA kernel vs 纯 JAX fallback) **由目标设备平台决定**，而非静默探测:
+
+- `devices` 解析出目标 `jax.Device`。平台为 `gpu` (CUDA) → 编译并注册 CUDA FFI; 平台为 `cpu` → 直接用 JAX fallback，不触碰 nvcc。
+- CUDA 设备下若编译/注册失败则**抛异常**，绝不静默退化到 fallback (那会掉进慢几个数量级、在真实规模跑不动的路径)。
+- CUDA kernel 缓冲区声明为 F64/complex128。使用方必须启用 `jax.config.update("jax_enable_x64", True)`，否则 `jnp` 把 float64 截断成 float32，FFI 操作数 dtype 不匹配 (测试通过 `tests/conftest.py` 全局启用)。
+
+### 数值精度
+
+`coef` 为 f64、psi 为 (real, imag) f64 对 (对应 complex128)。CUDA 与 fallback 因 `atomicAdd` 顺序非确定而非 bit-exact，回归测试用 `allclose(rtol=1e-12)`。
 
 ### CPU/CUDA 对称性
 
@@ -64,28 +76,34 @@ parity     = parity_const[t] ^ (popcount(parity_mask[t] & config) & 1)
 
 ## 四个核心操作
 
+CUDA kernel 与纯 JAX fallback 两套实现，输出语义一致 (`allclose` 验证)。
+
 ### compute_diagonal_within_subspace
 
-对每个 config 累加不改变构型的哈密顿项系数 (对角元)。`flip_mask[t] == 0` 项才对对角有贡献。
+对每个 config 累加不改变构型的哈密顿项系数 (对角元)。`flip_mask[t] == 0` 项才对对角有贡献。CUDA: grid-stride 遍历 (term, config) 对，直接 `atomicAdd` 到全局 `psi`。
 
 ### apply_within_subspace
 
-稀疏矩阵乘向量: H · psi_i 投影到 configs_j 张成的子空间。支持 forward/backward 双向遍历。使用自定义线性探测哈希表（`apply_hash_slot`，wyhash64 哈希）进行 O(1) config 查找——二分查找在 GPU 上因 warp divergence 不可行。
+稀疏矩阵乘向量: H · psi_i 投影到 configs_j 张成的子空间。支持 forward/backward 双向 (`direction`，backward 即 H^†，交换 src/dst 且系数取共轭)。CUDA: 先用一个 build kernel 把目标子空间 configs 插入线性探测哈希表 (key=config, value=index)，再由主 kernel 查表 O(1) 定位并 `atomicAdd`。
 
 ### find_all_relative_configs
 
-全部列举新构型 + 去重 + 振幅累加。使用自定义 CAS 哈希表（`findall_slot`，wyhash64 哈希）预分配，probe 上限 100。排除集使用线性扫描。
+全部列举新构型 + 去重 + 振幅累加。CUDA: 自定义 CAS 哈希表 (`findall_slot`, wyhash64)，claim-then-publish 插入 (无自旋，避免 SIMT 死锁)，probe 上限 100 触发 overflow 标记; 随后 collect kernel 线性扫描把非空 slot 压缩回填到 `new_configs`/`psi_j` 并计数。排除集线性扫描。
 
 ### find_topk_relative_configs
 
-Top-K 选择。使用自定义哈希表（`topk_slot`）单次 kernel 处理全部 terms，最终 Python/JAX 层 `argsort` 排序取 top K。
+Top-K 选择。CUDA: 容量 2K 的哈希表按构型聚合权重 (`atomicMax`，double 用 CAS-loop 实现)；collect kernel 导出完整 (keys, weights) 表，Python 层 `argsort` 取 top-K——与 fallback 完全一致。
 
-## 多节点多卡
+## 多节点多卡 (计划中)
+
+以下为**设计目标，当前代码尚未实现**。落地需要独立的 spec 与 GPU 验证:
 
 - configs 按 batch 维度 `shard_map` 分片
 - Hamiltonian 参数 (create_mask, annihilate_mask 等) 在所有设备上复制
 - 每个设备独立执行 FFI kernel，无需跨设备通信
 - 全局归并 (如 find_topk_relative_configs 的 top-K) 通过 `jax.lax.all_gather` 实现
+
+当前实现为单设备: `FermiHamiltonian` 仅使用 `devices[0]`。
 
 ## 其他子系统引用
 

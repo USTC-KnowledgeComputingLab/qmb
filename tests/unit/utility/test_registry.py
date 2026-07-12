@@ -17,6 +17,6 @@ def test_model_config_dict_is_dict() -> None:
 
 def test_model_dict_registration() -> None:
     """Adding and removing from model_dict works."""
-    model_dict["_test_entry"] = type("_TestModel", (), {})  # ty: ignore — test-only dummy
+    model_dict["_test_entry"] = type("_TestModel", (), {})
     assert model_dict["_test_entry"] is not None
     del model_dict["_test_entry"]

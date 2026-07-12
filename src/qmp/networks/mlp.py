@@ -91,6 +91,7 @@ class _Linear(nnx.Module):
                 in_features, out_features, kernel_init=kernel_init, param_dtype=jnp.float64, rngs=rngs
             )
 
+    @nnx.jit
     def __call__(self, inputs: Array) -> Array:
         if self.linear is None:
             batch_size = inputs.shape[0]
@@ -130,6 +131,7 @@ class _MLP(nnx.Module):
             ]
         )
 
+    @nnx.jit
     def __call__(self, inputs: Array) -> Array:
         activation = inputs
         last_index = len(self.layers) - 1
@@ -182,9 +184,11 @@ class _MLPWaveFunctionBase(nnx.Module):
 
     # ---- shared helpers ----
 
+    @nnx.jit
     def _ordering_array(self) -> Array:
         return jnp.asarray(self._ordering, dtype=jnp.int32)
 
+    @nnx.jit
     def _ordering_reversed_array(self) -> Array:
         return jnp.asarray(self._ordering_reversed, dtype=jnp.int32)
 
@@ -289,17 +293,21 @@ class WaveFunctionNormal(_MLPWaveFunctionBase):
         self._ordering_reversed = _invert_permutation(self._ordering)
         self._build_networks(hidden_size, rngs)
 
+    @nnx.jit
     def _config_to_site_values(self, configs: Array) -> Array:
         site_values = unpack_int(configs, size=self._bit_size, last_dim=self.sites).astype(jnp.int32)
         return site_values[:, self._ordering_reversed_array()]
 
+    @nnx.jit
     def _site_values_to_config(self, site_values: Array) -> Array:
         user_order = site_values[:, self._ordering_array()]
         return pack_int(user_order.astype(jnp.uint8), size=self._bit_size)
 
+    @nnx.jit
     def _site_values_to_features(self, site_values: Array) -> Array:
         return site_values.astype(jnp.float64)
 
+    @functools.partial(nnx.jit, static_argnums=(2,))
     def _local_mask(self, prefix_values: Array, site_index: int) -> Array:
         batch_size = prefix_values.shape[0]
         return jnp.ones((batch_size, self.states_per_site), dtype=bool)
@@ -326,17 +334,21 @@ class WaveFunctionElectron(_MLPWaveFunctionBase):
         self._ordering_reversed = _invert_permutation(self._ordering)
         self._build_networks(hidden_size, rngs)
 
+    @nnx.jit
     def _config_to_site_values(self, configs: Array) -> Array:
         site_values = unpack_int(configs, size=1, last_dim=self.sites).astype(jnp.int32)
         return site_values[:, self._ordering_reversed_array()]
 
+    @nnx.jit
     def _site_values_to_config(self, site_values: Array) -> Array:
         user_order = site_values[:, self._ordering_array()]
         return pack_int(user_order.astype(jnp.uint8), size=1)
 
+    @nnx.jit
     def _site_values_to_features(self, site_values: Array) -> Array:
         return site_values.astype(jnp.float64)
 
+    @functools.partial(nnx.jit, static_argnums=(2,))
     def _local_mask(self, prefix_values: Array, site_index: int) -> Array:
         electron_count = jnp.sum(prefix_values, axis=1)
         sites_filled = jnp.asarray(site_index)
@@ -372,12 +384,14 @@ class WaveFunctionElectronUpDown(_MLPWaveFunctionBase):
         self._ordering_reversed = _invert_permutation(self._ordering)
         self._build_networks(hidden_size, rngs)
 
+    @nnx.jit
     def _config_to_site_values(self, configs: Array) -> Array:
         qubits = unpack_int(configs, size=1, last_dim=self.double_sites).astype(jnp.int32)
         pairs = qubits.reshape(qubits.shape[0], self.sites, 2)
         site_values = pairs[:, :, 0] * 2 + pairs[:, :, 1]
         return site_values[:, self._ordering_reversed_array()]
 
+    @nnx.jit
     def _site_values_to_config(self, site_values: Array) -> Array:
         user_order = site_values[:, self._ordering_array()]
         up = user_order // 2
@@ -385,12 +399,14 @@ class WaveFunctionElectronUpDown(_MLPWaveFunctionBase):
         qubits = jnp.stack([up, down], axis=-1).reshape(user_order.shape[0], self.double_sites)
         return pack_int(qubits.astype(jnp.uint8), size=1)
 
+    @nnx.jit
     def _site_values_to_features(self, site_values: Array) -> Array:
         up = site_values // 2
         down = site_values % 2
         interleaved = jnp.stack([up, down], axis=-1).reshape(site_values.shape[0], site_values.shape[1] * 2)
         return interleaved.astype(jnp.float64)
 
+    @functools.partial(nnx.jit, static_argnums=(2,))
     def _local_mask(self, prefix_values: Array, site_index: int) -> Array:
         up_count = jnp.sum(prefix_values // 2, axis=1)
         down_count = jnp.sum(prefix_values % 2, axis=1)

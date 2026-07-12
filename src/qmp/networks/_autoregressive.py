@@ -15,6 +15,7 @@ local probability of a state is ``exp(2 * log_amplitude)``.
 
 from __future__ import annotations
 
+import functools
 from typing import TYPE_CHECKING
 
 import jax
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
 INVALID_LOG_PROB = -1e30
 
 
+@functools.partial(jax.jit, static_argnames=("axis",))
 def normalize_log_amplitude(log_amplitude: Array, axis: int = -1) -> Array:
     """Normalise conditional log-amplitudes so the local probabilities sum to 1.
 
@@ -49,11 +51,13 @@ def normalize_log_amplitude(log_amplitude: Array, axis: int = -1) -> Array:
     return log_amplitude - log_partition
 
 
+@jax.jit
 def apply_mask(log_amplitude: Array, mask: Array) -> Array:
     """Set forbidden states to a log-amplitude of ``-inf`` (zero probability)."""
     return jnp.where(mask, log_amplitude, -jnp.inf)
 
 
+@functools.partial(jax.jit, static_argnames=("total_sites", "target_occupied"))
 def _spin_mask(occupied_count: Array, sites_filled: Array, total_sites: int, target_occupied: int) -> Array:
     """Single-species conservation mask over states ``(hole=0, particle=1)``.
 
@@ -68,6 +72,7 @@ def _spin_mask(occupied_count: Array, sites_filled: Array, total_sites: int, tar
     return jnp.stack([can_add_hole, can_add_particle], axis=-1)
 
 
+@functools.partial(jax.jit, static_argnames=("total_sites", "electrons"))
 def mask_electron(electron_count: Array, sites_filled: Array, total_sites: int, electrons: int) -> Array:
     """Total electron-number conservation mask.
 
@@ -90,6 +95,7 @@ def mask_electron(electron_count: Array, sites_filled: Array, total_sites: int, 
     return _spin_mask(electron_count, sites_filled, total_sites, electrons)
 
 
+@functools.partial(jax.jit, static_argnames=("total_sites", "spin_up", "spin_down"))
 def mask_electron_up_down(
     up_count: Array,
     down_count: Array,
@@ -109,6 +115,7 @@ def mask_electron_up_down(
     return up_ok[..., :, None] & down_ok[..., None, :]
 
 
+@jax.jit
 def gumbel_topk_step(
     parent_log_prob: Array,
     parent_perturbed: Array,
@@ -160,6 +167,7 @@ def gumbel_topk_step(
     return child_log_prob, child_perturbed, child_valid
 
 
+@jax.jit
 def sample_step(conditional_log_prob: Array, key: Array) -> Array:
     """Sample one next state per batch element from ``exp(2 * conditional_log_prob)``.
 

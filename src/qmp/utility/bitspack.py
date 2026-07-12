@@ -7,8 +7,10 @@ the least significant bits of the resulting byte.
 
 from __future__ import annotations
 
+import functools
 from typing import TYPE_CHECKING
 
+import jax
 import jax.numpy as jnp
 
 if TYPE_CHECKING:
@@ -17,6 +19,7 @@ if TYPE_CHECKING:
 _VALID_SIZES = (1, 2, 4, 8)
 
 
+@functools.partial(jax.jit, static_argnames=("size",))
 def pack_int(array: Array, size: int) -> Array:
     """Combine multiple small integers along the last dimension into bytes.
 
@@ -56,6 +59,7 @@ def pack_int(array: Array, size: int) -> Array:
     return packed
 
 
+@functools.partial(jax.jit, static_argnames=("size", "last_dim"))
 def unpack_int(array: Array, size: int, last_dim: int) -> Array:
     """Unpack bytes into multiple small integers along a new last dimension.
 

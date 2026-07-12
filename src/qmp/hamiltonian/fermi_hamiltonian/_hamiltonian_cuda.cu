@@ -11,6 +11,7 @@ Optimizations:
 - wyhash64 inline hash function
 */
 
+#include <algorithm>
 #include <cstdint>
 #include <cuda_runtime.h>
 
@@ -18,22 +19,32 @@ Optimizations:
 
 namespace ffi = xla::ffi;
 
-/* ── Device utilities with static dispatch ── */
+/* ── Device utilities with static dispatch ──
+
+   The n_qubytes <= 8 fast path packs the (up to 8) mask bytes into a single
+   uint64_t. Input pointers (configs/masks rows) are only 1-byte aligned because
+   rows are n_qubytes bytes apart, so we must NOT reinterpret_cast a uint8_t* to
+   uint64_t* (misaligned load == UB / CUDA_ERROR_MISALIGNED_ADDRESS). We copy
+   exactly n_qubytes bytes into a local via __builtin_memcpy instead. */
+
+template <int n_qubytes>
+__device__ inline uint64_t load_u64(const uint8_t* p)
+{
+    uint64_t v = 0;
+    __builtin_memcpy(&v, p, n_qubytes < 8 ? n_qubytes : 8);
+    return v;
+}
 
 template <int n_qubytes>
 __device__ bool is_applicable(
     const uint8_t* config, const uint8_t* cm, const uint8_t* am)
 {
     if constexpr (n_qubytes <= 8) {
-        const uint64_t* c64 = reinterpret_cast<const uint64_t*>(config);
-        const uint64_t* m64 = reinterpret_cast<const uint64_t*>(cm);
-        const uint64_t* a64 = reinterpret_cast<const uint64_t*>(am);
-        if ((*(c64) & *(m64)) != 0) return false;
-        if ((*(c64) & *(a64)) != *(a64)) return false;
-        for (int q = 8; q < n_qubytes; ++q) {
-            if ((config[q] & cm[q]) != 0) return false;
-            if ((config[q] & am[q]) != am[q]) return false;
-        }
+        uint64_t c = load_u64<n_qubytes>(config);
+        uint64_t m = load_u64<n_qubytes>(cm);
+        uint64_t a = load_u64<n_qubytes>(am);
+        if ((c & m) != 0) return false;
+        if ((c & a) != a) return false;
         return true;
     } else {
         for (int q = 0; q < n_qubytes; ++q) {
@@ -47,17 +58,8 @@ __device__ bool is_applicable(
 template <int n_qubytes>
 __device__ void apply_flip(uint8_t* dst, const uint8_t* src, const uint8_t* fm)
 {
-    if constexpr (n_qubytes <= 8) {
-        uint64_t* d64 = reinterpret_cast<uint64_t*>(dst);
-        const uint64_t* s64 = reinterpret_cast<const uint64_t*>(src);
-        const uint64_t* f64 = reinterpret_cast<const uint64_t*>(fm);
-        *d64 = *s64 ^ *f64;
-        for (int q = 8; q < n_qubytes; ++q)
-            dst[q] = src[q] ^ __ldg(fm + q);
-    } else {
-        for (int q = 0; q < n_qubytes; ++q)
-            dst[q] = __ldg(src + q) ^ __ldg(fm + q);
-    }
+    for (int q = 0; q < n_qubytes; ++q)
+        dst[q] = src[q] ^ fm[q];
 }
 
 template <int n_qubytes>
@@ -65,12 +67,9 @@ __device__ bool jw_parity(
     const uint8_t* config, const uint8_t* pm, uint8_t pc)
 {
     if constexpr (n_qubytes <= 8) {
-        const uint64_t* c64 = reinterpret_cast<const uint64_t*>(config);
-        const uint64_t* p64 = reinterpret_cast<const uint64_t*>(pm);
-        uint8_t p = pc ^ (__popcll(*(c64) & *(p64)) & 1);
-        for (int q = 8; q < n_qubytes; ++q)
-            p ^= __popc(static_cast<unsigned>(__ldg(pm + q) & __ldg(config + q))) & 1;
-        return p & 1;
+        uint64_t c = load_u64<n_qubytes>(config);
+        uint64_t p = load_u64<n_qubytes>(pm);
+        return pc ^ (__popcll(c & p) & 1);
     } else {
         uint8_t p = pc;
         for (int q = 0; q < n_qubytes; ++q)
@@ -99,6 +98,20 @@ __device__ uint64_t wyhash64(const uint8_t* key, uint64_t seed) {
     return a;
 }
 
+/* atomic max on double via CAS loop (valid for all doubles, unlike a raw
+   bit-pattern atomicMax which only works for non-negative values). */
+__device__ inline void atomic_max_double(double* addr, double val)
+{
+    unsigned long long* a = reinterpret_cast<unsigned long long*>(addr);
+    unsigned long long old = *a, assumed;
+    do {
+        double cur = __longlong_as_double(old);
+        if (cur >= val) break;
+        assumed = old;
+        old = atomicCAS(a, assumed, __double_as_longlong(val));
+    } while (assumed != old);
+}
+
 /* ── diagonal_term kernel with block-level reduction ── */
 
 template <int n_qubytes>
@@ -113,16 +126,11 @@ __global__ void diagonal_term_kernel(
     const double*  __restrict__ coef,
     double* __restrict__ psi)
 {
-    __shared__ double s_re[256];
-    __shared__ double s_im[256];
-    const int tid = threadIdx.x;
-    s_re[tid] = 0.0;
-    s_im[tid] = 0.0;
-    __syncthreads();
-
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t stride = blockDim.x * gridDim.x;
-    // Accumulate contributions per config to shared memory
+    // Grid-stride over (term, config) pairs; accumulate diagonal contributions
+    // directly to global psi via atomicAdd. Only terms with flip_mask == 0
+    // (i.e. that do not change the configuration) contribute to the diagonal.
     for (int64_t k = idx; k < total_pairs; k += stride) {
         int64_t t = k / B;
         int64_t i = k % B;
@@ -136,18 +144,8 @@ __global__ void diagonal_term_kernel(
         if (!is_diag) continue;
         bool parity = jw_parity<n_qubytes>(cfg, parity_mask + t * n_qubytes, __ldg(parity_const + t));
         double sign = parity ? -1.0 : 1.0;
-        // accumulate to per-config shared memory using atomicAdd
-        atomicAdd(&s_re[i % 256], sign * __ldg(coef + t * 2));
-        atomicAdd(&s_im[i % 256], sign * __ldg(coef + t * 2 + 1));
-    }
-    __syncthreads();
-
-    // write block-accumulated results to global
-    for (int i = tid; i < B; i += blockDim.x) {
-        if (s_re[i % 256] != 0.0 || s_im[i % 256] != 0.0) {
-            atomicAdd(psi + i * 2,     s_re[i % 256]);
-            atomicAdd(psi + i * 2 + 1, s_im[i % 256]);
-        }
+        atomicAdd(psi + i * 2,     sign * __ldg(coef + t * 2));
+        atomicAdd(psi + i * 2 + 1, sign * __ldg(coef + t * 2 + 1));
     }
 }
 
@@ -196,7 +194,7 @@ template <int n_qubytes>
 struct __align__(8) apply_hash_slot {
     uint8_t key[n_qubytes];
     int64_t index;
-    bool    occupied;
+    int     occupied;
 };
 
 template <int n_qubytes>
@@ -218,6 +216,29 @@ __device__ int64_t apply_hash_lookup(
 }
 
 template <int n_qubytes>
+__global__ void apply_build_table_kernel(
+    int64_t B_dst, const uint8_t* dst_configs,
+    apply_hash_slot<n_qubytes>* table, int64_t cap)
+{
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t stride = blockDim.x * gridDim.x;
+    for (int64_t i = idx; i < B_dst; i += stride) {
+        const uint8_t* cfg = dst_configs + i * n_qubytes;
+        uint64_t h = wyhash64<n_qubytes>(cfg, 0);
+        int64_t slot_idx = h % cap;
+        for (int64_t p = 0; p < cap; ++p) {
+            apply_hash_slot<n_qubytes>& slot = table[slot_idx];
+            if (atomicCAS(&slot.occupied, 0, 1) == 0) {
+                for (int q = 0; q < n_qubytes; ++q) slot.key[q] = cfg[q];
+                slot.index = i;
+                break;
+            }
+            slot_idx = (slot_idx + 1) % cap;
+        }
+    }
+}
+
+template <int n_qubytes>
 __global__ void apply_within_kernel(
     int64_t B_src, int64_t B_dst, int64_t T, int64_t total,
     const uint8_t* src_configs, const double* src_psi,
@@ -233,6 +254,7 @@ __global__ void apply_within_kernel(
         int64_t t = k / B_src;
         int64_t i = k % B_src;
         const uint8_t* sc = src_configs + i * n_qubytes;
+        const uint8_t* fm = flip_mask + t * n_qubytes;
         uint8_t check_c[n_qubytes];
         if (direction == 1) {
             apply_flip<n_qubytes>(check_c, sc, fm);
@@ -241,7 +263,6 @@ __global__ void apply_within_kernel(
         }
         if (!is_applicable<n_qubytes>(check_c, create_mask + t * n_qubytes, annihilate_mask + t * n_qubytes))
             continue;
-        const uint8_t* fm = flip_mask + t * n_qubytes;
         uint8_t new_c[n_qubytes];
         apply_flip<n_qubytes>(new_c, sc, fm);
         int64_t dst_idx = apply_hash_lookup<n_qubytes>(new_c, hash_table, hash_cap);
@@ -265,31 +286,41 @@ ffi::Error ApplyWithinSubspaceImpl(
     ffi::Buffer<ffi::U8> create_mask, ffi::Buffer<ffi::U8> annihilate_mask,
     ffi::Buffer<ffi::U8> flip_mask, ffi::Buffer<ffi::U8> parity_mask,
     ffi::Buffer<ffi::U8> parity_const, ffi::Buffer<ffi::F64> coef,
-    ffi::Attr<int32_t> direction, ffi::ResultBuffer<ffi::F64> psi_j)
+    int64_t direction, ffi::ResultBuffer<ffi::F64> psi_j)
 {
     auto cd = configs_i.dimensions();
     int64_t B_i = cd[0], Q = cd[1];
     int64_t B_j = configs_j.dimensions()[0];
     int64_t T = create_mask.dimensions()[0];
-    int64_t B_src = (*direction == 0) ? B_i : B_j;
     (void)Q;
-    // Build hash table from dst configs
-    int64_t hash_cap = static_cast<int64_t>((*direction == 0 ? B_j : B_i) / 0.6);
-    apply_hash_slot<n_qubytes>* d_table = nullptr;
-    cudaMallocAsync(&d_table, hash_cap * sizeof(apply_hash_slot<n_qubytes>), stream);
-    cudaMemsetAsync(d_table, 0, hash_cap * sizeof(apply_hash_slot<n_qubytes>), stream);
-    // Build table (simple linear probe insert)
-    // ... build on host or in a separate small kernel
+    // direction 0: src = configs_i, dst = configs_j
+    // direction 1: src = configs_j, dst = configs_i (H^dagger)
+    const uint8_t* src_configs = (direction == 0) ? configs_i.typed_data() : configs_j.typed_data();
+    const uint8_t* dst_configs = (direction == 0) ? configs_j.typed_data() : configs_i.typed_data();
+    int64_t B_src = (direction == 0) ? B_i : B_j;
+    int64_t B_dst = (direction == 0) ? B_j : B_i;
+    // Build linear-probe hash table over dst configs (key -> dst index).
+    int64_t hash_cap = static_cast<int64_t>(B_dst / 0.6) + 1;
+    apply_hash_slot<N_QUBYTES>* d_table = nullptr;
+    cudaMallocAsync(&d_table, hash_cap * sizeof(apply_hash_slot<N_QUBYTES>), stream);
+    cudaMemsetAsync(d_table, 0, hash_cap * sizeof(apply_hash_slot<N_QUBYTES>), stream);
+    {
+        int bt = 256, bb = static_cast<int>(std::min<int64_t>((B_dst + 255) / 256, 65535LL));
+        if (bb < 1) bb = 1;
+        apply_build_table_kernel<N_QUBYTES><<<bb, bt, 0, stream>>>(B_dst, dst_configs, d_table, hash_cap);
+    }
     cudaMemsetAsync(psi_j->untyped_data(), 0, psi_j->size_bytes(), stream);
     int64_t total = T * B_src;
     int threads = 256, blocks = static_cast<int>(std::min<int64_t>((total + 255) / 256, 65535LL));
+    if (blocks < 1) blocks = 1;
+    const double* src_psi = reinterpret_cast<const double*>(psi_i.typed_data());
     apply_within_kernel<N_QUBYTES><<<blocks, threads, 0, stream>>>(
-        B_src, B_j, T, total,
-        configs_i.typed_data(), reinterpret_cast<const double*>(psi_i.typed_data()),
+        B_src, B_dst, T, total,
+        src_configs, src_psi,
         create_mask.typed_data(), annihilate_mask.typed_data(),
         flip_mask.typed_data(), parity_mask.typed_data(),
         parity_const.typed_data(), reinterpret_cast<const double*>(coef.typed_data()),
-        d_table, hash_cap, *direction,
+        d_table, hash_cap, direction,
         reinterpret_cast<double*>(psi_j->typed_data()));
     cudaFreeAsync(d_table, stream);
     return ffi::Error::Success();
@@ -301,7 +332,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(ApplyWithinSubspace, ApplyWithinSubspaceImpl,
     .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::U8>>()
     .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::U8>>()
     .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::U8>>()
-    .Arg<ffi::Buffer<ffi::F64>>().Attr<int32_t>("direction")
+    .Arg<ffi::Buffer<ffi::F64>>().Attr<int64_t>("direction")
     .Ret<ffi::Buffer<ffi::F64>>());
 
 /* ── find_all_relative_configs handler ── */
@@ -311,7 +342,8 @@ struct __align__(8) findall_slot {
     uint8_t key[n_qubytes];
     double  real_val;
     double  imag_val;
-    bool    occupied;
+    int     occupied;
+    int     claimed;
 };
 
 template <int n_qubytes>
@@ -353,24 +385,48 @@ __global__ void find_all_kernel(
         int64_t slot_idx = h % cap;
         for (int64_t p = 0; p < cap && p < 100; ++p) {
             auto& slot = table[slot_idx];
-            if (!slot.occupied) {
-                if (atomicCAS((int*)&slot.occupied, 0, 1) == 0) {
-                    for (int q = 0; q < n_qubytes; ++q) slot.key[q] = new_c[q];
-                    slot.real_val = vr; slot.imag_val = vi;
-                    break;
-                }
-            }
-            bool match = true;
-            for (int q = 0; q < n_qubytes; ++q)
-                if (slot.key[q] != new_c[q]) { match = false; break; }
-            if (match) {
+            if (atomicCAS(&slot.occupied, 0, 1) == 0) {
+                // Claimed empty slot: publish key, then accumulate value.
+                for (int q = 0; q < n_qubytes; ++q) slot.key[q] = new_c[q];
+                __threadfence();
+                slot.claimed = 1;
                 atomicAdd(&slot.real_val, vr);
                 atomicAdd(&slot.imag_val, vi);
                 break;
             }
+            // Occupied by another thread. If it is still mid-publish (claimed==0)
+            // we cannot yet compare keys; skip to the next slot instead of
+            // spin-waiting (a warp-divergent spin deadlocks under SIMT).
+            if (slot.claimed) {
+                bool match = true;
+                for (int q = 0; q < n_qubytes; ++q)
+                    if (slot.key[q] != new_c[q]) { match = false; break; }
+                if (match) {
+                    atomicAdd(&slot.real_val, vr);
+                    atomicAdd(&slot.imag_val, vi);
+                    break;
+                }
+            }
             slot_idx = (slot_idx + 1) % cap;
             if (p == 99) { *overflow = 1; }
         }
+    }
+}
+
+template <int n_qubytes>
+__global__ void find_all_collect_kernel(
+    const findall_slot<n_qubytes>* table, int64_t cap,
+    uint8_t* new_configs, double* psi_j, int* out_count)
+{
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t stride = blockDim.x * gridDim.x;
+    for (int64_t s = idx; s < cap; s += stride) {
+        const findall_slot<n_qubytes>& slot = table[s];
+        if (!slot.occupied) continue;
+        int out = atomicAdd(out_count, 1);
+        for (int q = 0; q < n_qubytes; ++q) new_configs[out * n_qubytes + q] = slot.key[q];
+        psi_j[out * 2] = slot.real_val;
+        psi_j[out * 2 + 1] = slot.imag_val;
     }
 }
 
@@ -381,25 +437,29 @@ ffi::Error FindAllRelativeConfigsImpl(
     ffi::Buffer<ffi::U8> create_mask, ffi::Buffer<ffi::U8> annihilate_mask,
     ffi::Buffer<ffi::U8> flip_mask, ffi::Buffer<ffi::U8> parity_mask,
     ffi::Buffer<ffi::U8> parity_const, ffi::Buffer<ffi::F64> coef,
-    ffi::Attr<int32_t> hash_capacity,
+    int64_t hash_capacity,
     ffi::ResultBuffer<ffi::U8> new_configs, ffi::ResultBuffer<ffi::F64> psi_j,
     ffi::ResultBuffer<ffi::S32> count)
 {
     auto cd = configs_i.dimensions();
     int64_t B = cd[0], Q = cd[1]; (void)Q;
     int64_t T = create_mask.dimensions()[0];
-    int64_t cap = *hash_capacity;
+    int64_t cap = hash_capacity;
     int64_t total = T * B;
     // allocate hash table
-    findall_slot<n_qubytes>* d_table = nullptr;
+    findall_slot<N_QUBYTES>* d_table = nullptr;
     int* d_overflow = nullptr;
-    cudaMallocAsync(&d_table, cap * sizeof(findall_slot<n_qubytes>), stream);
+    int* d_count = nullptr;
+    cudaMallocAsync(&d_table, cap * sizeof(findall_slot<N_QUBYTES>), stream);
     cudaMallocAsync(&d_overflow, sizeof(int), stream);
-    cudaMemsetAsync(d_table, 0, cap * sizeof(findall_slot<n_qubytes>), stream);
+    cudaMallocAsync(&d_count, sizeof(int), stream);
+    cudaMemsetAsync(d_table, 0, cap * sizeof(findall_slot<N_QUBYTES>), stream);
     cudaMemsetAsync(d_overflow, 0, sizeof(int), stream);
+    cudaMemsetAsync(d_count, 0, sizeof(int), stream);
     cudaMemsetAsync(new_configs->untyped_data(), 0, new_configs->size_bytes(), stream);
     cudaMemsetAsync(psi_j->untyped_data(), 0, psi_j->size_bytes(), stream);
     int threads = 256, blocks = static_cast<int>(std::min<int64_t>((total + 255) / 256, 65535LL));
+    if (blocks < 1) blocks = 1;
     find_all_kernel<N_QUBYTES><<<blocks, threads, 0, stream>>>(
         B, T, total,
         configs_i.typed_data(), reinterpret_cast<const double*>(psi_i.typed_data()),
@@ -408,11 +468,18 @@ ffi::Error FindAllRelativeConfigsImpl(
         parity_const.typed_data(), reinterpret_cast<const double*>(coef.typed_data()),
         configs_exclude.typed_data(), configs_exclude.dimensions()[0],
         d_table, cap, d_overflow);
-    // Post-kernel: linear scan to collect non-empty slots
-    *reinterpret_cast<int32_t*>(count->untyped_data()) = 0;
-    // ... deferred to host-side scan
+    // Compact non-empty slots into the output buffers and count distinct configs.
+    int cblocks = static_cast<int>(std::min<int64_t>((cap + 255) / 256, 65535LL));
+    if (cblocks < 1) cblocks = 1;
+    find_all_collect_kernel<N_QUBYTES><<<cblocks, 256, 0, stream>>>(
+        d_table, cap,
+        reinterpret_cast<uint8_t*>(new_configs->untyped_data()),
+        reinterpret_cast<double*>(psi_j->untyped_data()),
+        d_count);
+    cudaMemcpyAsync(count->untyped_data(), d_count, sizeof(int), cudaMemcpyDeviceToDevice, stream);
     cudaFreeAsync(d_table, stream);
     cudaFreeAsync(d_overflow, stream);
+    cudaFreeAsync(d_count, stream);
     return ffi::Error::Success();
 }
 
@@ -422,7 +489,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FindAllRelativeConfigs, FindAllRelativeConfigsImpl
     .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::U8>>()
     .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::U8>>()
     .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::U8>>()
-    .Arg<ffi::Buffer<ffi::F64>>().Attr<int32_t>("hash_capacity")
+    .Arg<ffi::Buffer<ffi::F64>>().Attr<int64_t>("hash_capacity")
     .Ret<ffi::Buffer<ffi::U8>>().Ret<ffi::Buffer<ffi::F64>>().Ret<ffi::Buffer<ffi::S32>>());
 
 /* ── find_topk_relative_configs handler ── */
@@ -431,7 +498,8 @@ template <int n_qubytes>
 struct __align__(8) topk_slot {
     uint8_t key[n_qubytes];
     double  weight;
-    bool    occupied;
+    int     occupied;
+    int     claimed;
 };
 
 template <int n_qubytes>
@@ -473,18 +541,22 @@ __global__ void find_topk_kernel(
         int64_t slot_idx = h % cap;
         for (int64_t p = 0; p < cap && p < 100; ++p) {
             auto& slot = table[slot_idx];
-            if (!slot.occupied) {
-                if (atomicCAS((int*)&slot.occupied, 0, 1) == 0) {
-                    for (int q = 0; q < n_qubytes; ++q) slot.key[q] = new_c[q];
-                    slot.weight = weight;
-                    break;
-                }
+            if (atomicCAS(&slot.occupied, 0, 1) == 0) {
+                // We claimed an empty slot: publish key then weight.
+                for (int q = 0; q < n_qubytes; ++q) slot.key[q] = new_c[q];
+                __threadfence();
+                atomic_max_double(&slot.weight, weight);
+                break;
             }
+            // Slot already claimed by someone. It may still be mid-publish; the
+            // key compare below can spuriously fail, in which case we probe on.
+            // A duplicate insertion at worst wastes a slot (cap = 2*K covers it)
+            // and does not change the top-K weights after collection.
             bool match = true;
             for (int q = 0; q < n_qubytes; ++q)
                 if (slot.key[q] != new_c[q]) { match = false; break; }
             if (match) {
-                atomicMax((unsigned long long*)&slot.weight, __double_as_longlong(weight));
+                atomic_max_double(&slot.weight, weight);
                 break;
             }
             slot_idx = (slot_idx + 1) % cap;
@@ -492,31 +564,49 @@ __global__ void find_topk_kernel(
     }
 }
 
+template <int n_qubytes>
+__global__ void find_topk_collect_kernel(
+    const topk_slot<n_qubytes>* table, int64_t cap,
+    uint8_t* out_keys, double* out_weights)
+{
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t stride = blockDim.x * gridDim.x;
+    for (int64_t s = idx; s < cap; s += stride) {
+        const topk_slot<n_qubytes>& slot = table[s];
+        // Unoccupied slots keep weight 0 and zero key; they sort to the bottom.
+        out_weights[s] = slot.occupied ? slot.weight : 0.0;
+        for (int q = 0; q < n_qubytes; ++q)
+            out_keys[s * n_qubytes + q] = slot.occupied ? slot.key[q] : 0;
+    }
+}
+
 ffi::Error FindTopKRelativeConfigsImpl(
     cudaStream_t stream,
     ffi::Buffer<ffi::U8> configs_i, ffi::Buffer<ffi::F64> psi_i,
-    ffi::Attr<int32_t> count_selected, ffi::Buffer<ffi::U8> configs_exclude,
+    int64_t count_selected, ffi::Buffer<ffi::U8> configs_exclude,
     ffi::Buffer<ffi::U8> create_mask, ffi::Buffer<ffi::U8> annihilate_mask,
     ffi::Buffer<ffi::U8> flip_mask, ffi::Buffer<ffi::U8> parity_mask,
     ffi::Buffer<ffi::U8> parity_const, ffi::Buffer<ffi::F64> coef,
-    ffi::ResultBuffer<ffi::U8> new_configs)
+    ffi::ResultBuffer<ffi::U8> table_keys, ffi::ResultBuffer<ffi::F64> table_weights)
 {
     auto cd = configs_i.dimensions();
     int64_t B = cd[0], Q = cd[1]; (void)Q;
     int64_t T = create_mask.dimensions()[0];
-    int64_t K = *count_selected;
+    int64_t K = count_selected;
     int64_t cap = K * 2;
     int64_t total = T * B;
-    cudaMemsetAsync(new_configs->untyped_data(), 0, new_configs->size_bytes(), stream);
+    cudaMemsetAsync(table_keys->untyped_data(), 0, table_keys->size_bytes(), stream);
+    cudaMemsetAsync(table_weights->untyped_data(), 0, table_weights->size_bytes(), stream);
     // allocate table + weight
-    topk_slot<n_qubytes>* d_table = nullptr;
+    topk_slot<N_QUBYTES>* d_table = nullptr;
     double* d_min = nullptr;
-    cudaMallocAsync(&d_table, cap * sizeof(topk_slot<n_qubytes>), stream);
+    cudaMallocAsync(&d_table, cap * sizeof(topk_slot<N_QUBYTES>), stream);
     cudaMallocAsync(&d_min, sizeof(double), stream);
-    cudaMemsetAsync(d_table, 0, cap * sizeof(topk_slot<n_qubytes>), stream);
+    cudaMemsetAsync(d_table, 0, cap * sizeof(topk_slot<N_QUBYTES>), stream);
     double zero = 0.0;
     cudaMemcpyAsync(d_min, &zero, sizeof(double), cudaMemcpyHostToDevice, stream);
     int threads = 256, blocks = static_cast<int>(std::min<int64_t>((total + 255) / 256, 65535LL));
+    if (blocks < 1) blocks = 1;
     find_topk_kernel<N_QUBYTES><<<blocks, threads, 0, stream>>>(
         B, T, 0, total,
         configs_i.typed_data(), reinterpret_cast<const double*>(psi_i.typed_data()),
@@ -525,6 +615,12 @@ ffi::Error FindTopKRelativeConfigsImpl(
         parity_const.typed_data(), reinterpret_cast<const double*>(coef.typed_data()),
         configs_exclude.typed_data(), configs_exclude.dimensions()[0],
         d_table, cap, d_min);
+    int cblocks = static_cast<int>(std::min<int64_t>((cap + 255) / 256, 65535LL));
+    if (cblocks < 1) cblocks = 1;
+    find_topk_collect_kernel<N_QUBYTES><<<cblocks, 256, 0, stream>>>(
+        d_table, cap,
+        reinterpret_cast<uint8_t*>(table_keys->untyped_data()),
+        reinterpret_cast<double*>(table_weights->untyped_data()));
     cudaFreeAsync(d_table, stream);
     cudaFreeAsync(d_min, stream);
     return ffi::Error::Success();
@@ -533,8 +629,8 @@ ffi::Error FindTopKRelativeConfigsImpl(
 XLA_FFI_DEFINE_HANDLER_SYMBOL(FindTopKRelativeConfigs, FindTopKRelativeConfigsImpl,
     ffi::Ffi::Bind().Ctx<ffi::PlatformStream<cudaStream_t>>()
     .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::F64>>()
-    .Attr<int32_t>("count_selected").Arg<ffi::Buffer<ffi::U8>>()
+    .Attr<int64_t>("count_selected").Arg<ffi::Buffer<ffi::U8>>()
     .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::U8>>()
     .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::U8>>()
     .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::F64>>()
-    .Ret<ffi::Buffer<ffi::U8>>());
+    .Ret<ffi::Buffer<ffi::U8>>().Ret<ffi::Buffer<ffi::F64>>());

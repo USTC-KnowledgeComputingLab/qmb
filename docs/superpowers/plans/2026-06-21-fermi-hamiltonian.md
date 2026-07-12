@@ -751,28 +751,25 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _try_register_ffi(n_qubytes: int) -> bool:
-    """Attempt to load and register CUDA FFI targets for the given n_qubytes.
-    Called per FermiHamiltonian instance, not at module level, because
-    different instances can have different n_qubits → different N_QUBYTES.
+def _register_ffi(n_qubytes: int) -> None:
+    """Compile + register CUDA FFI targets for n_qubytes. Raises on failure.
+
+    Called per FermiHamiltonian instance (different n_qubits → different
+    N_QUBYTES). Only invoked when the target device is a CUDA GPU, so any
+    failure is a genuine environment error and must NOT be silently downgraded
+    to the (much slower) JAX fallback.
     """
-    try:
-        from ._hamiltonian_cuda_loader import load_cuda_module
-        lib = load_cuda_module(n_qubytes=n_qubytes)
-        targets = {
-            f"qmp_compute_diagonal_within_subspace_{n_qubytes}": "ComputeDiagonalWithinSubspace",
-            f"qmp_apply_within_subspace_{n_qubytes}": "ApplyWithinSubspace",
-            f"qmp_find_all_relative_configs_{n_qubytes}": "FindAllRelativeConfigs",
-            f"qmp_find_topk_relative_configs_{n_qubytes}": "FindTopKRelativeConfigs",
-        }
-        for name, sym in targets.items():
-            handler = getattr(lib, sym)
-            jax.ffi.register_ffi_target(name, jax.ffi.pycapsule(handler), platform="CUDA")
-        logger.info("CUDA FFI targets registered for n_qubytes=%d.", n_qubytes)
-        return True
-    except Exception:
-        logger.info("CUDA FFI targets not available; using pure JAX fallback.")
-        return False
+    lib = load_cuda_module(n_qubytes=n_qubytes)
+    targets = {
+        f"qmp_compute_diagonal_within_subspace_{n_qubytes}": "ComputeDiagonalWithinSubspace",
+        f"qmp_apply_within_subspace_{n_qubytes}": "ApplyWithinSubspace",
+        f"qmp_find_all_relative_configs_{n_qubytes}": "FindAllRelativeConfigs",
+        f"qmp_find_topk_relative_configs_{n_qubytes}": "FindTopKRelativeConfigs",
+    }
+    for name, sym in targets.items():
+        handler = getattr(lib, sym)
+        jax.ffi.register_ffi_target(name, jax.ffi.pycapsule(handler), platform="CUDA")
+    logger.info("CUDA FFI targets registered for n_qubytes=%d.", n_qubytes)
 
 
 class FermiHamiltonian:
@@ -801,7 +798,11 @@ class FermiHamiltonian:
         self._parity_mask = self._parity_mask[order]
         self._parity_const = self._parity_const[order]
         self._coef = self._coef[order]
-        self._use_cuda = _try_register_ffi(self._n_qubytes)
+        # Backend follows device platform: gpu -> CUDA kernel (raise on compile
+        # failure); anything else -> pure JAX fallback (never touch nvcc).
+        self._use_cuda = self._device.platform == "gpu"
+        if self._use_cuda:
+            _register_ffi(self._n_qubytes)
         logger.info("FermiHamiltonian: %d terms, %d qubits, cuda=%s",
                      int(self._coef.shape[0]), n_qubits, self._use_cuda)
 
