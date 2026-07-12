@@ -12,8 +12,6 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from qmp.models._model import ModelProto
 
-from qmp.models._model import model_dict  # noqa: F401 — re-export for convenience
-
 
 @runtime_checkable
 class ActionProto(Protocol):

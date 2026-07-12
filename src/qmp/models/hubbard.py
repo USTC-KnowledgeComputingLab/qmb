@@ -6,6 +6,7 @@ import dataclasses
 import logging
 from typing import TYPE_CHECKING, ClassVar
 
+import dacite
 import jax
 import jax.numpy as jnp
 
@@ -143,6 +144,11 @@ class Model(ModelProto[ModelConfig]):
         exclude = jnp.zeros((0, n_qubytes), dtype=jnp.uint8) if configs_exclude is None else configs_exclude
         return self.hamiltonian.find_topk_relative_configs(configs_i, psi_i, count_selected, exclude)
 
+    def create_network(self, name: str, params: dict, *, rngs: nnx.Rngs) -> NetworkProto:
+        cfg_cls = self.network_dict[name]
+        cfg = dacite.from_dict(cfg_cls, params)  # ty: ignore
+        return cfg.create(self, rngs=rngs)
+
     def show_config(self, config: jax.Array) -> str:
         bits = "".join(f"{int(byte):08b}"[::-1] for byte in config)
         rows = []
@@ -177,7 +183,7 @@ model_config_dict["hubbard"] = ModelConfig
 class MlpUpDownConfig:
     """MLP network with spin-up/spin-down electron-number conservation."""
 
-    hidden_size: tuple[int, ...] = (512,)
+    hidden_size: list[int] = dataclasses.field(default_factory=lambda: [512])
     ordering: int = 1
 
     def create(self, model: Model, *, rngs: nnx.Rngs) -> NetworkProto:
@@ -187,7 +193,7 @@ class MlpUpDownConfig:
             double_sites=model.n_qubits,
             spin_up=model.electron_number // 2,
             spin_down=model.electron_number - model.electron_number // 2,
-            hidden_size=self.hidden_size,
+            hidden_size=self.hidden_size if isinstance(self.hidden_size, tuple) else tuple(self.hidden_size),
             ordering=self.ordering,
             rngs=rngs,
         )
@@ -200,7 +206,7 @@ Model.network_dict["mlp/u1u1"] = MlpUpDownConfig
 class MlpElectronConfig:
     """MLP network with total electron-number conservation."""
 
-    hidden_size: tuple[int, ...] = (512,)
+    hidden_size: list[int] = dataclasses.field(default_factory=lambda: [512])
     ordering: int = 1
 
     def create(self, model: Model, *, rngs: nnx.Rngs) -> NetworkProto:
@@ -209,7 +215,7 @@ class MlpElectronConfig:
         return MlpWaveFunctionElectron(
             sites=model.n_qubits,
             electrons=model.electron_number,
-            hidden_size=self.hidden_size,
+            hidden_size=self.hidden_size if isinstance(self.hidden_size, tuple) else tuple(self.hidden_size),
             ordering=self.ordering,
             rngs=rngs,
         )

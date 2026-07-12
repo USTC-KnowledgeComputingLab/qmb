@@ -10,4 +10,7 @@
 ## Action config 约定
 
 每个 action config 包含 ``model: SubConfigRef | None`` 和 ``network: SubConfigRef | None`` 字段。
-``None`` 表示该 action 不需要对应子系统。构造实例使用 ``qmp.utility._build.build_from_ref`` helper。
+``None`` 表示该 action 不需要对应子系统。
+
+- Model 构造: ``qmp.models._build.build_model(ref)``
+- Network 构造: ``model.create_network(ref.name, ref.params, *, rngs)``

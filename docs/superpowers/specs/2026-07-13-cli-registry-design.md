@@ -28,153 +28,120 @@ action:
         hidden: [512, 512]
 ```
 
-顶层仅一个 `action` 节。`model` 和 `network` 下沉为 action params 内的 `SubConfigRef`，由每个 action 自行声明是否需要。`common` 节取消，种子/设备等字段由各 action config 自行决定是否包含。
+顶层仅一个 `action` 节。`model` 和 `network` 下沉为 action params 内的 `SubConfigRef`。
 
 ### 2.2 CLI 入口 (`__main__.py`)
 
-```python
-import argparse, importlib, logging, typing
-from dataclasses import dataclass, field
-import tyro
-from omegaconf import OmegaConf
-
-@dataclass
-class ActionCLI:
-    name: str = "demo"
-    params: dict[str, typing.Any] = field(default_factory=dict)
-
-@dataclass
-class ConfigCLI:
-    action: ActionCLI = field(default_factory=lambda: ActionCLI(name="demo"))
-
-def main():
-    pre = argparse.ArgumentParser(add_help=False)
-    pre.add_argument("--config", type=str, default=None)
-    known, remaining = pre.parse_known_args()
-    defaults = ConfigCLI()
-    if known.config:
-        raw = OmegaConf.load(known.config)
-        plain = OmegaConf.to_container(raw, resolve=True)
-        assert isinstance(plain, dict)
-        defaults.action = ActionCLI(**plain.get("action", {}))
-    cli = tyro.cli(ConfigCLI, default=defaults, args=remaining)
-    run_action(cli.action)
-```
-
-tyro 只负责 CLI override（`--action.name haar --action.params.sampling_count=2048`），YAML 加载由 omegaconf 完成（支持 `${}` 插值）。
-
-### 2.3 优先级链
-
-```
-CLI args > YAML config > dataclass defaults
-```
+tyro 只负责 CLI override，YAML 加载由 omegaconf 完成（支持 `${}` 插值）。优先级: `CLI args > YAML > dataclass defaults`。
 
 ## 3. 子系统引用 (`SubConfigRef`)
 
 ```python
-from dataclasses import dataclass, field
-import typing
-
 @dataclass
 class SubConfigRef:
-    """Reference from an action config to a subsystem (model/network)."""
     name: str
     params: dict[str, typing.Any] = field(default_factory=dict)
 ```
 
-action config 包含 `model: SubConfigRef | None` 和 `network: SubConfigRef | None`。为 `None` 时表示该 action 不需要该子系统。
+action config 包含 `model: SubConfigRef | None` 和 `network: SubConfigRef | None`。
 
 ## 4. Registry 注册表
 
-三个子系统各自维护一对注册表：Config + Impl。模块导入时自注册。
+model 和 action 各自维护双注册表（Config + Impl）。**network 不设全局注册表——由 model 内聚。**
 
-| 子系统 | Config 注册表 | Impl 注册表 | 所在包 |
-|--------|-------------|-----------|--------|
-| model | `model_config_dict` | `model_dict` | `qmp.models._model` |
-| network | `network_config_dict` | `network_class_dict` | `qmp.networks._registry` |
-| action | `action_config_dict` | `action_class_dict` | `qmp.algorithms._registry` |
+| 子系统 | Config 注册表 | Impl 注册表 |
+|--------|-------------|-----------|
+| model | `model_config_dict[name] = ConfigClass` | `model_dict[name] = ImplClass` |
+| network | `model.network_dict[name] = ConfigClass` (per-model) | model 内部管理 |
+| action | `action_config_dict[name] = ConfigClass` | `action_class_dict[name] = ImplClass` |
 
-各模块注册模式：
+各模块自注册：
 
 ```python
-# qmp.models.hubbard.py
-from ._model import ModelProto, model_config_dict, model_dict
-
+# models/hubbard.py
 model_dict["hubbard"] = Model
 model_config_dict["hubbard"] = ModelConfig
-```
 
-```python
-# qmp.algorithms.haar.py
-from ._registry import action_config_dict, action_class_dict
-
+# algorithms/haar.py
 action_config_dict["haar"] = HaarConfig
 action_class_dict["haar"] = Haar
 ```
 
-```python
-# qmp.networks.mlp.py
-from ._registry import network_config_dict, network_class_dict
+## 5. 构造机制
 
-network_config_dict["mlp"] = MLPConfig
-network_class_dict["mlp"] = MLP
-```
-
-## 5. 构造 Helper (`_build_from_ref`)
+### 5.1 Model: `build_model`
 
 ```python
-import importlib, dacite, logging, typing
-
-def build_from_ref(ref: SubConfigRef, subsystem: str, *,
-                   config_dict: dict, impl_dict: dict) -> typing.Any:
-    """从 SubConfigRef 构造子系统实例。"""
-    if ref.name not in config_dict:
-        importlib.import_module(f"qmp.{subsystem}.{ref.name}")
-    cfg_cls = config_dict[ref.name]
+def build_model(ref: SubConfigRef | None) -> typing.Any:
+    if ref is None:
+        return None
+    if ref.name not in model_config_dict:
+        try:
+            importlib.import_module(f"qmp.models.{ref.name}")
+        except ModuleNotFoundError:
+            raise KeyError(f"Unknown model: {ref.name!r}") from None
+    cfg_cls = model_config_dict[ref.name]
     cfg = dacite.from_dict(cfg_cls, ref.params)
-    impl_cls = impl_dict[ref.name]
+    impl_cls = model_dict[ref.name]
     return impl_cls(cfg)
 ```
 
-放置位置：`src/qmp/utility/_build.py`（utility 用于共享工具）。
+放置位置：`src/qmp/models/_build.py`。
+
+### 5.2 Network: `model.create_network`
+
+network 无全局注册表。每个 model 类拥有 `network_dict`（支持哪些 network config 类型）；network config dataclass 含 `create(self, model, *, rngs)` 工厂方法。model 的 `create_network` 是薄包装：
+
+```python
+# models/hubbard.py
+def create_network(self, name: str, params: dict, *, rngs: nnx.Rngs) -> NetworkProto:
+    cfg_cls = self.network_dict[name]
+    cfg = dacite.from_dict(cfg_cls, params)
+    return cfg.create(self, rngs=rngs)
+```
+
+network config 是纯数据 + 工厂：
+
+```python
+@dataclass
+class MlpUpDownConfig:
+    hidden_size: list[int] = field(default_factory=lambda: [512])
+    ordering: int = 1
+
+    def create(self, model: Model, *, rngs: nnx.Rngs) -> NetworkProto:
+        return WaveFunctionElectron(
+            double_sites=model.n_qubits,
+            spin_up=model.electron_number // 2,
+            hidden_size=tuple(self.hidden_size),
+            ordering=self.ordering,
+            rngs=rngs,
+        )
+```
+
+action 调用: `network = model.create_network(ref.name, ref.params, rngs=nnx.Rngs(42))`。
 
 ## 6. Action 实现示例
 
 ```python
-# qmp.algorithms.demo.py
-from dataclasses import dataclass, field
-from qmp.algorithms._registry import action_config_dict, action_class_dict
-from qmp.models._model import model_config_dict, model_dict
-from qmp.utility._build import build_from_ref
-
-@dataclass
-class DemoConfig:
-    model: SubConfigRef | None = None
-    network: SubConfigRef | None = None
-    message: str = "Hello"
-
 class Demo:
     def __init__(self, config: DemoConfig):
-        self._model = build_from_ref(config.model, "models",
-                                      config_dict=model_config_dict, impl_dict=model_dict)
-        self._network = build_from_ref(config.network, "networks",
-                                        config_dict=network_config_dict, impl_dict=network_class_dict)
-
-    def run(self) -> None:
-        ...
-
-action_config_dict["demo"] = DemoConfig
-action_class_dict["demo"] = Demo
+        self._model = build_model(config.model)
+        self._network = None
+        if config.network is not None and self._model is not None:
+            self._network = self._model.create_network(
+                config.network.name, config.network.params, rngs=nnx.Rngs(42)
+            )
 ```
 
-## 7. CLI dispatch (`run_action`)
+## 7. CLI dispatch
 
 ```python
-def run_action(cli: ActionCLI) -> None:
-    importlib.import_module(f"qmp.algorithms.{cli.name}")
-    cfg_cls = action_config_dict[cli.name]
-    cfg = dacite.from_dict(cfg_cls, cli.params)
-    impl_cls = action_class_dict[cli.name]
+def main():
+    # ... YAML load + tyro override ...
+    importlib.import_module(f"qmp.algorithms.{cli.action.name}")
+    cfg_cls = action_config_dict[cli.action.name]
+    cfg = dacite.from_dict(cfg_cls, cli.action.params)
+    impl_cls = action_class_dict[cli.action.name]
     instance = impl_cls(cfg)
     instance.run()
 ```
@@ -183,21 +150,14 @@ def run_action(cli: ActionCLI) -> None:
 
 | 维度 | 旧 Hydra | 新版 |
 |------|---------|------|
-| 配置 schema | 隐式 (YAML 写什么就什么) | 显式 (action config dataclass) |
+| 配置 schema | 隐式 | dataclass |
 | model/network 位置 | 顶层 | 下沉到 action params |
-| 构造责任 | context.py 统一构造 | action 内部通过 `build_from_ref` |
+| model 构造 | context 统一构造 | `build_model(ref)` (全局 registry) |
+| network 构造 | `config.create(model)` 在 network 侧 | `model.create_network(name, params)` 在 model 侧 |
 | 依赖 | hydra-core, omegaconf, dacite | tyro, omegaconf, dacite |
-| 类型安全 | 无 | dataclass + dacite 运行时校验 |
 
-## 9. 非目标
+## 9. 需要更新的 AGENTS.md
 
-- tyro subcommand 类型安全 CLI 体验：主要场景是 YAML 配置
-- 多节点 shard_map 集成
-- action 间组合/pipeline (未来扩展)
-
-## 10. 需要更新的 AGENTS.md
-
-- `src/qmp/AGENTS.md` (root)：添加 CLI 架构说明
-- `src/qmp/algorithms/AGENTS.md` (new)：registry + SubConfigRef 模式
-- `src/qmp/models/AGENTS.md`：更新 `model_config_dict` 注册说明
-- `src/qmp/utility/AGENTS.md` (new)：`build_from_ref` helper 说明
+- `AGENTS.md` (root)：CLI 架构说明
+- `src/qmp/algorithms/AGENTS.md`：registry + SubConfigRef 模式
+- `src/qmp/models/AGENTS.md`：`model_config_dict` + `model.create_network` 约定

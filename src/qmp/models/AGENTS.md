@@ -35,7 +35,12 @@ src/qmp/models/
 
 - 全局 `model_dict[name] = ModelClass`：配置驱动的 CLI 按名字动态查找 model
 - 全局 `model_config_dict[name] = ModelConfigClass`：CLI 层 `dacite.from_dict` 按名字查找 config dataclass 类型
+- 全局 `model_dict[name] = ModelClass`：配置驱动的 CLI 按名字动态查找 model
+- 全局 `model_config_dict[name] = ModelConfigClass`：CLI 层 `dacite.from_dict` 按名字查找 config dataclass 类型
 - 每个 model 类的 `network_dict`：把物理系统与兼容 ansatz 配对（见下节「网络注册」）
+- 每个 model 的 `create_network(name, params, *, rngs)`：按 name 查 `network_dict` 得配置类，`dacite.from_dict(cfg_cls, params)` 反序列化，再调 `cfg.create(model, rngs=rngs)` 注入 model 自身尺寸（`n_qubits`、电子数、`n_spins`）构造 network 实例
+
+**network 构造设计**：network 不设全局注册表，由 model 内聚——model 知道自己的系统尺寸，故由其负责构造 network。
 
 model 通过在模块底部执行 `model_dict[name] = Model` 和 `model_config_dict[name] = ModelConfig` 完成自注册；上层通过 `importlib.import_module` 动态导入触发注册。
 
@@ -50,6 +55,7 @@ model 通过在模块底部执行 `model_dict[name] = Model` 和 `model_config_d
 | `show_config(config) -> str` | 位编码构型渲染为可读字符串 |
 | `ref_energy: float` | 参考能量 |
 | `network_dict: ClassVar[dict]` | 兼容网络注册表 (见「网络注册」) |
+| `create_network(name, params, *, rngs)` | 构造 network 实例（dacite → cfg.create(model, rngs)） |
 
 `configs_exclude` 为 `None` 时，转发层填入空数组 `jnp.zeros((0, n_qubytes), uint8)`；`FermiHamiltonian` 的这两个方法要求该参数非可选。
 
@@ -102,14 +108,14 @@ model 通过在模块底部执行 `model_dict[name] = Model` 和 `model_config_d
 
 网络配置类刻意在各 model 文件内重复（不抽公共模块），与「转发样板刻意不抽基类」同理，保留各 model 独立演化自由度。
 
-### 与 CLI 网络注册表的区别
+### 网络构造入口：`model.create_network`
 
-存在两套独立的网络机制，服务不同场景，不要混淆：
+network **不设全局注册表**（design 阶段移除了 `networks/_registry.py`）。构造由 model 内聚：
 
-- **`Model.network_dict`（本节，模型耦合）**：值是网络**配置类**，其 `create(model, *, rngs)` 从**具体 model 元数据**（n_qubits、电子数、n_spins）导出 site/spin 参数。用于"给定物理系统，构造与之匹配的 ansatz"。
-- **`qmp.networks._registry` 的 `network_config_dict` / `network_class_dict`（CLI 层，模型无关）**：由 CLI 的 `build_from_ref` 按名字 + `SubConfigRef.params` 直接构造网络，不依赖 model。当前 networks 尚未在该表自注册（留待后续）。
+- CLI/算法层拿到 action config 里的 `network: SubConfigRef`（`name` + `params`）。
+- 调 `model.create_network(name, params, *, rngs)`：按 `name` 查 model 自己的 `network_dict` 得配置类 → `dacite.from_dict(cfg_cls, params)` 反序列化 → `cfg.create(model, rngs=rngs)` 注入 model 尺寸构造网络。
 
-二者可共存：算法层若需模型匹配的网络，用前者；若从 YAML 独立指定网络全部参数，用后者。
+理由：只有 model 知道自己的系统尺寸（`n_qubits`、电子数、`n_spins`），网络的 site/spin 参数必须由 model 导出，故网络构造归属 model，而非独立的全局注册表。model 本身仍由 `qmp.models._build.build_model(ref)` 从 `SubConfigRef` 构造。
 
 ## 缓存
 
