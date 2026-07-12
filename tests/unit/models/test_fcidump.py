@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import pathlib
+import pickle
 
 import jax.numpy as jnp
 import pytest
@@ -79,6 +80,28 @@ def test_fcidump_cache_file_written(tmp_path) -> None:
     assert len(cache_files) == 1
 
 
+def test_fcidump_cache_content_matches_fresh_parse(tmp_path) -> None:
+    """The pickled cache holds exactly the Hamiltonian dict of a fresh parse."""
+    path = _write_fcidump(tmp_path)
+    Model(ModelConfig(model_path=path))
+    cache_file = next(fcidump_module._cache_dir().glob("*.pkl"))
+    with open(cache_file, "rb") as file:
+        cached = pickle.load(file)
+    (_, fresh) = read_fcidump(pathlib.Path(path))
+    assert cached == fresh
+
+
+def test_fcidump_distinct_content_distinct_cache(tmp_path) -> None:
+    """Different file contents produce different cache keys (no collision)."""
+    path_a = tmp_path / "a"
+    path_b = tmp_path / "b"
+    path_a.write_text(_FCIDUMP_H2, encoding="utf-8")
+    path_b.write_text(_FCIDUMP_H2.replace("-1.2524000000", "-2.0000000000"), encoding="utf-8")
+    Model(ModelConfig(model_path=str(path_a)))
+    Model(ModelConfig(model_path=str(path_b)))
+    assert len(list(fcidump_module._cache_dir().glob("*.pkl"))) == 2
+
+
 def test_read_fcidump_headonly(tmp_path) -> None:
     """headonly parse returns metadata and an empty Hamiltonian dict."""
     path = pathlib.Path(_write_fcidump(tmp_path))
@@ -105,6 +128,19 @@ def test_read_fcidump_gzip(tmp_path) -> None:
     (_, plain_dict) = read_fcidump(plain)
     (_, gz_dict) = read_fcidump(gz_path)
     assert gz_dict == plain_dict
+
+
+def test_read_fcidump_psi4_one_electron_ignored(tmp_path) -> None:
+    """Psi4 non-standard one-index integral lines (i, -1, -1, -1) are silently skipped."""
+    header = "&FCI NORB=2,NELEC=2,MS2=0,\n&END\n"
+    with_line = tmp_path / "FCIDUMP_psi4"
+    without_line = tmp_path / "FCIDUMP_ref"
+    with_line.write_text(header + " -1.25 1 1 0 0\n  0.9 1 0 0 0\n  0.71 0 0 0 0\n", encoding="utf-8")
+    without_line.write_text(header + " -1.25 1 1 0 0\n  0.71 0 0 0 0\n", encoding="utf-8")
+    (_, with_psi4) = read_fcidump(with_line)
+    (_, without_psi4) = read_fcidump(without_line)
+    # the extra Psi4 one-electron line must not change the resulting Hamiltonian
+    assert with_psi4 == without_psi4
 
 
 def test_read_fcidump_invalid_format_raises(tmp_path) -> None:

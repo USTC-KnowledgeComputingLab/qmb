@@ -83,6 +83,18 @@ def test_hubbard_chemical_potential_coefficient() -> None:
     assert terms[((1, 1), (1, 0))] == pytest.approx(-0.7)  # spin down number
 
 
+def test_hubbard_2x2_term_counts() -> None:
+    """A 2x2 lattice has 4 bonds -> 16 directed spin hopping terms and 4 on-site terms."""
+    terms = Model._prepare_hamiltonian(ModelConfig(m=2, n=2, t=1.0, u=4.0, mu=0.0))
+    hopping = {key: value for key, value in terms.items() if len(key) == 2 and value == -1.0}
+    on_site = {key: value for key, value in terms.items() if len(key) == 4}
+    # 4 bonds (2 horizontal + 2 vertical) x 2 spins x 2 directions = 16
+    assert len(hopping) == 16
+    # one on-site interaction per site
+    assert len(on_site) == 4
+    assert set(on_site.values()) == {4.0}
+
+
 def test_hubbard_ref_energy() -> None:
     """ref_energy is passed through from config."""
     model = Model(ModelConfig(m=1, n=1, ref_energy=-3.5))
