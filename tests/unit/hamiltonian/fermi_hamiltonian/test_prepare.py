@@ -417,3 +417,20 @@ def test_prepare_annihilate_after_double_create_same_site() -> None:
     h: dict[tuple[tuple[int, int], ...], complex] = {ops: 1.0 + 0j}
     result = prepare(h, n_qubits=8)
     assert int(result[0].shape[0]) == 0
+
+
+# ---- byte-boundary crossing ----
+
+
+def test_prepare_byte_boundary_crossing() -> None:
+    """c_8^dag c_7: qubit 7 (last of byte0) and qubit 8 (first of byte1) on n_qubits=16."""
+    h: dict[tuple[tuple[int, int], ...], complex] = {((8, 1), (7, 0)): -1.0 + 0j}
+    result = prepare(h, n_qubits=16)
+    assert result[0].shape == (1, 2)
+    _cm = result[0]
+    _am = result[1]
+    _fm = result[2]
+    assert int(_cm[0, 1]) & 1 == 1  # qubit 8: bit 0 of byte 1
+    assert int(_am[0, 0]) & 128 == 128  # qubit 7: bit 7 of byte 0
+    assert int(_fm[0, 0]) & 128 == 128  # qubit 7 flipped in byte 0
+    assert int(_fm[0, 1]) & 1 == 1  # qubit 8 flipped in byte 1

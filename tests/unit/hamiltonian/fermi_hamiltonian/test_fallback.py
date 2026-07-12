@@ -492,3 +492,30 @@ def test_find_topk_complex_weight() -> None:
     result = find_topk_relative_configs(configs, psi_i, 1, exclude, *masks)
     assert result.shape == (1, configs.shape[1])
     assert int(result[0, 0]) == 0b10  # |10⟩
+
+
+# ---- apply_within with non-trivial JW parity sign ----
+
+
+def test_apply_within_parity_sign() -> None:
+    """c_2^dag c_0: parity depends on qubit 1. |001⟩→|100⟩ has JW sign +1, |011⟩→|110⟩ has -1."""
+    masks = prepare({((2, 1), (0, 0)): 1.0 + 0j}, n_qubits=4)
+    ci = jnp.array([[0b001], [0b011]], dtype=jnp.uint8)  # |001⟩, |011⟩
+    pi = jnp.ones((2, 2), dtype=jnp.float64)
+    cj = jnp.array([[0b100], [0b110]], dtype=jnp.uint8)  # |100⟩, |110⟩
+    pj = apply_within_subspace(ci, pi, cj, *masks, direction=0)
+    assert abs(float(pj[0, 0]) - 1.0) < 1e-10  # |001⟩→|100⟩: sign=+1
+    assert abs(float(pj[1, 0]) - (-1.0)) < 1e-10  # |011⟩→|110⟩: sign=-1
+
+
+# ---- find_all with partial exclude ----
+
+
+def test_find_all_partial_exclude() -> None:
+    """Exclude one result but keep another."""
+    masks = prepare({((1, 1), (0, 0)): 1.0 + 0j, ((2, 1), (0, 0)): 2.0 + 0j}, n_qubits=4)
+    configs = jnp.array([[0b01]], dtype=jnp.uint8)
+    psi_i = jnp.array([[1.0, 0.0]], dtype=jnp.float64)
+    target_0 = jnp.array([[0b10]], dtype=jnp.uint8)  # |10⟩ from term 1
+    _new_c, _new_p, cnt = find_all_relative_configs(configs, psi_i, target_0, *masks, hash_capacity=50)
+    assert int(cnt) == 1  # only |100⟩ from term 2 survives
