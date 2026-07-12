@@ -378,3 +378,59 @@ def test_prepare_sort_ordering() -> None:
     assert int(_coef.shape[0]) == 3
     weights = {float(_coef[t, 0]) for t in range(3)}
     assert weights == {0.5, 2.0, 1.0}  # all present, order is undefined without FermiHamiltonian
+
+
+# ---- multi-byte parity ----
+
+
+def test_prepare_multi_byte_parity() -> None:
+    """c_10^dag c_2 on n_qubits=16: parity_mask should have intervening bits 3-9 set."""
+    h: dict[tuple[tuple[int, int], ...], complex] = {((10, 1), (2, 0)): -1.0 + 0j}
+    result = prepare(h, n_qubits=16)
+    _pm = result[3]
+    _pc = result[4]
+    assert result[0].shape == (1, 2)  # Q=2
+    assert int(_pc[0]) == 0
+    # bits 3-7 in byte 0, bits 8-9 in byte 1
+    assert int(_pm[0, 0]) & 0b11111000 == 0b11111000  # bits 3-7
+    assert int(_pm[0, 1]) & 0b00000011 == 0b00000011  # bits 8-9
+
+
+# ---- mixed conflict + valid on same site ----
+
+
+def test_prepare_create_annihilate_create_same_site() -> None:
+    """c_0^dag c_0 c_0^dag: net = c_0^dag — create_mask={0}, flip_mask={0}."""
+    ops = ((0, 1), (0, 0), (0, 1))
+    h: dict[tuple[tuple[int, int], ...], complex] = {ops: 1.0 + 0j}
+    result = prepare(h, n_qubits=8)
+    assert int(result[0].shape[0]) == 1
+    _cm = result[0]
+    _fm = result[2]
+    assert int(_cm[0, 0]) & 1 == 1  # create at site 0
+    assert int(_fm[0, 0]) & 1 == 1  # net flip at site 0 = 1
+
+
+def test_prepare_annihilate_after_double_create_same_site() -> None:
+    """c_0 c_0^dag c_0^dag — create twice at same site → identically zero."""
+    ops = ((0, 0), (0, 1), (0, 1))
+    h: dict[tuple[tuple[int, int], ...], complex] = {ops: 1.0 + 0j}
+    result = prepare(h, n_qubits=8)
+    assert int(result[0].shape[0]) == 0
+
+
+# ---- byte-boundary crossing ----
+
+
+def test_prepare_byte_boundary_crossing() -> None:
+    """c_8^dag c_7: qubit 7 (last of byte0) and qubit 8 (first of byte1) on n_qubits=16."""
+    h: dict[tuple[tuple[int, int], ...], complex] = {((8, 1), (7, 0)): -1.0 + 0j}
+    result = prepare(h, n_qubits=16)
+    assert result[0].shape == (1, 2)
+    _cm = result[0]
+    _am = result[1]
+    _fm = result[2]
+    assert int(_cm[0, 1]) & 1 == 1  # qubit 8: bit 0 of byte 1
+    assert int(_am[0, 0]) & 128 == 128  # qubit 7: bit 7 of byte 0
+    assert int(_fm[0, 0]) & 128 == 128  # qubit 7 flipped in byte 0
+    assert int(_fm[0, 1]) & 1 == 1  # qubit 8 flipped in byte 1

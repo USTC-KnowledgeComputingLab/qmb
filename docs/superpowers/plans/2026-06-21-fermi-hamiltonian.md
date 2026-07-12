@@ -1388,7 +1388,7 @@ Spec §5.1-5.3 要求但 plan 初始未包含的测试（均已添加）:
 - `test_diagonal_hand_calculated`: ✓ `test_diagonal_exact`, `test_diagonal_all_hopping`, `test_diagonal_complex_coef`, `test_diagonal_only_hamiltonian`
 - `test_hash_table_overflow_retry`: ✓ `test_cuda_overflow_retry`
 - `test_cuda_apply_within`, `test_cuda_find_all`, `test_cuda_find_topk`: ✓ 全部 21 个 CUDA 测试
-- 总计: 66 tests (23 prepare + 22 fallback + 21 cuda)
+- 总计: 96 tests
 
 ### 补充 5: AGENTS.md 名称确认与更新（Task 1）
 
