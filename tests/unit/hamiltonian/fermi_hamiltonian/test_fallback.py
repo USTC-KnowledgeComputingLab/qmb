@@ -453,3 +453,42 @@ def test_apply_within_complex_hermitian() -> None:
     assert fwd.shape == (3, 2)
     assert bwd.shape == (2, 2)
     assert jnp.any(jnp.abs(fwd) > 0) or jnp.any(jnp.abs(bwd) > 0)
+
+
+# ---- empty input edge case ----
+
+
+def test_diagonal_empty_configs() -> None:
+    """Zero configs should return empty psi."""
+    masks, configs = _hopping_model()
+    empty = jnp.zeros((0, configs.shape[1]), dtype=configs.dtype)
+    psi = compute_diagonal_within_subspace(empty, *masks)
+    assert psi.shape == (0, 2)
+
+
+# ---- find_all boundary: hash_capacity exactly matches ----
+
+
+def test_find_all_exact_capacity() -> None:
+    """hash_capacity exactly matching expected output count should work."""
+    masks = prepare({((1, 1), (0, 0)): -1.0 + 0j}, n_qubits=4)
+    configs = jnp.array([[0b01]], dtype=jnp.uint8)
+    psi_i = jnp.array([[1.0, 0.0]], dtype=jnp.float64)
+    exclude = jnp.zeros((0, 1), dtype=jnp.uint8)
+    _new_c, _new_p, cnt = find_all_relative_configs(configs, psi_i, exclude, *masks, hash_capacity=1)
+    assert int(cnt) == 1
+
+
+# ---- find_topk: complex weight correctness ----
+
+
+def test_find_topk_complex_weight() -> None:
+    """|c·ψ|² = (cr·pr - ci·pi)² + (cr·pi + ci·pr)² — verify with complex both."""
+    h: dict[tuple[tuple[int, int], ...], complex] = {((1, 1), (0, 0)): 1.0 + 2.0j}
+    masks = prepare(h, n_qubits=4)
+    configs = jnp.array([[0b01]], dtype=jnp.uint8)
+    psi_i = jnp.array([[3.0, 4.0]], dtype=jnp.float64)
+    exclude = jnp.zeros((0, 1), dtype=jnp.uint8)
+    result = find_topk_relative_configs(configs, psi_i, 1, exclude, *masks)
+    assert result.shape == (1, configs.shape[1])
+    assert int(result[0, 0]) == 0b10  # |10⟩
