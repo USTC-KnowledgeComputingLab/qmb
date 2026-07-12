@@ -11,6 +11,7 @@ import pickle
 import re
 from typing import TYPE_CHECKING, ClassVar
 
+import dacite
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -205,6 +206,11 @@ class Model(ModelProto[ModelConfig]):
         n_qubytes = (self.n_qubits + 7) // 8
         exclude = jnp.zeros((0, n_qubytes), dtype=jnp.uint8) if configs_exclude is None else configs_exclude
         return self.hamiltonian.find_topk_relative_configs(configs_i, psi_i, count_selected, exclude)
+
+    def create_network(self, name: str, params: dict, *, rngs: nnx.Rngs) -> NetworkProto:
+        cfg_cls = self.network_dict[name]
+        cfg = dacite.from_dict(cfg_cls, params)  # ty: ignore
+        return cfg.create(self, rngs=rngs)
 
     def show_config(self, config: jax.Array) -> str:
         bits = "".join(f"{int(byte):08b}"[::-1] for byte in config)
