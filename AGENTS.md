@@ -41,6 +41,8 @@ old/                     # 旧 main 分支参考代码 (如存在)
 
 三个子系统各自维护双注册表（`xxx_config_dict` + `xxx_class_dict`），模块导入时自注册。action 内部通过 `qmp.utility._build.build_from_ref` 从 `SubConfigRef` 构造 model/network 实例。
 
+此外，每个 model 类还维护一个**模型耦合**的 `network_dict`：值是网络配置类，其 `create(model, *, rngs)` 从具体 model 元数据（n_qubits、电子数、n_spins）导出网络的 site/spin 参数。这与上述模型无关的 `network_config_dict`（CLI 按名字+params 独立构造）是两套并存机制，详见 `models/AGENTS.md`「网络注册」。
+
 ## 类型注解约定
 
 - 使用 `from __future__ import annotations` 在所有文件
