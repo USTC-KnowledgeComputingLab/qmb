@@ -14,7 +14,6 @@ from qmp.utility._losses import (
     sum_filtered_angle_scaled_log,
 )
 
-
 # ---- helpers ----
 
 

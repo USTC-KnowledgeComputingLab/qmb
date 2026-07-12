@@ -1,7 +1,11 @@
 """Integration test: HAAR on H2/STO-3G via OpenFermion.
 
-This test creates a minimal H2 molecule, runs HAAR for a few cycles,
-and verifies the Krylov energy decreases and is reasonable.
+Uses PySCF to generate real H2 integrals when available,
+otherwise falls back to pre-computed values.
+
+Note: ``model.compute_diagonal_within_subspace`` and Krylov energies
+are *electronic* only (exclude nuclear repulsion).  ``model.ref_energy``
+is the full FCI total energy including nuclear repulsion.
 """
 
 from __future__ import annotations
@@ -10,37 +14,55 @@ import math
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 import openfermion
 import pytest
 from flax import nnx
 
 from qmp.algorithms.haar import Haar, HaarConfig, KrylovBasisStrategy, _DynamicLanczos, _merge_pools
-from qmp.models._build import SubConfigRef
 from qmp.models.openfermion import Model, ModelConfig
 from qmp.networks.mlp import WaveFunctionElectron as MlpElectron
 from qmp.utility._losses import sum_filtered_angle_scaled_log
 
 
-@pytest.fixture
+def _make_h2_molecule(path: str) -> None:
+    """Generate real H2/STO-3G data, falling back to pre-computed if PySCF unavailable."""
+    try:
+        from openfermion.chem import MolecularData  # noqa: PLC0415
+        from openfermionpyscf import run_pyscf  # ty: ignore[unresolved-import] — optional dependency
+
+        geom = [("H", (0.0, 0.0, 0.0)), ("H", (0.0, 0.0, 0.7414))]
+        mol = MolecularData(geom, "sto-3g", multiplicity=1, charge=0, filename=path)
+        run_pyscf(mol, run_fci=True)
+    except ImportError:
+        import numpy as np  # noqa: PLC0415
+
+        geom = [("H", (0.0, 0.0, 0.0)), ("H", (0.0, 0.0, 0.7414))]
+        mol = openfermion.MolecularData(geom, basis="sto-3g", multiplicity=1, charge=0, filename=path)
+        mol.n_orbitals = 2
+        mol.n_qubits = 4
+        mol.n_electrons = 2
+        mol.fci_energy = -1.1372701747
+        mol.nuclear_repulsion = 0.7137539937
+        mol.one_body_integrals = np.array([[-1.252463573, -0.0], [-0.0, -0.475948715]])
+        mol.two_body_integrals = np.zeros((2, 2, 2, 2))
+        mol.two_body_integrals[0, 0, 0, 0] = 0.674493166
+        mol.two_body_integrals[0, 0, 1, 1] = 0.181287518
+        mol.two_body_integrals[0, 1, 0, 1] = 0.663472101
+        mol.two_body_integrals[0, 1, 1, 0] = 0.697397917
+        mol.two_body_integrals[1, 0, 0, 1] = 0.663472101
+        mol.two_body_integrals[1, 0, 1, 0] = 0.181287518
+        mol.two_body_integrals[1, 1, 1, 1] = 0.697397917
+        mol.save()
+
+
+@pytest.fixture(scope="module")
 def h2_model() -> Model:
-    """Create a minimal H2/STO-3G model."""
-    geom = [("H", (0.0, 0.0, 0.0)), ("H", (0.0, 0.0, 0.7414))]
-    mol = openfermion.MolecularData(geom, basis="sto-3g", multiplicity=1, charge=0, filename="/tmp/h2_int_test")
-    mol.n_orbitals = 2
-    mol.n_qubits = 4
-    mol.n_electrons = 2
-    mol.fci_energy = -1.137
-    mol.nuclear_repulsion = 0.7137539936
-    mol.one_body_integrals = np.array([[-1.2524, 0.0], [0.0, -0.4759]])
-    mol.two_body_integrals = np.zeros((2, 2, 2, 2))
-    mol.two_body_integrals[0, 0, 0, 0] = 0.6746
-    mol.two_body_integrals[1, 1, 1, 1] = 0.6976
-    mol.save()
+    """Create H2/STO-3G model from real PySCF data (or pre-computed fallback)."""
+    _make_h2_molecule("/tmp/h2_int_test")
     return Model(ModelConfig(model_path="/tmp/h2_int_test"))
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def h2_network(h2_model: Model) -> MlpElectron:
     """Create a small MLP network for H2."""
     return MlpElectron(
@@ -73,15 +95,52 @@ def test_krylov_energy_decreases(h2_model: Model, h2_network: MlpElectron) -> No
         energies.append(r[0][0])
 
     assert len(energies) >= 4
-    assert energies[0] > -2.0  # should not be absurdly low
-    assert energies[-1] < energies[0]  # should decrease
+    assert energies[0] > -2.0
+    assert energies[-1] < energies[0]
+
+
+def test_krylov_vs_exact_diagonalization(h2_model: Model, h2_network: MlpElectron) -> None:
+    """Krylov electronic ground state matches exact diagonalization of H in the config space (4-qubit full CI)."""
+    # enumerate all 16 configs for 4 qubits
+    all_configs = jnp.array([[i] for i in range(16)], dtype=jnp.uint8)
+
+    # compute full H matrix via apply_within_subspace (each column = H·|c_j>)
+    n = all_configs.shape[0]
+    h_mat = jnp.zeros((n, n), dtype=jnp.float64)
+    for j in range(n):
+        cfg_j = all_configs[j : j + 1]
+        psi_one = jnp.array([[1.0, 0.0]], dtype=jnp.float64)
+        h_col = h2_model.apply_within_subspace(cfg_j, psi_one, all_configs)
+        h_mat = h_mat.at[:, j].set(h_col[:, 0])
+
+    # exact electronic ground state (no nuclear repulsion)
+    exact_electronic = float(jnp.linalg.eigh(h_mat)[0][0])
+
+    # Krylov in the same config space
+    key = jax.random.key(42)
+    configs, psi = h2_network.generate_unique(64, key=key)
+    lanczos = _DynamicLanczos(
+        model=h2_model,
+        configs=configs,
+        psi=psi,
+        max_steps=12,
+        stop_norm=1e-8,
+        random_period=99,
+        extend_count=32,
+        strategy=KrylovBasisStrategy.FIXED,
+        state_count=1,
+    )
+    krylov_e = 0.0
+    for r in lanczos.run():
+        krylov_e = r[0][0]
+
+    assert abs(krylov_e - exact_electronic) < 5e-3
 
 
 def test_krylov_energy_finite(h2_model: Model, h2_network: MlpElectron) -> None:
     """Krylov energy is finite and decreases with Lanczos steps."""
     key = jax.random.key(42)
     configs, psi = h2_network.generate_unique(64, key=key)
-
     lanczos = _DynamicLanczos(
         model=h2_model,
         configs=configs,
@@ -135,12 +194,12 @@ def test_merge_pools_dedup_prefers_first(h2_network: MlpElectron) -> None:
 
 def test_loss_gradient(h2_network: MlpElectron) -> None:
     """Gradient of loss with respect to network parameters is non-zero for different target."""
-    from flax import nnx
+
 
     key = jax.random.key(42)
     configs, psi = h2_network.generate_unique(16, key=key)
     max_idx = int(jnp.argmax(jnp.abs(psi)))
-    target = psi.at[max_idx].set(psi[max_idx] * 2.0)  # alter target to be different
+    target = psi.at[max_idx].set(psi[max_idx] * 2.0)
     target = target / target[jnp.argmax(jnp.abs(target))]
 
     graphdef, params = nnx.split(h2_network, nnx.Param)
@@ -151,7 +210,7 @@ def test_loss_gradient(h2_network: MlpElectron) -> None:
         psi_out = psi_out / psi_out[max_idx]
         return sum_filtered_angle_scaled_log(psi_out, target)
 
-    loss_val, grads = jax.value_and_grad(_loss)(params)
+    _loss_val, grads = jax.value_and_grad(_loss)(params)
     grad_norms = [float(jnp.linalg.norm(v)) for v in jax.tree_util.tree_leaves(grads)]
     assert any(g > 0 for g in grad_norms)
 
@@ -173,4 +232,4 @@ def test_haar_integration_cycle(h2_model: Model, h2_network: MlpElectron) -> Non
     haar = Haar(cfg)
     haar._model = h2_model
     haar._network = h2_network
-    haar.run()  # runs exactly 1 cycle
+    haar.run()
