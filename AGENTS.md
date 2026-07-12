@@ -34,6 +34,12 @@ docs/superpowers/        # 设计 spec + plan
 old/                     # 旧 main 分支参考代码 (如存在)
 ```
 
+## CLI 架构
+
+`qmp --config config.yaml` 入口在 `__main__.py`。YAML 仅含 `action` 顶层节；model/network 作为 `SubConfigRef(name, params)` 嵌入 action params。
+
+三个子系统各自维护双注册表（`xxx_config_dict` + `xxx_class_dict`），模块导入时自注册。action 内部通过 `qmp.utility._build.build_from_ref` 从 `SubConfigRef` 构造 model/network 实例。
+
 ## 类型注解约定
 
 - 使用 `from __future__ import annotations` 在所有文件
