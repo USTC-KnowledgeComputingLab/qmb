@@ -61,3 +61,4 @@ class ModelProto(Protocol[config_t]):
 
 
 model_dict: dict[str, type[ModelProto[object]]] = {}
+model_config_dict: dict[str, type[object]] = {}

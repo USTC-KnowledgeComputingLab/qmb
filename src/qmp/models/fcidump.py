@@ -19,7 +19,7 @@ import platformdirs
 
 from qmp.hamiltonian.fermi_hamiltonian import FermiHamiltonian
 
-from ._model import ModelProto, model_dict
+from ._model import ModelProto, model_config_dict, model_dict
 
 logger = logging.getLogger(__name__)
 
@@ -218,3 +218,4 @@ class Model(ModelProto[ModelConfig]):
 
 
 model_dict["fcidump"] = Model
+model_config_dict["fcidump"] = ModelConfig
