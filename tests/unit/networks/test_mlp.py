@@ -333,3 +333,41 @@ def test_normal_qudit_physical_dim_four() -> None:
     net = WaveFunctionNormal(sites=3, physical_dim=4, hidden_size=(8,), rngs=nnx.Rngs(35))
     psi = net(_all_configs(4, 3, 2))
     assert jnp.allclose(jnp.sum(jnp.abs(psi) ** 2), 1.0)
+
+
+# ---- architecture variations ----
+
+
+def test_multi_hidden_layers_normalise() -> None:
+    """A deeper amplitude/phase MLP still yields a normalised state."""
+    net = WaveFunctionElectron(sites=4, electrons=2, hidden_size=(8, 8, 8), rngs=nnx.Rngs(40))
+    psi = net(_all_configs(2, 4, 1))
+    assert jnp.allclose(jnp.sum(jnp.abs(psi) ** 2), 1.0)
+
+
+def test_empty_hidden_size_normalise() -> None:
+    """An amplitude/phase network with no hidden layers still normalises."""
+    net = WaveFunctionElectron(sites=4, electrons=2, hidden_size=(), rngs=nnx.Rngs(41))
+    psi = net(_all_configs(2, 4, 1))
+    assert jnp.allclose(jnp.sum(jnp.abs(psi) ** 2), 1.0)
+
+
+def test_single_site_electron() -> None:
+    """A one-site, one-electron system places all amplitude on the occupied state."""
+    net = WaveFunctionElectron(sites=1, electrons=1, hidden_size=(4,), rngs=nnx.Rngs(42))
+    all_configs = _all_configs(2, 1, 1)
+    probability = jnp.abs(net(all_configs)) ** 2
+    assert jnp.allclose(probability[1], 1.0)  # config (1,)
+    assert jnp.allclose(jnp.sum(probability), 1.0)
+
+
+def test_asymmetric_spin_conservation() -> None:
+    """spin_up != spin_down conserves each spin population independently."""
+    net = WaveFunctionElectronUpDown(double_sites=6, spin_up=2, spin_down=1, hidden_size=(8,), rngs=nnx.Rngs(43))
+    values = jnp.array(list(itertools.product([0, 1], repeat=6)), dtype=jnp.uint8)
+    psi = net(pack_int(values, size=1))
+    up_count = values[:, 0] + values[:, 2] + values[:, 4]
+    down_count = values[:, 1] + values[:, 3] + values[:, 5]
+    forbidden = (up_count != 2) | (down_count != 1)
+    assert jnp.all(jnp.abs(psi)[forbidden] < 1e-12)
+    assert jnp.allclose(jnp.sum(jnp.abs(psi) ** 2), 1.0)
