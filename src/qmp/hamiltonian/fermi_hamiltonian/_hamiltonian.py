@@ -27,24 +27,26 @@ from ._hamiltonian_prepare import prepare
 logger = logging.getLogger(__name__)
 
 
-def _try_register_ffi(n_qubytes: int) -> bool:
-    """Attempt to load and register CUDA FFI targets for the given n_qubytes."""
-    try:
-        lib = load_cuda_module(n_qubytes=n_qubytes)
-        targets = {
-            f"qmp_compute_diagonal_within_subspace_{n_qubytes}": "ComputeDiagonalWithinSubspace",
-            f"qmp_apply_within_subspace_{n_qubytes}": "ApplyWithinSubspace",
-            f"qmp_find_all_relative_configs_{n_qubytes}": "FindAllRelativeConfigs",
-            f"qmp_find_topk_relative_configs_{n_qubytes}": "FindTopKRelativeConfigs",
-        }
-        for name, sym in targets.items():
-            handler = getattr(lib, sym)
-            jax.ffi.register_ffi_target(name, jax.ffi.pycapsule(handler), platform="CUDA")
-        logger.info("CUDA FFI targets registered for n_qubytes=%d.", n_qubytes)
-        return True
-    except Exception:
-        logger.info("CUDA FFI targets not available; using pure JAX fallback.")
-        return False
+def _register_ffi(n_qubytes: int) -> None:
+    """Compile and register the CUDA FFI targets for the given n_qubytes.
+
+    Raises on failure (missing nvcc, compile error, registration error). The
+    caller decides whether to invoke this — it is only called when the target
+    device is a CUDA GPU, so any failure here is a real environment error and
+    must not be silently downgraded to the (orders-of-magnitude slower) JAX
+    fallback.
+    """
+    lib = load_cuda_module(n_qubytes=n_qubytes)
+    targets = {
+        f"qmp_compute_diagonal_within_subspace_{n_qubytes}": "ComputeDiagonalWithinSubspace",
+        f"qmp_apply_within_subspace_{n_qubytes}": "ApplyWithinSubspace",
+        f"qmp_find_all_relative_configs_{n_qubytes}": "FindAllRelativeConfigs",
+        f"qmp_find_topk_relative_configs_{n_qubytes}": "FindTopKRelativeConfigs",
+    }
+    for name, sym in targets.items():
+        handler = getattr(lib, sym)
+        jax.ffi.register_ffi_target(name, jax.ffi.pycapsule(handler), platform="CUDA")
+    logger.info("CUDA FFI targets registered for n_qubytes=%d.", n_qubytes)
 
 
 class FermiHamiltonian:
@@ -82,7 +84,11 @@ class FermiHamiltonian:
         # 预过滤: 分离对角 term (flip_mask == 0) 用于 compute_diagonal
         fm_sum = jnp.sum(self._flip_mask, axis=1)
         self._diag_idx = jnp.where(fm_sum == 0)[0]
-        self._use_cuda = _try_register_ffi(self._n_qubytes)
+        # 后端选择由目标设备平台决定: CUDA 设备 → CUDA kernel; 其余 → 纯 JAX。
+        # CUDA 设备下若编译/注册失败则抛错; 绝不静默退化到跑不动的 fallback。
+        self._use_cuda = self._device.platform == "gpu"
+        if self._use_cuda:
+            _register_ffi(self._n_qubytes)
         # 哈希表跨调用缓存: apply_within 在 configs_j 不变时复用
         self._apply_hash_cache: tuple[int, typing.Any] | None = None
         logger.info(
@@ -139,9 +145,11 @@ class FermiHamiltonian:
         *,
         direction: int = 0,
     ) -> jax.Array:
-        batch_size_j = configs_j.shape[0]
         target = f"qmp_apply_within_subspace_{self._n_qubytes}"
-        inputs = (
+        # Output lives on the destination subspace: forward (dir 0) -> configs_j,
+        # backward (dir 1, H^dagger) -> configs_i.
+        batch_size_dst = configs_j.shape[0] if direction == 0 else configs_i.shape[0]
+        operands = (
             self._to_dev(configs_i),
             self._to_dev(psi_i),
             self._to_dev(configs_j),
@@ -151,15 +159,14 @@ class FermiHamiltonian:
             self._to_dev(self._parity_mask),
             self._to_dev(self._parity_const),
             self._to_dev(self._coef),
-            direction,
         )
         if self._use_cuda:
             return jax.ffi.ffi_call(
                 target,
-                jax.ShapeDtypeStruct((batch_size_j, 2), jnp.float64),
+                jax.ShapeDtypeStruct((batch_size_dst, 2), jnp.float64),
                 vmap_method="broadcast_all",
-            )(*inputs)
-        return _jax_apply_within_subspace(*inputs)
+            )(*operands, direction=int(direction))
+        return _jax_apply_within_subspace(*operands, direction)
 
     def find_all_relative_configs(
         self,
@@ -190,7 +197,7 @@ class FermiHamiltonian:
                 self._to_dev(self._parity_mask),
                 self._to_dev(self._parity_const),
                 self._to_dev(self._coef),
-                hash_capacity,
+                hash_capacity=int(hash_capacity),
             )
         return _jax_find_all_relative_configs(
             self._to_dev(configs_i),
@@ -215,14 +222,20 @@ class FermiHamiltonian:
         n_qubytes_dim = configs_i.shape[1]
         target = f"qmp_find_topk_relative_configs_{self._n_qubytes}"
         if self._use_cuda:
-            return jax.ffi.ffi_call(
+            # The kernel fills a hash table of capacity 2*count_selected keyed by
+            # config, then returns the raw (keys, weights) table. The top-K
+            # selection (argsort) happens here to match the JAX fallback exactly.
+            capacity = count_selected * 2
+            table_keys, table_weights = jax.ffi.ffi_call(
                 target,
-                jax.ShapeDtypeStruct((count_selected, n_qubytes_dim), jnp.uint8),
+                (
+                    jax.ShapeDtypeStruct((capacity, n_qubytes_dim), jnp.uint8),
+                    jax.ShapeDtypeStruct((capacity,), jnp.float64),
+                ),
                 vmap_method="broadcast_all",
             )(
                 self._to_dev(configs_i),
                 self._to_dev(psi_i),
-                count_selected,
                 self._to_dev(configs_exclude),
                 self._to_dev(self._create_mask),
                 self._to_dev(self._annihilate_mask),
@@ -230,7 +243,10 @@ class FermiHamiltonian:
                 self._to_dev(self._parity_mask),
                 self._to_dev(self._parity_const),
                 self._to_dev(self._coef),
+                count_selected=int(count_selected),
             )
+            order = jnp.argsort(table_weights)[::-1][:count_selected]
+            return table_keys[order]
         return _jax_find_topk_relative_configs(
             self._to_dev(configs_i),
             self._to_dev(psi_i),

@@ -300,20 +300,24 @@ class FermiHamiltonian:
     def __init__(self, hamiltonian_dict, *, n_qubits, devices):
         arrays = prepare(hamiltonian_dict, n_qubits)
         self._create_mask, self._annihilate_mask, self._flip_mask, ...
-        self._device = ...
-        # 按 |coef| 降序排列
-        # 尝试加载 CUDA kernel
-        self._use_cuda = _try_register_ffi(...)
+        self._device = self._parse_device(devices)   # 仅取 devices[0]
+        # 按 |coef| 降序排列, 预过滤对角 term
+        # 后端由设备平台决定: gpu -> 注册 CUDA FFI (失败则抛错); cpu -> 纯 JAX
+        self._use_cuda = self._device.platform == "gpu"
+        if self._use_cuda:
+            _register_ffi(self._n_qubytes)   # 编译/注册失败会 raise, 不静默 fallback
 
-    def compute_diagonal_within_subspace(self, configs):
-        ...
-    def apply_within_subspace(self, configs_i, psi_i, configs_j, *, direction=0):
-        ...
-    def find_all_relative_configs(self, configs_i, psi_i, configs_exclude, *, hash_capacity):
-        ...
-    def find_topk_relative_configs(self, configs_i, psi_i, count_selected, configs_exclude):
-        ...
+    def compute_diagonal_within_subspace(self, configs): ...
+    def apply_within_subspace(self, configs_i, psi_i, configs_j, *, direction=0): ...
+    def find_all_relative_configs(self, configs_i, psi_i, configs_exclude, *, hash_capacity): ...
+    def find_topk_relative_configs(self, configs_i, psi_i, count_selected, configs_exclude): ...
 ```
+
+**后端选择**: 不再用 try/except 静默探测。设备平台是 `gpu` 才尝试 CUDA，失败即报错; `cpu` 直接走 fallback，不触碰 nvcc。
+
+**标量参数**: `direction` / `hash_capacity` / `count_selected` 作为 FFI attribute (`.Attr<int64_t>`) 传递，Python 侧用关键字实参传 Python `int`。
+
+**精度**: kernel 缓冲区为 F64/complex128，调用方须启用 `jax_enable_x64` (测试在 `tests/conftest.py` 全局开启)。
 
 ## 4. 依赖
 
