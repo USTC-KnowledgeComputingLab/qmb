@@ -1005,7 +1005,6 @@ dependencies = [
     { name = "omegaconf" },
     { name = "openfermion" },
     { name = "platformdirs" },
-    { name = "pyyaml" },
     { name = "tyro" },
 ]
 
@@ -1023,7 +1022,6 @@ requires-dist = [
     { name = "omegaconf", specifier = ">=2.0" },
     { name = "openfermion", specifier = ">=1.7.1" },
     { name = "platformdirs", specifier = ">=4.10.0" },
-    { name = "pyyaml", specifier = ">=6.0" },
     { name = "tyro", specifier = ">=1.0" },
 ]
 

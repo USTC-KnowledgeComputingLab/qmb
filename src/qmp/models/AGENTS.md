@@ -34,9 +34,10 @@ src/qmp/models/
 ### 插件式注册表
 
 - 全局 `model_dict[name] = ModelClass`：配置驱动的 CLI 按名字动态查找 model
+- 全局 `model_config_dict[name] = ModelConfigClass`：CLI 层 `dacite.from_dict` 按名字查找 config dataclass 类型
 - 每个 model 类的 `network_dict`：把物理系统与兼容 ansatz 配对（本轮为空 `{}`）
 
-model 通过在模块底部执行 `model_dict[name] = Model` 完成自注册；上层通过 `importlib.import_module` 动态导入触发注册。
+model 通过在模块底部执行 `model_dict[name] = Model` 和 `model_config_dict[name] = ModelConfig` 完成自注册；上层通过 `importlib.import_module` 动态导入触发注册。
 
 ## ModelProto 接口
 
