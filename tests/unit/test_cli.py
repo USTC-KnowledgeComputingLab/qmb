@@ -142,6 +142,13 @@ def test_main_unknown_action() -> None:
         main(argv=["--action.name", "nonexistent"])
 
 
+def test_main_importable_module_without_registration() -> None:
+    """main() with a name that imports but registers no action → KeyError."""
+    # ``qmp.algorithms._registry`` imports fine but registers no action called "_registry".
+    with pytest.raises(KeyError, match="Unknown action"):
+        main(argv=["--action.name", "_registry"])
+
+
 def test_main_action_params_int_override() -> None:
     """CLI --action.params.sample_count=10 overrides YAML value."""
     yaml_content = """action:
@@ -170,3 +177,28 @@ def test_load_yaml_action_without_params() -> None:
     cfg = _load_yaml(str(tmp))
     assert cfg.action.name == "demo"
     assert cfg.action.params == {}
+
+
+# ---- full dispatch (no mock): YAML → model → network → action.run ----
+
+
+def test_main_full_dispatch_model_and_network() -> None:
+    """main() end-to-end: YAML builds hubbard model + mlp/u1 network and runs demo.
+
+    Exercises the whole chain (YAML → dacite → build_model → create_network →
+    generate → apply_within_subspace) without mocking run().
+    """
+    yaml_content = """action:
+  name: demo
+  params:
+    model:
+      name: hubbard
+      params: {m: 2, n: 1, u: 4.0}
+    network:
+      name: mlp/u1
+      params: {hidden_size: [16]}
+    sample_count: 32
+"""
+    tmp = Path(tempfile.gettempdir()) / "test_cli_full_dispatch.yaml"
+    tmp.write_text(yaml_content)
+    main(argv=["--config", str(tmp)])  # must not raise

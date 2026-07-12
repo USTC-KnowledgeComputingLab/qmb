@@ -2,6 +2,12 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **实现后演进（务必先读）**：本 plan 记录初始实现步骤，其中的 `build_from_ref`（通用 subsystem helper）与 `networks/_registry.py`（全局 network 注册表）**后续已被重构替代**，当前代码与 `docs/superpowers/specs/2026-07-13-cli-registry-design.md` 为准：
+> - `build_from_ref(...)` → `qmp.models._build.build_model(ref)`（仅构造 model）
+> - network 无全局注册表；由 `model.create_network(name, params, *, rngs)` 内聚构造（`networks/_registry.py` 已删除）
+> - `_build.py` 从 `utility/` 迁至 `models/`
+> 下文 Task 步骤按历史原样保留，不逐字回改。
+
 **Goal:** 实现 CLI 与 Registry 架构：YAML 配置只有 `action` 顶层，action config 通过 `SubConfigRef` 嵌入 model/network，共享 `build_from_ref` helper 构造实例，三个子系统统一双注册表模式。
 
 **Architecture:** `YAML → omegaconf → ConfigCLI(action) → tyro override → dispatch action → action 内部通过 build_from_ref 从 SubConfigRef 构造 model/network`

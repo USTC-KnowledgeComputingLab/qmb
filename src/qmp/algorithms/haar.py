@@ -7,6 +7,7 @@ Two-step optimization:
 
 from __future__ import annotations
 
+import copy as _copy
 import dataclasses
 import logging
 import pickle
@@ -70,6 +71,7 @@ class HaarConfig:
 
     checkpoint_path: str | None = None
     checkpoint_interval: int = 1
+    max_cycles: int = -1  # -1 = infinite loop, >0 = run exactly N cycles then return
 
 
 # ==============================================================================
@@ -140,6 +142,7 @@ class _DynamicLanczos:
                     random_v = random_v - dot * prev_v
                 random_v = random_v / jnp.linalg.norm(random_v)
                 v.append(random_v)
+                beta.append(jnp.array(0.0))
             else:
                 beta.append(norm_w)
                 v.append(w / norm_w)
@@ -234,11 +237,16 @@ def _sample_from_pool(pool: tuple | None, count: int, key: Array) -> tuple[Array
 def _merge_pools(ca: Array, pa: Array, cb: Array, pb: Array) -> tuple[Array, Array]:
     if cb.shape[0] == 0:
         return ca, pa
-    both_c = jnp.concatenate([ca, cb], axis=0)
-    both_p = jnp.concatenate([pa, pb], axis=0)
+    # pool first so that for duplicate configs pool psi wins (return_index picks first)
+    both_c = jnp.concatenate([cb, ca], axis=0)
+    both_p = jnp.concatenate([pb, pa], axis=0)
+    n_bytes = both_c.shape[1]
+    padded = n_bytes if n_bytes % 4 == 0 else ((n_bytes // 4) + 1) * 4
+    if n_bytes < padded:
+        both_c = jnp.pad(both_c, ((0, 0), (0, padded - n_bytes)))
     flat = both_c.reshape(both_c.shape[0], -1).view(jnp.uint32)
-    _, idx, _ = jnp.unique(flat, axis=0, return_index=True, return_counts=True, size=flat.shape[0], fill_value=0)  # ty: ignore — jax size/fill_value
-    return both_c[idx], both_p[idx]
+    _, idx = jnp.unique(flat, axis=0, return_index=True)
+    return both_c[idx, :n_bytes], both_p[idx]
 
 
 # ==============================================================================
@@ -300,15 +308,16 @@ class Haar:
             state = _init_state()
 
         cycle = state["haar"]["global"]
+        max_cycles = config.max_cycles
         logger.info("HAAR starting from cycle %d", int(cycle))
 
-        while True:
+        while max_cycles < 0 or cycle < state["haar"]["global"] + max_cycles:
             logger.info("=== Cycle %d ===", int(cycle))
             key = jax.random.key(cycle * config.sampling_count_from_network)
 
             # --- sample ---
             logger.info("Sampling from network...")
-            c_net, p_net, _ = self._network.generate_unique(config.sampling_count_from_network, key=key)  # ty: ignore — network dynamic
+            c_net, p_net = self._network.generate_unique(config.sampling_count_from_network, key=key)  # ty: ignore — network dynamic
 
             logger.info("Sampling from pool...")
             key2 = jax.random.fold_in(key, 1)
@@ -391,47 +400,70 @@ def _local_optimize(
     max_steps: int,
     stop_loss: float,
 ) -> tuple[object, object, int]:
-    import copy as _copy
+
+    graphdef, params = nnx.split(network, nnx.Param)  # ty: ignore — network dynamic
+
+    def _loss_grad(pdict: dict[str, typing.Any]) -> Array:  # ty: ignore — closure
+        net = nnx.merge(graphdef, pdict)  # ty: ignore
+        psi_net = net(configs)  # ty: ignore — network dynamic
+        psi_net = psi_net / psi_net[max_idx]
+        return loss_fn(psi_net, target_psi)
 
     opt = optax.adam(1e-3)
-    opt_state = opt.init(nnx.state(network, nnx.Param))  # ty: ignore — network dynamic
+    opt_state = opt.init(params)
 
-    for try_idx in range(5):
-        params_backup = _copy.deepcopy(nnx.state(network, nnx.Param))  # ty: ignore
+    for _ in range(5):
+        params_backup = _copy.deepcopy(params)
         opt_backup = _copy.deepcopy(opt_state)
+        last_loss: float = 0.0
 
+        success = True
         for step in range(max_steps):
-
-            def _loss_grad(pdict: dict[str, typing.Any]) -> Array:  # ty: ignore — closure
-                nnx.update(network, pdict)  # ty: ignore
-                psi_net = network(configs)  # ty: ignore — network dynamic
-                psi_net = psi_net / psi_net[max_idx]
-                return loss_fn(psi_net, target_psi)
-
-            loss_val, grads = jax.value_and_grad(_loss_grad)(nnx.state(network, nnx.Param))  # ty: ignore
-            updates, opt_state = opt.update(grads, opt_state, nnx.state(network, nnx.Param))  # ty: ignore
-            new_params = optax.apply_updates(nnx.state(network, nnx.Param), updates)  # ty: ignore
-            nnx.update(network, new_params)  # ty: ignore
+            loss_val, grads = jax.value_and_grad(_loss_grad)(params)  # ty: ignore
+            updates, opt_state = opt.update(grads, opt_state, params)
+            params = optax.apply_updates(params, updates)
 
             if step % 100 == 0:
                 logger.info("  step %d, loss=%.10f", step, float(loss_val))
 
             if jnp.isnan(loss_val) or jnp.isinf(loss_val):
                 logger.warning("NaN/inf loss at step %d, restoring backup", step)
-                nnx.update(network, params_backup)  # ty: ignore
-                opt_state = opt_backup
+                success = False
                 break
 
             if float(loss_val) < stop_loss:
                 logger.info("Loss threshold met at step %d", step)
-                return nnx.state(network, nnx.Param), opt_state, step  # ty: ignore
+                nnx.update(network, params)  # ty: ignore
+                return params, opt_state, step
+
+            if step > 0 and abs(float(loss_val) - last_loss) < stop_loss:
+                logger.info("Loss stagnated at step %d", step)
+                nnx.update(network, params)  # ty: ignore
+                return params, opt_state, step
+
+            last_loss = float(loss_val)
 
         else:
-            return nnx.state(network, nnx.Param), opt_state, max_steps  # ty: ignore
+            if success:
+                # check for NaN/inf in all parameters after optimization
+                params_ok = all(
+                    not (bool(jnp.any(jnp.isnan(v))) or bool(jnp.any(jnp.isinf(v))))
+                    for v in jax.tree_util.tree_leaves(params)
+                )
+                if not params_ok:
+                    logger.warning("NaN detected in parameters, restoring backup")
+                    params = params_backup
+                    opt_state = opt_backup
+                    continue
+                nnx.update(network, params)  # ty: ignore
+                return params, opt_state, max_steps
+
+        params = params_backup
+        opt_state = opt_backup
 
     logger.error("Local optimization failed after all retries")
     nnx.update(network, params_backup)  # ty: ignore
-    return params_backup, opt_backup, 0
+    return params_backup, opt_state, 0
 
 
 # ==============================================================================

@@ -26,6 +26,9 @@ from ._hamiltonian_prepare import prepare
 
 logger = logging.getLogger(__name__)
 
+# Max capacity-doubling retries when the find_all CUDA hash table overflows.
+_MAX_HASH_RETRIES = 8
+
 
 def _register_ffi(n_qubytes: int) -> None:
     """Compile and register the CUDA FFI targets for the given n_qubytes.
@@ -81,9 +84,18 @@ class FermiHamiltonian:
         self._parity_mask = self._parity_mask[order]
         self._parity_const = self._parity_const[order]
         self._coef = self._coef[order]
-        # 预过滤: 分离对角 term (flip_mask == 0) 用于 compute_diagonal
+        # 预过滤: 分离对角 term (flip_mask == 0) 用于 compute_diagonal。
+        # 只有不改变构型的 term 对对角有贡献; 对角 term 通常仅占 1-10%;
+        # 预先切片出子集可让 compute_diagonal 跳过 90-99% 无用 (term, config) 对。
         fm_sum = jnp.sum(self._flip_mask, axis=1)
-        self._diag_idx = jnp.where(fm_sum == 0)[0]
+        diag_idx = jnp.where(fm_sum == 0)[0]
+        self._diag_create_mask = self._create_mask[diag_idx]
+        self._diag_annihilate_mask = self._annihilate_mask[diag_idx]
+        self._diag_flip_mask = self._flip_mask[diag_idx]
+        self._diag_parity_mask = self._parity_mask[diag_idx]
+        self._diag_parity_const = self._parity_const[diag_idx]
+        self._diag_coef = self._coef[diag_idx]
+        self._diag_count = int(diag_idx.shape[0])
         # 后端选择由目标设备平台决定: CUDA 设备 → CUDA kernel; 其余 → 纯 JAX。
         # CUDA 设备下若编译/注册失败则抛错; 绝不静默退化到跑不动的 fallback。
         self._use_cuda = self._device.platform == "gpu"
@@ -94,7 +106,7 @@ class FermiHamiltonian:
         logger.info(
             "FermiHamiltonian: %d terms (%d diagonal), %d qubits, cuda=%s",
             int(self._coef.shape[0]),
-            len(self._diag_idx),
+            self._diag_count,
             n_qubits,
             self._use_cuda,
         )
@@ -113,6 +125,8 @@ class FermiHamiltonian:
     def compute_diagonal_within_subspace(self, configs: jax.Array) -> jax.Array:
         batch_size = configs.shape[0]
         target = f"qmp_compute_diagonal_within_subspace_{self._n_qubytes}"
+        # 仅传入对角 term 子集 (flip_mask == 0)。kernel/fallback 内部仍会检查
+        # flip_mask==0; 但传子集可跳过绝大多数非对角 term 的无用遍历。
         if self._use_cuda:
             return jax.ffi.ffi_call(
                 target,
@@ -120,21 +134,21 @@ class FermiHamiltonian:
                 vmap_method="broadcast_all",
             )(
                 self._to_dev(configs),
-                self._to_dev(self._create_mask),
-                self._to_dev(self._annihilate_mask),
-                self._to_dev(self._flip_mask),
-                self._to_dev(self._parity_mask),
-                self._to_dev(self._parity_const),
-                self._to_dev(self._coef),
+                self._to_dev(self._diag_create_mask),
+                self._to_dev(self._diag_annihilate_mask),
+                self._to_dev(self._diag_flip_mask),
+                self._to_dev(self._diag_parity_mask),
+                self._to_dev(self._diag_parity_const),
+                self._to_dev(self._diag_coef),
             )
         return _jax_compute_diagonal_within_subspace(
             self._to_dev(configs),
-            self._to_dev(self._create_mask),
-            self._to_dev(self._annihilate_mask),
-            self._to_dev(self._flip_mask),
-            self._to_dev(self._parity_mask),
-            self._to_dev(self._parity_const),
-            self._to_dev(self._coef),
+            self._to_dev(self._diag_create_mask),
+            self._to_dev(self._diag_annihilate_mask),
+            self._to_dev(self._diag_flip_mask),
+            self._to_dev(self._diag_parity_mask),
+            self._to_dev(self._diag_parity_const),
+            self._to_dev(self._diag_coef),
         )
 
     def apply_within_subspace(
@@ -179,25 +193,47 @@ class FermiHamiltonian:
         n_qubytes_dim = configs_i.shape[1]
         target = f"qmp_find_all_relative_configs_{self._n_qubytes}"
         if self._use_cuda:
-            return jax.ffi.ffi_call(  # ty: ignore[invalid-return-type] — ffi_call returns Sequence[Array], actual is tuple
-                target,
-                (
-                    jax.ShapeDtypeStruct((hash_capacity, n_qubytes_dim), jnp.uint8),
-                    jax.ShapeDtypeStruct((hash_capacity, 2), jnp.float64),
-                    jax.ShapeDtypeStruct((), jnp.int32),
-                ),
-                vmap_method="broadcast_all",
-            )(
-                self._to_dev(configs_i),
-                self._to_dev(psi_i),
-                self._to_dev(configs_exclude),
-                self._to_dev(self._create_mask),
-                self._to_dev(self._annihilate_mask),
-                self._to_dev(self._flip_mask),
-                self._to_dev(self._parity_mask),
-                self._to_dev(self._parity_const),
-                self._to_dev(self._coef),
-                hash_capacity=int(hash_capacity),
+            # The kernel's open-addressing table can overflow (probe cap hit). It
+            # returns an overflow flag; on overflow we double the capacity and
+            # retry so no config is silently dropped.
+            configs_i_d = self._to_dev(configs_i)
+            psi_i_d = self._to_dev(psi_i)
+            configs_exclude_d = self._to_dev(configs_exclude)
+            create_mask_d = self._to_dev(self._create_mask)
+            annihilate_mask_d = self._to_dev(self._annihilate_mask)
+            flip_mask_d = self._to_dev(self._flip_mask)
+            parity_mask_d = self._to_dev(self._parity_mask)
+            parity_const_d = self._to_dev(self._parity_const)
+            coef_d = self._to_dev(self._coef)
+            capacity = int(hash_capacity)
+            for _ in range(_MAX_HASH_RETRIES):
+                new_configs, psi_j, count, overflow = jax.ffi.ffi_call(
+                    target,
+                    (
+                        jax.ShapeDtypeStruct((capacity, n_qubytes_dim), jnp.uint8),
+                        jax.ShapeDtypeStruct((capacity, 2), jnp.float64),
+                        jax.ShapeDtypeStruct((), jnp.int32),
+                        jax.ShapeDtypeStruct((), jnp.int32),
+                    ),
+                    vmap_method="broadcast_all",
+                )(
+                    configs_i_d,
+                    psi_i_d,
+                    configs_exclude_d,
+                    create_mask_d,
+                    annihilate_mask_d,
+                    flip_mask_d,
+                    parity_mask_d,
+                    parity_const_d,
+                    coef_d,
+                    hash_capacity=capacity,
+                )
+                if int(overflow) == 0:
+                    return new_configs, psi_j, count
+                capacity *= 2
+            raise RuntimeError(
+                f"find_all_relative_configs hash table overflowed after {_MAX_HASH_RETRIES} "
+                f"retries (final capacity {capacity})."
             )
         return _jax_find_all_relative_configs(
             self._to_dev(configs_i),

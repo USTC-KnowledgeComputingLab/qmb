@@ -1028,11 +1028,13 @@ git commit -m "feat: implement CUDA JIT compilation and caching loader"
 **Files:**
 - Rewrite: `src/qmp/hamiltonian/fermi_hamiltonian/_hamiltonian_cuda.cu`
 
+> **实现分歧说明 (后续修复轮次)**: 本 Task 以下伪代码提到 `cuco::static_map`、Bloom filter 等，属**初始设计意图**。实际落地的 `.cu` 使用**自定义线性探测哈希表 + inline wyhash64**，未链接 cuCollections；apply/find_all/find_topk 各自带独立的 build/collect kernel。以实际代码与本文件末尾"CUDA 状态更新"为准。
+
 This is the largest task. The CUDA file contains all four operations as XLA FFI handlers. Each operation:
 1. Receives buffers via `ffi::Buffer<T>` and `ffi::ResultBuffer<T>`
 2. Launches a 2D grid-stride loop kernel
 3. Uses `is_applicable`, `apply_flip`, `_parity` as device helper functions
-4. Hashes with wyhash, uses `cuco::static_map` for hash table operations
+4. Hashes with wyhash via a custom linear-probing table (原设计写 `cuco::static_map`，实际未使用)
 
 Due to CUDA file length, implement in three sub-tasks.
 
@@ -1368,13 +1370,13 @@ git commit -m "test: add CUDA vs JAX fallback regression tests"
 
 以下事项 spec 有明确要求，但 plan 中未完整展开。执行 agent 必须在对应任务中补全：
 
-### 补充 1: 块级归约（Task 8a）
+### 补充 1: diagonal 归约（Task 8a）— 已实现 (one-thread-per-config)
 
-Spec §3.2.1 要求 `compute_diagonal_within_subspace` 使用 shared memory 做 intra-block 归约，每个 block 只发一次 `atomicAdd`——而非每个线程都发 `atomicAdd`。实现方法：block 内用 `__shared__ double2 accum[256]` 做 warp-level reduction，最后 thread 0 写回 global。
+Spec §3.2.1 初版设想用 shared memory 做 intra-block 归约。实际采用更优方案: 对角元互相独立，故一个线程负责一个 config、寄存器累加所有对角 term、一次性写回 `psi[i]`，彻底消除 atomicAdd 与 L2 争用，且无需 shared memory 或 memset。初版的 `s_re[i % 256]` shared-mem 归约在 `B > 256` / 多 block 时有 slot 串号 bug，已弃用。
 
-### 补充 2: `__ldg()` 读取优化（Task 8a-8d）
+### 补充 2: `__ldg()` 读取优化（Task 8a-8d）— 设计范围已定
 
-Spec §3.2.2 要求所有只读输入（configs, create_mask, annihilate_mask, flip_mask, parity_mask, parity_const, coef）通过 `__ldg()` 走 read-only cache。在 CUDA kernel 中将 `const uint8_t* __restrict__` 的访问改为 `__ldg(ptr + offset)` 模式。
+`__ldg()` 用于 coef / psi / parity_const 以及 n_qubytes>8 的逐字节路径。**n_qubytes≤8 的打包 uint64 快路径 (`load_u64` 经 `__builtin_memcpy`) 设计上不使用 `__ldg`**: config/mask 行仅 1 字节对齐，64 位 `__ldg` 是错位加载，逐字节 `__ldg` 又抵消单寄存器加载初衷——二者互斥，故快路径永久豁免，非待办项。
 
 ### 补充 3: 哈希表跨调用缓存（Task 8b）— 预留未启用
 
@@ -1388,8 +1390,10 @@ Spec §5.1-5.3 要求但 plan 初始未包含的测试（均已添加）:
 - `test_forward_backward_value_consistency`: ✓ `test_apply_within_forward_backward`, `test_apply_within_hermitian`, `test_cuda_apply_forward`, `test_cuda_apply_backward`
 - `test_diagonal_hand_calculated`: ✓ `test_diagonal_exact`, `test_diagonal_all_hopping`, `test_diagonal_complex_coef`, `test_diagonal_only_hamiltonian`
 - `test_hash_table_overflow_retry`: ✓ `test_cuda_overflow_retry`
-- `test_cuda_apply_within`, `test_cuda_find_all`, `test_cuda_find_topk`: ✓ 全部 21 个 CUDA 测试
-- 总计: 96 tests
+- `test_cuda_apply_within`, `test_cuda_find_all`, `test_cuda_find_topk`: ✓ 全部 30 个 CUDA 测试
+- 总计: fermi_hamiltonian 子系统 prepare 32 + fallback 40 + cuda 30 + FermiHamiltonian 类(CPU 路径) 8 = 110; 全仓库 157。注: `test_fermi_hamiltonian.py` 在 CPU 上驱动 `FermiHamiltonian` 类 (routes to fallback)，覆盖 CUDA 测试因无 GPU 被跳过时仍需验证的 Python 层逻辑 (后端选择、#4 对角预过滤、转发/形状、find_all/find_topk 包装)。
+
+> **CUDA 状态更新 (后续修复轮次)**: Task 8 初版的 CUDA kernel 无法编译且三个操作为未完成 stub，`_try_register_ffi` 的 try/except 静默吞掉编译失败使 GPU 上实际跑的是 fallback (测试形同虚设)。后续修复轮次已让 CUDA 完整可用: 修全部编译错误、补 apply/find_all/find_topk 的哈希表构建与结果回填、修 misaligned uint64 读取 (改 `__builtin_memcpy`)、去除 SIMT 自旋死锁、atomicMax-double 改 CAS-loop。30 个 CUDA 测试现在真正在 GPU 上执行并与 fallback `allclose` 对拍通过 (需 `jax_enable_x64`, 见 `tests/conftest.py`)。
 
 ### 补充 5: AGENTS.md 名称确认与更新（Task 1）
 
@@ -1398,9 +1402,9 @@ Spec §5.1-5.3 要求但 plan 初始未包含的测试（均已添加）:
 
 ### 补充 6: `if constexpr (n_qubytes <= 8)` 静态分发 (Task 8a-8d)
 
-### 补充 7: compute_diagonal 预过滤 (Task 6, Task 8a) — 索引已计算，未用于传参
+### 补充 7: compute_diagonal 预过滤 (Task 6, Task 8a) — 已实现
 
-Spec §3.2.1: 仅遍历 flip_mask==0 的对角 term 子集。`FermiHamiltonian` 已计算 `_diag_idx`（flip_mask==0 的 term 索引）并写入日志，但 `compute_diagonal_within_subspace` 的 CUDA 和 JAX 路径仍接收全部 term masks，在 kernel 内部运行时检查 `flip_mask[t]==0`。将 `_diag_idx` 用于传参过滤可减少 90-99% 无用遍历，但需注意 JIT trace 下索引切片（非静态 shape）可能额外触发 re-trace。
+Spec §3.2.1: 仅遍历 flip_mask==0 的对角 term 子集。`FermiHamiltonian` 初始化时按 `flip_mask==0` 切出对角 term 子集数组 (`_diag_create_mask` 等)，`compute_diagonal_within_subspace` 只把该子集传给 CUDA/JAX 路径，跳过 90-99% 非对角 term。切片在 eager 的 `__init__` 中完成 (非 jit)，无 re-trace 问题。
 
 Spec §3.2: n_qubits ≤ 64 时走 `uint64_t` 单寄存器。执行 agent 须在 CUDA kernel 中实现两条编译期路径：`if constexpr (n_qubytes <= 8)` 用 `uint64_t` 批量 AND/POPCNT/XOR，else 逐字节循环。`n_qubytes` 是 template parameter，false 分支不参与编译。
 
@@ -1412,3 +1416,22 @@ Spec §3.2: n_qubits ≤ 64 时走 `uint64_t` 单寄存器。执行 agent 须在
 - `apply_within_subspace`: `@partial(jax.jit, static_argnums=(9,))` + `jnp.where` masking — `direction` 编译期固定，内层查表向量化。已通过。
 - `find_all_relative_configs`: `@partial(jax.jit, static_argnums=(9,))` + `lax.fori_loop` + `lax.cond` — 哈希表操作用 `fori_loop` 携带可变状态，每个分支决策用 `lax.cond`。已通过。
 - `find_topk_relative_configs`: `@partial(jax.jit, static_argnums=(2,))` + `lax.fori_loop` + `lax.cond` — 同上。已通过。
+
+### 补充 9: CUDA 优化项对齐 (设计目标 vs 代码) — 状态汇总
+
+对 spec §3.2 列出的优化项逐一核对，本轮 (CUDA 修复后的对齐轮次) 完成情况:
+
+**已实现:**
+- #1 diagonal 归约: one-thread-per-config 寄存器累加，零 atomicAdd (补充 1)。
+- #2 `__ldg` 范围: 设计范围已定 (打包 uint64 快路径因对齐永久豁免，非待办)。
+- #3 apply_within 择小侧遍历: 总是遍历 `min(B_src, B_dst)`、建表于另一侧; flip 自逆保证逐位一致。
+- #4 compute_diagonal 对角 term 预过滤: init 切子集，只传对角 term。
+- #6 find_all overflow retry: kernel 返回 overflow 标志，Python 翻倍 capacity 重试 (≤8 次)。
+- #8 排除集第二哈希表: find_all/find_topk 用 `exclude_slot` O(1) 查询替代线性扫描。
+- #10 find_all 并发去重严格性: 两趟 canonical-slot 归并，count/振幅精确 (高冲突对拍测试验证)。
+- find_topk 并发去重: collect 按 canonical slot 去重，top-K 无重复构型。
+
+**仍为 planned (未实现):**
+- #5 apply_within 哈希表跨调用缓存 (补充 3；`_apply_hash_cache` 占位)。
+- #7 find_topk chunked compaction + `global_min_weight` 剪枝 (spec §3.2.4；`global_min_weight` 当前恒 0 无剪枝)。零可测收益 + 高复杂度，仅为超大 term 数预留。
+- 多节点多卡 shard_map (spec §6 非目标)。

@@ -109,7 +109,7 @@ class Model(ModelProto[ModelConfig]):
 
     def create_network(self, name: str, params: dict, *, rngs: nnx.Rngs) -> NetworkProto:
         cfg_cls = self.network_dict[name]
-        cfg = dacite.from_dict(cfg_cls, params)  # ty: ignore — dacite from_dict stub is incorrect
+        cfg = dacite.from_dict(cfg_cls, params)  # ty: ignore — network_dict values are typed object; dacite needs a concrete type
         return cfg.create(self, rngs=rngs)
 
     def show_config(self, config: jax.Array) -> str:

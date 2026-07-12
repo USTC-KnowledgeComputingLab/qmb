@@ -8,10 +8,13 @@ models register themselves at import time via
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, TypeVar
 
 if TYPE_CHECKING:
     import jax
+    from flax import nnx
+
+    from qmp.networks._protocol import NetworkProto
 
 config_t = TypeVar("config_t")
 
@@ -59,6 +62,13 @@ class ModelProto(Protocol[config_t]):
 
     def show_config(self, config: jax.Array) -> str:
         """Render a bit-packed configuration as a human-readable string."""
+
+    def create_network(self, name: str, params: dict[str, Any], *, rngs: nnx.Rngs) -> NetworkProto:
+        """Construct a compatible network by name, injecting model metadata.
+
+        Looks up ``name`` in ``network_dict``, deserialises ``params`` into the
+        network config dataclass, and calls its ``create(model, *, rngs)``.
+        """
 
 
 model_dict: dict[str, type[ModelProto[object]]] = {}

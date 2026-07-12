@@ -8,7 +8,7 @@
 |------|------|
 | 数值计算 | `jax` + `jaxlib` |
 | 神经网络 | `flax` (nnx API) |
-| CUDA 扩展 | `jax.ffi` (XLA custom call) + nvcc + cuCollections |
+| CUDA 扩展 | `jax.ffi` (XLA custom call) + nvcc (自定义线性探测哈希表 + inline wyhash64) |
 | 量子化学接口 | `openfermion`, `pyscf` |
 | Lint/Format | `ruff` |
 | 类型检查 | `ty` (Astral 出品) |
@@ -40,6 +40,8 @@ old/                     # 旧 main 分支参考代码 (如存在)
 `qmp --config config.yaml` 入口在 `__main__.py`。YAML 仅含 `action` 顶层节；model/network 作为 `SubConfigRef(name, params)` 嵌入 action params。
 
 model 和 action 维护双注册表（`xxx_config_dict` + `xxx_class_dict`），模块导入时自注册。action 内部通过 `qmp.models._build.build_model` 从 `SubConfigRef` 构造 model；network 通过 `model.create_network(name, params, *, rngs)` 构造（network 不设全局注册表，由 model 内聚）。
+
+每个 model 类维护一个 `network_dict`（`{name: 网络配置类}`）：`create_network` 按 name 查得配置类，`dacite.from_dict` 反序列化 `params`，再调 `cfg.create(model, *, rngs)` 从 model 元数据（n_qubits、电子数、n_spins）导出网络 site/spin 参数。详见 `models/AGENTS.md`「网络注册」。
 
 ## 类型注解约定
 

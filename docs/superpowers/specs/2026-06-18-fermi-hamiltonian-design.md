@@ -10,7 +10,7 @@
 - **位掩码预处理** (`prepare`): 纯 Python 将费米子哈密顿量字典转为 (create_mask, annihilate_mask, flip_mask, parity_mask, parity_const, coef) 表示
 - **四个 CUDA kernel**: `compute_diagonal_within_subspace`, `apply_within_subspace`, `find_all_relative_configs`, `find_topk_relative_configs` — 通过 JAX FFI 接入
 - **纯 JAX fallback**: CPU/CI 环境下无 GPU 可用时，用 `jax.jit` 实现相同功能
-- **JIT 编译与缓存**: CUDA kernel 按需编译 (.cu → .so)，缓存于 `~/.cache/qmp/`
+- **JIT 编译与缓存**: CUDA kernel 按需编译 (.cu → .so)，缓存于 `~/.cache/qmp/hamiltonian/fermi/qmp_hamiltonian_{n_qubytes}/lib.so`
 - **pytest 测试**: prepare 正确性 + fallback 端到端 + CUDA 回归
 
 ## 2. 文件结构
@@ -142,54 +142,59 @@ def prepare(operators, n_qubits):
 
 计算 H 在每个 config 上的对角元期望值。只有 `flip_mask[t] == 0` 的 term（不改变构型）才对对角有贡献。
 
+**算法**: 每个对角元 `psi[i]` 相互独立，故一个线程负责一个 config，在寄存器里累加该 config 上所有（对角）term 的贡献，最后一次性写回 `psi[i]`。无 atomicAdd、无 shared-memory 归约、无需预先 memset。
+
 ```
-for each term_t:
-    for each config_i:
+for each config_i (one thread per config, grid-stride over configs):
+    acc_re = acc_im = 0
+    for each term_t (diagonal subset, flip_mask == 0):
         if not is_applicable(config_i, create_mask[t], annihilate_mask[t]): continue
-        if flip_mask[t] != 0: continue   # 对角条件: 无净翻转
-
-        parity = parity_const[t] XOR popcount(parity_mask[t] & config_i) & 1
+        if flip_mask[t] != 0: continue   # 冗余保险: 预过滤后子集已满足
+        parity = parity_const[t] XOR (popcount(parity_mask[t] & config_i) & 1)
         sign = -1.0 if parity else 1.0
-
-        atomicAdd(psi[i,0], sign * coef[t,0])
-        atomicAdd(psi[i,1], sign * coef[t,1])
+        acc_re += sign * coef[t,0]
+        acc_im += sign * coef[t,1]
+    psi[i,0] = acc_re
+    psi[i,1] = acc_im
 ```
 
-**并行度**: grid-stride loop，grid 大小按 SM 数量 × 最大 occupancy 设定（~10^5 blocks 级别，而非 T×B = 10^12）。每个 block 内循环处理多个 term × config 对。
+**并行度**: grid-stride over configs（一线程一 config，~10^6 线程级别），非 T×B 网格。每线程内层只遍历对角 term 子集。
 
-**预过滤** (planned, not yet in active path): Python 层预处理阶段将 term 按 `flip_mask[t] == 0` 分为对角 term 和非对角 term。`compute_diagonal_within_subspace` 可仅遍历对角 term 子集（diagonal terms 通常只占 1-10% 总 term 数），减少 90-99% 无用线程。当前实现中 `_diag_idx` 已计算并写入日志，但 kernel 仍遍历全部 terms 并在运行时检查 `flip_mask[t] == 0`。
+**预过滤** (implemented): `FermiHamiltonian` 初始化时按 `flip_mask[t] == 0` 切出对角 term 子集 (`_diag_*` 数组)。`compute_diagonal_within_subspace` 只把该子集传给 kernel/fallback，跳过绝大多数非对角 term (对角 term 通常仅占 1-10%)。kernel 内仍保留 `flip_mask[t]==0` 检查作为冗余保险。
 
-**块级归约**: 每个 block 的多个线程可能对同一个 `psi[i]` 累加贡献。先用 shared memory 做 intra-block 归约，最后每个 block 只发一次 `atomicAdd`。这在 diagonal term 密集时（多 term 对应同一 config）显著减少 L2 原子争用。
+**为何不用 atomicAdd / shared-memory 归约**: 由于对角元互相独立、一线程独占一个 `psi[i]`，无需任何原子操作或 block 内归约即可零争用写回——这比"每 (term,config) 对 atomicAdd"或"shared-memory 块级归约"都更简单且更快。（初版曾尝试 `s_re[i % 256]` shared-mem 归约，在 `B > 256` / 多 block 时有 slot 串号 bug，已弃用。）
 
 #### 3.2.2 `apply_within_subspace` — 稀疏 H·psi 投影
 
 计算 `ψ_j = H · ψ_i` 投影到 `configs_j` 子空间。支持 forward/backward 双向。
 
 ```
-预处理: 对 dst_configs 构建自定义线性探测哈希表 (apply_hash_slot, key=config bytes, value=index)
-         哈希: wyhash64, load factor 60%
+方向语义: forward (dir 0) src=configs_i, dst=configs_j; backward (dir 1, H^†) src=configs_j, dst=configs_i。
+遍历侧: 令 traverse = argmin(B_src, B_dst)，lookup = 另一侧; 对 lookup 侧构建线性探测哈希表
+        (apply_hash_slot, key=config bytes, value=该侧下标; wyhash64, load factor 60%)。
+        因 flip 自逆，遍历 src 侧或 dst 侧枚举的 (src,dst) 连接对集合相同。
 
-for each term_t:
-    for each src_i:                              # forward: src=configs_i; backward: src=configs_j
-        # backward 时需检查 config_i (= config_j XOR flip[t]) 是否满足约束
-        check_config = src_i XOR flip_mask[t] if direction == 1 else src_i
-        if not is_applicable(check_config, create_mask[t], annihilate_mask[t]): continue
-        new_config = src_i XOR flip_mask[t]
-
-        idx = apply_hash_lookup(new_config)       # forward: lookup in configs_j; backward: lookup in configs_i
-        if idx < 0: continue
-
-        parity = parity_const[t] XOR popcount(parity_mask[t] & check_config) & 1
-        sign = -1.0 if parity else 1.0
-        cf = (coef[t,0], -coef[t,1]) if direction == 1 else (coef[t,0], coef[t,1])  # conj for H^†
-        contribution = sign * complex_mul(cf, psi_src[i])
-        atomicAdd(psi_j[idx,0], contribution.real)
-        atomicAdd(psi_j[idx,1], contribution.imag)
+for each t, for each m in traverse side (one thread per (t, m) pair):
+    if traverse == src side:
+        src_c = traverse[m];  new_c = src_c XOR flip[t]
+        out_idx = lookup(new_c);   psi_idx = m
+    else:  # traverse == dst side
+        dst_c = traverse[m];  src_c = dst_c XOR flip[t]     # flip 自逆
+        psi_idx = lookup(src_c);   out_idx = m
+    if lookup miss: continue
+    check_config = src_c XOR flip[t] if direction == 1 else src_c   # H^† 检查作用于 config_i
+    if not is_applicable(check_config, create_mask[t], annihilate_mask[t]): continue
+    parity = parity_const[t] XOR (popcount(parity_mask[t] & check_config) & 1)
+    sign = -1.0 if parity else 1.0
+    cf = (coef[t,0], -coef[t,1]) if direction == 1 else (coef[t,0], coef[t,1])  # conj for H^†
+    contribution = sign * complex_mul(cf, psi_src[psi_idx])
+    atomicAdd(psi_j[out_idx,0], contribution.real)
+    atomicAdd(psi_j[out_idx,1], contribution.imag)
 ```
 
-**方向选择**: forward 遍历 T × B_i，backward 遍历 T × B_j。选较小侧最小化总线程数。forward 时 `psi_i` 为输入波函数，输出形状 `[B_j,2]`。backward 时 `psi_i` 为 `configs_j` 上的波函数，H^† 作用于它，投影回 `configs_i`，输出形状 `[B_i,2]`。
+**方向选择与择小侧遍历** (implemented): `direction` 由调用方指定语义 (forward = H, backward = H^†)，据此固定 src/dst——forward: src=configs_i、dst=configs_j、输出 `[B_j,2]`；backward: src=configs_j、dst=configs_i、输出 `[B_i,2]`，系数取共轭。在此语义之上，kernel 总是遍历 `min(B_src, B_dst)` 较小侧、把哈希表建在被查找的另一侧以最小化总线程数 (`T × 较小侧`)。因 flip 自逆，两种遍历模式枚举的 (src, dst) 连接对集合相同，`psi_j` 逐位一致；`src_psi` 始终按 src 侧下标索引。
 
-- **`__ldg()` 读取掩码和数据**: 所有只读输入通过 `__ldg()` 走 read-only cache，减少 L1 压力。
+- **`__ldg()` 读取**: coef / psi / parity_const 及 n_qubytes>8 的逐字节路径通过 `__ldg()` 走 read-only cache。**n_qubytes≤8 的打包 uint64 快路径不使用 `__ldg`**（设计排除，非待办优化）：config/mask 行仅 1 字节对齐，64 位 `__ldg` 会是错位加载；逐字节 `__ldg` 又会抵消单寄存器加载的初衷，二者互斥。
 - **哈希表跨调用缓存** (planned, placeholder only): 若 `configs_j` 在多轮迭代中不变（Lanczos 内循环常见），复用哈希表省 50-200ms 构建时间。`FermiHamiltonian` 中已预留 `_apply_hash_cache` 字段，但 CUDA kernel 当前每次调用均重新构建哈希表。
 - **哈希函数**: 使用 wyhash。config bytes 非随机（受占据数、自旋守恒约束），wyhash 使用 multiply-and-xor 链 (wymum) 对结构化 occupation-number 字节有良好扩散。
 
@@ -206,8 +211,8 @@ for each term_t:
         if not is_applicable(config_i, create_mask[t], annihilate_mask[t]): continue
         new_config = config_i XOR flip_mask[t]
 
-        # 排除已知构型: 线性扫描 configs_exclude
-        if linear_scan_match(exclude_configs, new_config) >= 0: continue
+        # 排除已知构型: O(1) 查询排除集哈希表 (exclude_slot)
+        if exclude_table.contains(new_config): continue
 
         # 计算贡献
         parity = parity_const[t] XOR popcount(parity_mask[t] & config_i) & 1
@@ -219,14 +224,16 @@ for each term_t:
         if slot: atomicAdd(slot, contribution)
         else: hash_table.insert_cas(new_config, contribution)
 
-# kernel 退出后 → host 端线性扫描收集非空 slots
+# kernel 退出后 → 两趟 collect (canonical-slot 归并) 回填 new_configs/psi_j/count
 ```
+
+**并发去重** (implemented): 为避免 SIMT 自旋死锁，插入时遇到 mid-publish 的 slot 会跳到下一槽，极端并发下同一 config 可能落在多个 slot。collect 分两趟按"规范首槽"归并：趟1 每个 key 的规范首槽 (其探测链上第一个持有该 key 的 slot) 领一个输出下标并写 key；趟2 每个 slot 把振幅 `atomicAdd` 到其规范首槽的输出。因插入从不跳过空槽，同一 key 的所有 slot 落在从 `hash(key)` 起的连续 occupied 段内，所有重复都归约到同一规范槽，故 count 与累加振幅精确。
 
 **容量**: 10^7 distinct → ~600 MB; 10^8 → ~6 GB。预分配，零运行时分配。
 
-**溢出保护**: 插入时 probe 超硬上限 100 → 标记 overflow → 不可静默丢弃 config。Python 层尚未读取 overflow 标志以 retry。
+**溢出保护** (implemented): 插入时 probe 超硬上限 100 → 置 overflow 标志。kernel 通过额外的 `overflow` 结果返回给 Python；Python 层检测到 overflow 即将 `hash_capacity` 翻倍重试 (最多 `_MAX_HASH_RETRIES=8` 次)，绝不静默丢弃 config。
 
-**排除集**: 对 `configs_exclude` 进行线性扫描排除已知构型（terms × configs 数量级不高时可行）。规划中可用第二个 `cuco::static_map` 替代线性扫描以支持更大排除集。
+**排除集** (implemented): 每次调用先对 `configs_exclude` 构建第二个自定义线性探测哈希表 (`exclude_slot`, wyhash64)，kernel 内以 O(1) 查询替代原线性扫描。exclude 为空时不建表。
 
 #### 3.2.4 `find_topk_relative_configs` — Top-K 选择
 
@@ -248,10 +255,10 @@ for each term_t:
         if slot: atomicMax(slot.weight, weight)
         else: hash_table.insert_cas(new_config, weight)
 
-# kernel 退出后 → Python/JAX 层 argsort → top K
+# kernel 退出后 → collect (canonical-slot 去重) → Python/JAX 层 argsort → top K
 ```
 
-**实现**: 当前为单次 kernel 启动。规划中的 between-kernel compaction（chunking + CUB radix sort + rebuild）可在 terms 数量极大时降低内存占用，尚未实现。
+**实现**: 当前为单次 kernel 启动。排除集与 find_all 一致，用第二个哈希表 (`exclude_slot`) 做 O(1) 查询 (implemented)。**并发去重** (implemented): collect kernel 对每个 key 只让其规范首槽输出、并取该 key 所有重复 slot 的 max 权重，非规范 slot 输出权重 0，保证同一 config 不占用多个 top-K 名额。规划中的 between-kernel compaction（chunking + CUB radix sort + rebuild + `global_min_weight` 剪枝）可在 terms 数量极大时降低内存占用，尚未实现 (planned)——`global_min_weight` 当前恒为 0 (无剪枝)。
 
 **`max` 而非 `sum` 的理由**: (a) `atomicMax` 单调确定，而 `atomicAdd` 浮点非结合导致非确定性；(b) 量子化学中 `|H_ij*c_i|²` 近似 power-law，`max` 与 `sum` 高度相关（Spearman ρ≈0.75-0.95），max 足以选出最重要的 configs；(c) 无需 Gumbel 噪声——其对 K=100K 引入 ~5-15% 排名翻转，且每次额外 60+ cycles 计算成本。
 
@@ -326,32 +333,29 @@ class FermiHamiltonian:
 **编译 CUDA**: `nvcc` (用户机器上), `jaxlib` 的 XLA headers (`xla/ffi/api/ffi.h`)
 
 **第三方库** (git submodule, 置于 `src/qmp/hamiltonian/third_parties/`):
-- `cuCollections`: GPU hash table (`cuco::static_map`), header-only, [github.com/NVIDIA/cuCollections](https://github.com/NVIDIA/cuCollections)
-- `wyhash`: 哈希函数, ~30 行 C inline 到 .cu 中, 无需编译
+- `cuCollections`: 作为 submodule 保留、loader 仍传 `-I cuco/include`，但**当前 `.cu` 实现未使用**。四个操作均使用自定义线性探测哈希表 (inline wyhash64)，非 `cuco::static_map`。规划中若要支持超大排除集/去重可切回 cuco。
+- `wyhash`: 哈希函数, 内联到 .cu (`wyhash64` 模板), 无需编译
 
-**无**: numpy, torch, pybind11, ninja
+**无**: numpy, torch, pybind11, ninja, cuCollections (运行时实际未链接)
 
 ## 5. 测试
 
+实际测试文件 (计数见 plan 补充 4): prepare 32 + fallback 40 + cuda 30 + FermiHamiltonian 类(CPU 路径) 8。
+
 ### 5.1 `tests/unit/hamiltonian/fermi_hamiltonian/test_prepare.py`
-- `test_create_mask_h2`: H₂ 哈密顿量 verify create_mask
-- `test_annihilate_mask_hubbard_2x1`: 2-site Hubbard verify annihilate_mask
-- `test_parity_mask_jw`: JW 符号正确性 (已知手工计算)
-- `test_zero_term_skip`: 恒为零的 term 被正确跳过
-- `test_coef_preserved`: 系数保持
+prepare 正确性: create/annihilate/parity mask、JW 符号、零 term 跳过、系数保持、字节打包、多算符 term 等。
 
 ### 5.2 `tests/unit/hamiltonian/fermi_hamiltonian/test_fallback.py`
-- 小型合成哈密顿量 (4 qubits, ~10 terms), 10-20 configs
-- `test_diagonal_term_exact`: 手工计算结果对比
-- `test_apply_within_subspace_forward_backward_consistency`: H 和 H^dag 结果关系
-- `test_find_all_relative_configs_dedup`: 去重和振幅累加
-- `test_find_topk_relative_configs_topk`: Top-K 排序
+纯 JAX fallback 四操作端到端 (直接调用 `_jax_*` 函数): 对角手算对比、forward/backward、find_all 去重+振幅累加、find_topk 排序+max 语义、复数、边缘情形。
 
 ### 5.3 `tests/unit/hamiltonian/fermi_hamiltonian/test_cuda.py`
-- `@pytest.mark.cuda` — 仅 GPU 环境运行
-- 与 test_fallback 相同输入，assert CUDA 输出 ≈ JAX fallback 输出 (`allclose(rtol=1e-12)`)
-- **非 bit-exact**: GPU 的 `atomicAdd` 顺序非确定，浮点加法非结合律导致末位差异，不能用 `==` 比较
-- `test_hash_table_overflow_retry`: 人为给定过小 capacity，验证重试逻辑
+- `pytest.mark.skipif(not cuda_available)` — 仅 GPU 环境运行。
+- 与 fallback 相同输入，assert CUDA 输出 ≈ fallback 输出 (`allclose(rtol=1e-12)`)。
+- **非 bit-exact**: GPU `atomicAdd` 顺序非确定，浮点非结合，用 `allclose` 而非 `==`。
+- 覆盖: 四操作 + 多字节 (n_qubytes≥2) + 择小侧遍历 (含 backward 非对称) + 排除集 (find_all/find_topk) + 溢出重试 (`test_cuda_overflow_retry*`) + 并发去重 (`test_cuda_find_all_dedup_*`, `test_cuda_find_topk_no_duplicate_configs`)。
+
+### 5.4 `tests/unit/hamiltonian/fermi_hamiltonian/test_fermi_hamiltonian.py`
+在 CPU device 上驱动 `FermiHamiltonian` 类 (routes to fallback)，覆盖 CUDA 测试被跳过时仍需验证的 Python 层逻辑: 后端选择、对角预过滤、转发/形状、find_all/find_topk 契约。需 `jax_enable_x64` (见 `tests/conftest.py`)。
 
 ## 6. 非目标
 
@@ -361,11 +365,12 @@ class FermiHamiltonian:
 
 | 风险 | 等级 | 缓解 |
 |------|------|------|
-| 哈希表溢出 (open addressing 无限 probe) | **高** | probe 上限 100 硬限；Python 层 overflow retry 未实现 |
-| `compute_diagonal` 对角 term 仅占 1-10%，grid-stride loop 避免 10^12 线程启动 | **高** | 预过滤对角 term 子集 + grid-stride loop (~10^5 blocks)，不用 T×B 网格 |
-| 结构化 config bytes 导致 MurmurHash3 聚集 | 中 | 所有哈希表统一使用 wyhash |
-| L2 cache thrashing（configs 流驱逐 hash table 条目） | 中 | `__ldg()` 走 read-only cache |
-| 重复 alloc/free 哈希表导致 HBM 碎片化 | 中 | `cudaMemPool` 预分配；apply_within 哈希表跨调用缓存（已预留，未启用） |
-| 大量 terms 单次 kernel 内存压力 | 低 | 当前 terms 数 (<10^6) 单次 kernel 可行；未来可用 chunking |
+| 哈希表溢出 (open addressing 无限 probe) | **高** | probe 上限 100 硬限；CUDA 层返回 overflow 标志，Python 翻倍 capacity 重试 (`_MAX_HASH_RETRIES=8`)，已实现。**注: JAX fallback 无此保护——`new_cnt >= cap` 时静默丢弃 (见下)** |
+| `compute_diagonal` 对角 term 仅占 1-10% | **高** | 预过滤对角 term 子集 (已实现)；kernel 每线程一个 config 寄存器累加，避免 T×B 网格 |
+| 结构化 config bytes 导致哈希聚集 | 中 | 所有哈希表统一使用 wyhash64 |
+| L2 cache thrashing（configs 流驱逐 hash table 条目） | 中 | `__ldg()` 走 read-only cache (逐字节路径 + 标量数组；uint64 快路径因对齐豁免) |
+| 重复 alloc/free 哈希表导致 HBM 碎片化 | 中 | apply_within 哈希表跨调用缓存 (planned, `_apply_hash_cache` 已预留未启用) |
+| 大量 terms 单次 kernel 内存压力 | 低 | 当前 terms 数 (<10^6) 单次 kernel 可行；chunked compaction (planned) |
 | 纯 JAX fallback 与 CUDA 非 bit-exact (`atomicAdd` 顺序非确定) | 低 | 测试用 `allclose(rtol=1e-12)` |
-| `exclude_configs` 线性扫描耗时 | 低 | 当前 exclude 集小，线性扫描可行；未来可用哈希表 |
+| `exclude_configs` 排除 | 低 | CUDA 用第二个哈希表 (`exclude_slot`) O(1) 查询 (已实现)；fallback 用线性扫描 |
+| **JAX fallback find_all/find_topk 溢出静默丢弃** | 中 | fallback 用固定 `cap` 数组，`new_cnt >= cap` 时不插入且无信号；调用方须给足 `hash_capacity`。CUDA 路径有 overflow retry，fallback 无 (设计差异) |
