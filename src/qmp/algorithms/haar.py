@@ -319,7 +319,7 @@ class Haar:
 
             # --- sample ---
             logger.info("Sampling from network...")
-            c_net, p_net = self._network.generate_unique(config.sampling_count_from_network, key=key)  # ty: ignore — network dynamic
+            c_net, p_net = self._network.generate_unique(config.sampling_count_from_network, key=key)
 
             logger.info("Sampling from pool...")
             key2 = jax.random.fold_in(key, 1)
@@ -395,19 +395,19 @@ def _init_state() -> dict[str, typing.Any]:
 
 def _local_optimize(
     network: typing.Any,
-    configs: Array,
-    target_psi: Array,
-    max_idx: int,
-    loss_fn: typing.Callable[..., Array],
-    max_steps: int,
-    stop_loss: float,
-) -> tuple[object, object, int]:
+    configs: typing.Any,
+    target_psi: typing.Any,
+    max_idx: typing.Any,
+    loss_fn: typing.Any,
+    max_steps: typing.Any,
+    stop_loss: typing.Any,
+) -> typing.Any:
 
-    graphdef, params = nnx.split(network, nnx.Param)  # ty: ignore — network dynamic
+    graphdef, params = nnx.split(network, nnx.Param)
 
-    def _loss_grad(pdict: dict[str, typing.Any]) -> Array:  # ty: ignore — closure
-        net = nnx.merge(graphdef, pdict)  # ty: ignore
-        psi_net = net(configs)  # ty: ignore — network dynamic
+    def _loss_grad(pdict: dict[str, typing.Any]) -> Array:
+        net = nnx.merge(graphdef, pdict)
+        psi_net = net(configs)
         psi_net = psi_net / psi_net[max_idx]
         return loss_fn(psi_net, target_psi)
 
@@ -421,7 +421,7 @@ def _local_optimize(
 
         success = True
         for step in range(max_steps):
-            loss_val, grads = jax.value_and_grad(_loss_grad)(params)  # ty: ignore
+            loss_val, grads = jax.value_and_grad(_loss_grad)(params)
             updates, opt_state = opt.update(grads, opt_state, params)
             params = optax.apply_updates(params, updates)
 
@@ -435,12 +435,12 @@ def _local_optimize(
 
             if float(loss_val) < stop_loss:
                 logger.info("Loss threshold met at step %d", step)
-                nnx.update(network, params)  # ty: ignore
+                nnx.update(network, params)
                 return params, opt_state, step
 
             if step > 0 and abs(float(loss_val) - last_loss) < stop_loss:
                 logger.info("Loss stagnated at step %d", step)
-                nnx.update(network, params)  # ty: ignore
+                nnx.update(network, params)
                 return params, opt_state, step
 
             last_loss = float(loss_val)
@@ -457,14 +457,14 @@ def _local_optimize(
                     params = params_backup
                     opt_state = opt_backup
                     continue
-                nnx.update(network, params)  # ty: ignore
+                nnx.update(network, params)
                 return params, opt_state, max_steps
 
         params = params_backup
         opt_state = opt_backup
 
     logger.error("Local optimization failed after all retries")
-    nnx.update(network, params_backup)  # ty: ignore
+    nnx.update(network, params_backup)
     return params_backup, opt_state, 0
 
 
