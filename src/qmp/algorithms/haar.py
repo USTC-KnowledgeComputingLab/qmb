@@ -361,8 +361,6 @@ class Haar:
             # --- local optimization
             logger.info("Starting local optimization...")
             _new_params, _opt, _step = _local_optimize(
-                typing.cast(object, self._network),
-                configs,
                 self._network,
                 configs,
                 target_psi,

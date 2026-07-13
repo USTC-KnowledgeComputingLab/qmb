@@ -154,11 +154,15 @@ def _local_trim(
             continue
         block_c = pool_configs[group_idx]
         block_p = pool_psi[group_idx]
+        # Cap steps at the block dimension: iterating past it exhausts the
+        # Krylov space, making w vanish and the random-injection guard divide
+        # by a zero norm (NaN). Small trim blocks hit this easily.
+        block_steps = min(lanczos_steps, max(block_c.shape[0] - 1, 1))
         lanczos = _DynamicLanczos(
             model=model,
             configs=block_c,
             psi=block_p,
-            max_steps=lanczos_steps,
+            max_steps=block_steps,
             stop_norm=stop_norm,
             random_period=random_period,
             extend_count=0,
