@@ -150,7 +150,8 @@ _run() 生成器:
 
 _eigh(): jnp.linalg.eigh_tridiagonal(alpha, beta) → eigenvals, eigenvecs
 
-_extend(psi_weight): model.find_topk_relative_configs(configs, psi_weight, extend_count, configs)
+_extend(psi_weight): 先把 psi_weight 拆成 (N, 2) 实数 (real, imag) 列 (与 _apply_hamiltonian
+                     同一契约), 再 model.find_topk_relative_configs(configs, psi_weight_real, extend_count, configs)
 
 run() 外层: 根据 basis_strategy 调度 _run() 和 _extend()
 ```
