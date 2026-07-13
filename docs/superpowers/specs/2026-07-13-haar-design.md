@@ -68,6 +68,7 @@ class HaarConfig:
     # checkpoint
     checkpoint_path: str | None = None
     checkpoint_interval: int = 1
+    max_cycles: int = -1        # -1 = 无限循环, >0 = 跑 N 轮后返回
 ```
 
 **随机注入逻辑**：仅在 `krylov_random_period < krylov_max_steps` 时生效。`step % krylov_random_period == 0` 或 `norm < krylov_stop_norm` 时注入。
@@ -78,21 +79,20 @@ class HaarConfig:
 state = {
     "haar": {
         "global": 0,           # cycle 计数
-        "local": 0,            # 累计 local step 计数
-        "pool": (configs, psi, counts),   # jax arrays
+        "local": 0,            # 最近一轮 local optimize 的 step 数
+        "pool": (configs, psi, counts),   # jax arrays; 或 None (首轮)
         "excited": [          # 每项: (energy, configs, psi)
             (E0, configs, psi),
             ...
         ],
     },
-    "network": nnx_params,     # pickle 序列化
-    "optimizer": optax_state,  # pickle 序列化
 }
 ```
 
-- `pool`: `(configs: [M, Q] uint8, psi: [M] complex128, counts: [M] int32)`
+- `pool`: `(configs: [M, Q] uint8, psi: [M] complex128, counts: [M] float64)`
 - `excited`: 列表，每项 `(energy: float, configs: [M, Q] uint8, psi: [M] complex128)`。按 `krylov_state_count` 控制数量
-- 网络参数和优化器状态在顶层 key，加载时直接恢复
+- 网络参数不进 pickle checkpoint；网络由 `nnx.Rngs(42)` 确定性初始化，恢复靠重跑 local optimize。
+- `run()` 把最终 state 存到 `self._state`，便于测试在不写盘的情况下直接检查（`max_cycles=1` + `checkpoint_path=None`）。
 
 ## 5. 主循环伪代码
 
@@ -100,9 +100,11 @@ state = {
 def run(self) -> None:
     state = load_checkpoint() or init_state()
 
-    while True:
+    cycle = state["haar"]["global"]
+    start = cycle                    # 固定循环起点; 不要用会自增的 state["global"] 做上界
+    while max_cycles < 0 or cycle < start + max_cycles:
         # 1. 采样
-        configs_net, psi_net, _ = network.generate_unique(sampling_count_from_network, key=key)
+        configs_net, psi_net = network.generate_unique(sampling_count_from_network, key=key)
         configs_pool, psi_pool = sample_from_pool(state["haar"]["pool"])
         configs, psi = merge_and_dedup(configs_net, psi_net, configs_pool, psi_pool)
 
@@ -122,9 +124,18 @@ def run(self) -> None:
 
         # 5. Update pool
         state["haar"]["pool"] = (configs, psi, counts)
-        state["haar"]["global"] += 1
-        save checkpoint if interval reached
+        state["haar"]["global"] = cycle + 1
+        cycle += 1
+        # 仅当显式配置了 checkpoint_path 时才写盘 (避免污染 cwd)
+        if cycle % checkpoint_interval == 0 and checkpoint_path is not None:
+            save_checkpoint(state, checkpoint_path)
 ```
+
+**循环终止**：`max_cycles` 用**固定的 `start`** 做上界 (`cycle < start + max_cycles`)。
+不能用 `state["haar"]["global"]`——它每轮自增，会让 `cycle < global + max_cycles` 恒成立而死循环。
+
+**checkpoint**：仅当 `checkpoint_path` 非 `None` 时写盘。不再回退到默认文件名
+`haar_checkpoint_cycleNNNNNN.pkl`（那会在无限循环时污染当前目录）。
 
 ## 6. DynamicLanczos
 

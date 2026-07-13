@@ -87,7 +87,7 @@ class TrimConfig:
 state = {
     "trim": {
         "global": 0,          # cycle 计数
-        "local": 0,           # 累计 local step
+        "local": 0,           # 最近一轮 local optimize 的 step 数
         "pool": (configs, psi, counts),   # 或 None（首轮）
         "excited": [(E, configs, psi), ...],
     },
@@ -96,6 +96,7 @@ state = {
 
 - `pool`: `(configs: [M,Q] uint8, psi: [M] complex128, counts: [M] float64)`
 - `_sample_from_pool` 只用 `configs, psi`；`counts` 为兼容占位（`jnp.ones_like(psi.real)`）。
+- `run()` 把最终 state 存到 `self._state`，便于测试在不写盘的情况下直接检查（与 haar 一致）。
 
 ## 6. 核心函数
 

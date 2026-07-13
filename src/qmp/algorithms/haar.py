@@ -297,6 +297,7 @@ class Haar:
         self._network = None
         if config.network is not None and self._model is not None:
             self._network = self._model.create_network(config.network.name, config.network.params, rngs=nnx.Rngs(42))
+        self._state: dict[str, typing.Any] = _init_state()
 
     def run(self) -> None:
         config = self._config
@@ -307,17 +308,15 @@ class Haar:
         loss_fn = _AVAILABLE_LOSSES[config.loss_name]
 
         state: dict[str, typing.Any]
-        state: dict[str, typing.Any] = _init_state()
-        if config.checkpoint_path:
-            loaded = _load_checkpoint(config.checkpoint_path)
-            if loaded is not None:
-                state = loaded
+        loaded = _load_checkpoint(config.checkpoint_path) if config.checkpoint_path else None
+        state = loaded if loaded is not None else _init_state()
+        self._state = state
 
         cycle = state["haar"]["global"]
-        max_cycles = config.max_cycles
+        start = cycle
         logger.info("HAAR starting from cycle %d", int(cycle))
 
-        while max_cycles < 0 or cycle < state["haar"]["global"] + max_cycles:
+        while config.max_cycles < 0 or cycle < start + config.max_cycles:
             logger.info("=== Cycle %d ===", int(cycle))
             key = jax.random.key(cycle * config.sampling_count_from_network)
 
@@ -359,12 +358,12 @@ class Haar:
             for _e, _cfg, p in results:
                 target_prob = target_prob + (p.conj() * p).real
             target_psi = jnp.sqrt(target_prob).astype(jnp.complex128)
-            max_idx = jnp.argmax(jnp.abs(target_psi))
+            max_idx = int(jnp.argmax(jnp.abs(target_psi)))
             target_psi = target_psi / target_psi[max_idx]
 
             # --- local optimization
             logger.info("Starting local optimization...")
-            _new_params, _opt, _step = _local_optimize(
+            _new_params, _opt, step = _local_optimize(
                 self._network,
                 configs,
                 target_psi,
@@ -373,7 +372,7 @@ class Haar:
                 config.local_max_steps,
                 config.local_stop_loss,
             )
-            state["haar"]["local"] = _step
+            state["haar"]["local"] = step
 
             # --- update pool ---
             state["haar"]["pool"] = (configs, psi, jnp.ones_like(psi.real))
@@ -381,9 +380,8 @@ class Haar:
             cycle += 1
 
             # --- checkpoint ---
-            if cycle % config.checkpoint_interval == 0:
-                cp_path = config.checkpoint_path or f"haar_checkpoint_cycle{cycle:06d}.pkl"
-                _save_checkpoint(state, cp_path)
+            if cycle % config.checkpoint_interval == 0 and config.checkpoint_path is not None:
+                _save_checkpoint(state, config.checkpoint_path)
 
 
 def _init_state() -> dict[str, typing.Any]:
