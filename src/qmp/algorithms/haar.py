@@ -106,8 +106,12 @@ class _DynamicLanczos:
         if basic_configs is None:
             basic_configs = self.configs
         n_core = self.configs.shape[0]
+        # find_topk expects psi as (N, 2) real (real, imag) pairs, matching the
+        # kernel/fallback contract used by _apply_hamiltonian; psi_weight here is
+        # a 1-D (possibly complex) vector, so split it into real/imag columns.
+        psi_weight_real = jnp.stack([psi_weight.real, psi_weight.imag], axis=1)
         new_c = self.model.find_topk_relative_configs(  # ty: ignore — model is dynamic
-            basic_configs, psi_weight, self.extend_count, self.configs
+            basic_configs, psi_weight_real, self.extend_count, self.configs
         )
         self.configs = jnp.concatenate([self.configs, new_c], axis=0)
         n_selected = self.configs.shape[0]
