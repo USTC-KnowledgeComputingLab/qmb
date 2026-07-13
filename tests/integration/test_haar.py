@@ -28,7 +28,7 @@ def _make_h2_molecule(path: str) -> None:
     """Generate real H2/STO-3G data, falling back to pre-computed if PySCF unavailable."""
     try:
         from openfermion.chem import MolecularData  # noqa: PLC0415
-        from openfermionpyscf import run_pyscf  # ty: ignore[unresolved-import] — optional dependency
+        from openfermionpyscf import run_pyscf  # ty: ignore[unresolved-import] — optional  # noqa: PLC0415
 
         geom = [("H", (0.0, 0.0, 0.0)), ("H", (0.0, 0.0, 0.7414))]
         mol = MolecularData(geom, "sto-3g", multiplicity=1, charge=0, filename=path)
@@ -194,7 +194,6 @@ def test_merge_pools_dedup_prefers_first(h2_network: MlpElectron) -> None:
 
 def test_loss_gradient(h2_network: MlpElectron) -> None:
     """Gradient of loss with respect to network parameters is non-zero for different target."""
-
 
     key = jax.random.key(42)
     configs, psi = h2_network.generate_unique(16, key=key)
