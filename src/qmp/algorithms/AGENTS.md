@@ -52,6 +52,8 @@ Lanczos 直接得目标；trim 用显式 expansion + 分块/全局两级对角�
 - `_local_trim`：`jax.random.permutation` 随机分 `num_groups` 组，每组小 Lanczos
   取最低 Ritz，按 `|c|` 留每组 top-`local_keep_count`，`_merge_pools` 合并去重。
   随机分块是有意为之——廉价、无偏、保多样性；准确系数交给 global trim。
+  每块 `max_steps` 上界取 `block_dim - 1`，防止小 block 上 Lanczos 迭代超出子空间
+  维度触发零范数除法（NaN）。
 - global trim：主循环内直接用 `_DynamicLanczos`（`FIXED`），按 `|psi|` 选下轮 core。
 
 **非目标**：COO 轨道优化、PT2 微扰、多随机 run ensemble、Davidson——均为后续工作。

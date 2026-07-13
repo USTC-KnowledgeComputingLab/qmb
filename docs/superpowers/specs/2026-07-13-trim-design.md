@@ -100,6 +100,22 @@ state = {
 
 ## 6. 核心函数
 
+### 6.0 `_unique_configs` — 构型去重
+
+```python
+def _unique_configs(configs):
+    """位打包构型去重，保留首次出现顺序。
+
+    镜像 haar._merge_pools 的 4 字节对齐技巧，把 uint8 行 view 成 uint32 再 jnp.unique。
+    """
+    n_bytes = configs.shape[1]
+    padded = n_bytes if n_bytes % 4 == 0 else ((n_bytes // 4) + 1) * 4
+    work = configs if n_bytes == padded else jnp.pad(configs, ((0, 0), (0, padded - n_bytes)))
+    flat = work.reshape(work.shape[0], -1).view(jnp.uint32)
+    _, idx = jnp.unique(flat, axis=0, return_index=True)
+    return configs[jnp.sort(idx)]
+```
+
 ### 6.1 `_expand_pool` — 多跳全局扩展
 
 ```python
@@ -115,7 +131,8 @@ def _expand_pool(model, core_configs, core_psi, max_rounds, pool_core_ratio):
         new_c = model.find_topk_relative_configs(pool_configs, psi_real, count, pool_configs)
         if new_c.shape[0] == 0:
             break
-        new_pool = jnp.concatenate([pool_configs, new_c], axis=0)
+        # 去重：top-K 在小系统会返回零填充行，须去重以免 pool 混入重复/零构型
+        new_pool = _unique_configs(jnp.concatenate([pool_configs, new_c], axis=0))
         hpsi = model.apply_within_subspace(pool_configs, psi_real, new_pool)  # [|new_pool|, 2]
         pool_configs = new_pool
         pool_psi = hpsi[:, 0] + 1j * hpsi[:, 1]
@@ -125,6 +142,8 @@ def _expand_pool(model, core_configs, core_psi, max_rounds, pool_core_ratio):
 **关键**：
 - psi 传 `[batch, 2]` real/imag（与 kernel 契约一致；规避 haar `_extend` 的复数格式隐患）。
 - `find_topk_relative_configs` 的 `configs_exclude` 传 `pool_configs`，只返回新增构型。
+- 每跳用 `_unique_configs`（镜像 `haar._merge_pools` 的 4 字节对齐 + `jnp.unique` 技巧）
+  去重：`find_topk_relative_configs` 在候选不足时会返回零填充行。
 - 跳间 `apply_within_subspace(configs_i=pool_configs, psi_i=psi_real, configs_j=new_pool)`
   把振幅投影到扩大后的 pool，作为下一跳权重（真正多跳扩散）。
 
@@ -141,15 +160,18 @@ def _local_trim(model, pool_configs, pool_psi, num_groups, keep_count,
     perm = jax.random.permutation(key, n)
     groups = jnp.array_split(perm, num_groups)
 
-    survived_c, survived_p = None, None
+    survived = None
     for group_idx in groups:
         if group_idx.shape[0] == 0:
             continue
         block_c = pool_configs[group_idx]
         block_p = pool_psi[group_idx]
+        # 步数上界为 block 维度：迭代超过子空间维度会耗尽 Krylov 空间，
+        # 使 w 归零、随机注入护栏除以零范数（NaN）。小 trim block 极易触发。
+        block_steps = min(lanczos_steps, max(block_c.shape[0] - 1, 1))
         lanczos = _DynamicLanczos(
             model=model, configs=block_c, psi=block_p,
-            max_steps=lanczos_steps, stop_norm=stop_norm,
+            max_steps=block_steps, stop_norm=stop_norm,
             random_period=random_period, extend_count=0,
             strategy=KrylovBasisStrategy.FIXED, state_count=1,
         )
@@ -158,15 +180,16 @@ def _local_trim(model, pool_configs, pool_psi, num_groups, keep_count,
         k = min(keep_count, cfg.shape[0])
         top = jnp.argsort((ritz.conj() * ritz).real)[::-1][:k]
         kept_c, kept_p = cfg[top], ritz[top]
-        if survived_c is None:
-            survived_c, survived_p = kept_c, kept_p
-        else:
-            survived_c, survived_p = _merge_pools(survived_c, survived_p, kept_c, kept_p)
-    return survived_c, survived_p
+        survived = (kept_c, kept_p) if survived is None else _merge_pools(survived[0], survived[1], kept_c, kept_p)
+    assert survived is not None
+    return survived
 ```
 
-**注意**：`jnp.array_split` 用 Python 循环遍历静态 `num_groups` 个块（组数在 config 已知）。
-每块的初始向量用 pool 的对应振幅子段（有物理信息、收敛快）。
+**注意**：
+- `jnp.array_split` 用 Python 循环遍历静态 `num_groups` 个块（组数在 config 已知）。
+- 每块的初始向量用 pool 的对应振幅子段（有物理信息、收敛快）。
+- 每块 `max_steps` 上界取 `block_dim - 1`，防止小 block 上 Lanczos 迭代超出子空间维度
+  触发零范数除法（NaN）。
 
 ### 6.3 `_global_trim` — 全局 Lanczos
 
