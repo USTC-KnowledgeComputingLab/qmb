@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import jax.numpy as jnp
+import numpy as np
 
 if TYPE_CHECKING:
     from jax import Array
@@ -66,11 +67,15 @@ def prepare(
     term_count = len(create_mask_list)
 
     def _to_array(values: list[int]) -> Array:
-        arr = jnp.zeros((term_count, n_qubytes), dtype=jnp.uint8)
+        # Build into a NumPy buffer with plain Python byte extraction, then
+        # convert once. Using per-element jnp `.at[t, q].set` here would dispatch
+        # term_count * n_qubytes XLA programs (each copying the whole array),
+        # which is catastrophic for large Hamiltonians (10^5+ terms).
+        arr = np.zeros((term_count, n_qubytes), dtype=np.uint8)
         for t, val in enumerate(values):
             for q in range(n_qubytes):
-                arr = arr.at[t, q].set(jnp.uint8((val >> (q * 8)) & 0xFF))
-        return arr
+                arr[t, q] = (val >> (q * 8)) & 0xFF
+        return jnp.asarray(arr)
 
     create_mask = _to_array(create_mask_list)
     annihilate_mask = _to_array(annihilate_mask_list)

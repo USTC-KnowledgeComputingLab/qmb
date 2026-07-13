@@ -328,7 +328,7 @@ class FermiHamiltonian:
 
 ## 4. 依赖
 
-**运行时**: `jax`, `jaxlib` (>=0.5.0), `platformdirs`
+**运行时**: `jax`, `jaxlib` (>=0.5.0), `numpy`, `platformdirs`
 
 **编译 CUDA**: `nvcc` (用户机器上), `jaxlib` 的 XLA headers (`xla/ffi/api/ffi.h`)
 
@@ -336,7 +336,9 @@ class FermiHamiltonian:
 - `cuCollections`: 作为 submodule 保留、loader 仍传 `-I cuco/include`，但**当前 `.cu` 实现未使用**。四个操作均使用自定义线性探测哈希表 (inline wyhash64)，非 `cuco::static_map`。规划中若要支持超大排除集/去重可切回 cuco。
 - `wyhash`: 哈希函数, 内联到 .cu (`wyhash64` 模板), 无需编译
 
-**无**: numpy, torch, pybind11, ninja, cuCollections (运行时实际未链接)
+**无**: torch, pybind11, ninja, cuCollections (运行时实际未链接)
+
+> `numpy` 仅在 `prepare` 里作为构造位掩码数组的临时缓冲 (逐字节写入后一次性 `jnp.asarray`)，避免 per-element JAX dispatch。
 
 ## 5. 测试
 

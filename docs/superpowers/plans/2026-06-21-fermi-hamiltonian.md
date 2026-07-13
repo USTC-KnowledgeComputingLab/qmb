@@ -114,11 +114,14 @@ def prepare(
     T = len(create_mask_list)
 
     def _to_array(values: list[int]) -> Array:
-        arr = jnp.zeros((T, n_qubytes), dtype=jnp.uint8)
+        # Build into a NumPy buffer then convert once. Per-element jnp
+        # `.at[t, q].set` would dispatch T * n_qubytes XLA programs (each
+        # copying the whole array) — catastrophic for large Hamiltonians.
+        arr = np.zeros((T, n_qubytes), dtype=np.uint8)
         for t, val in enumerate(values):
             for q in range(n_qubytes):
-                arr = arr.at[t, q].set(jnp.uint8((val >> (q * 8)) & 0xFF))
-        return arr
+                arr[t, q] = (val >> (q * 8)) & 0xFF
+        return jnp.asarray(arr)
 
     create_mask = _to_array(create_mask_list)
     annihilate_mask = _to_array(annihilate_mask_list)
