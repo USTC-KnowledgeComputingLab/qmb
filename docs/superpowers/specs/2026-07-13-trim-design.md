@@ -261,7 +261,7 @@ action_config_dict["trim"] = TrimConfig
 action_class_dict["trim"] = Trim
 ```
 
-同时在 `src/qmp/algorithms/__init__.py` 触发导入（与 haar/demo 一致）。
+同时在 `src/qmp/algorithms/__init__.py` 触发导入（与 haar 一致）。
 
 ## 9. 依赖
 

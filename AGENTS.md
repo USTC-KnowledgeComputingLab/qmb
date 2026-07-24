@@ -25,7 +25,7 @@ src/qmp/                # 源码 (src layout)
 ├── hamiltonian/         # Hamiltonian 子系统
 │   └── fermi_hamiltonian/  # Fermi Hamiltonian CUDA kernel + Python wrapper
 ├── networks/            # MLP / Transformers / MPS (Flax)
-├── algorithms/          # Action registry + demo
+├── algorithms/          # Action registry (haar, trim)
 ├── models/              # FCIDUMP / Hubbard / Ising / PySCF / OpenFermion
 ├── plugins/             # 第三方框架接口
 └── utility/             # bitspack, losses, context, optimizer

@@ -15,7 +15,7 @@ from qmp.__main__ import ActionCLI, ConfigCLI, _load_yaml, main
 
 def test_config_cli_defaults() -> None:
     cfg = ConfigCLI()
-    assert cfg.action.name == "demo"
+    assert cfg.action.name == "haar"
     assert cfg.action.params == {}
 
 
@@ -47,7 +47,7 @@ def test_load_yaml_default_action() -> None:
     tmp = Path(tempfile.gettempdir()) / "test_cli_empty.yaml"
     tmp.write_text(yaml_content)
     cfg = _load_yaml(str(tmp))
-    assert cfg.action.name == "demo"
+    assert cfg.action.name == "haar"
     assert cfg.action.params == {}
 
 
@@ -57,13 +57,13 @@ def test_load_yaml_missing_action_section() -> None:
     tmp = Path(tempfile.gettempdir()) / "test_cli_no_action.yaml"
     tmp.write_text(yaml_content)
     cfg = _load_yaml(str(tmp))
-    assert cfg.action.name == "demo"
+    assert cfg.action.name == "haar"
 
 
 def test_load_yaml_some_params() -> None:
     """Partial params → only specified keys are present."""
     yaml_content = """action:
-  name: demo
+  name: haar
   params:
     message: "hello"
     nothing: else
@@ -78,8 +78,8 @@ def test_load_yaml_some_params() -> None:
 
 
 def test_main_no_config() -> None:
-    """main() with no args invokes demo action."""
-    with mock.patch("qmp.algorithms.demo.Demo.run") as mock_run:
+    """main() with no args invokes haar action (default)."""
+    with mock.patch("qmp.algorithms.haar.Haar.run") as mock_run:
         main(argv=[])
         mock_run.assert_called_once()
 
@@ -87,13 +87,13 @@ def test_main_no_config() -> None:
 def test_main_with_yaml() -> None:
     """main() with --config loads YAML and invokes action."""
     yaml_content = """action:
-  name: demo
+  name: haar
   params:
     message: "from_yaml"
 """
     tmp = Path(tempfile.gettempdir()) / "test_cli_main.yaml"
     tmp.write_text(yaml_content)
-    with mock.patch("qmp.algorithms.demo.Demo.run") as mock_run:
+    with mock.patch("qmp.algorithms.haar.Haar.run") as mock_run:
         main(argv=["--config", str(tmp)])
         mock_run.assert_called_once()
 
@@ -101,13 +101,13 @@ def test_main_with_yaml() -> None:
 def test_main_override() -> None:
     """CLI --action.params... overrides YAML."""
     yaml_content = """action:
-  name: demo
+  name: haar
   params:
     message: "from_yaml"
 """
     tmp = Path(tempfile.gettempdir()) / "test_cli_override.yaml"
     tmp.write_text(yaml_content)
-    with mock.patch("qmp.algorithms.demo.Demo.run") as mock_run:
+    with mock.patch("qmp.algorithms.haar.Haar.run") as mock_run:
         main(argv=["--config", str(tmp), "--action.params.message", "overridden"])
         mock_run.assert_called_once()
 
@@ -120,7 +120,7 @@ def test_load_yaml_interpolation() -> None:
     yaml_content = """
 base_path: /tmp
 action:
-  name: demo
+  name: haar
   params:
     model:
       name: fcidump
@@ -152,13 +152,13 @@ def test_main_importable_module_without_registration() -> None:
 def test_main_action_params_int_override() -> None:
     """CLI --action.params.sample_count=10 overrides YAML value."""
     yaml_content = """action:
-  name: demo
+  name: haar
   params:
     sample_count: 100
 """
     tmp = Path(tempfile.gettempdir()) / "test_cli_int_override.yaml"
     tmp.write_text(yaml_content)
-    with mock.patch("qmp.algorithms.demo.Demo.run") as mock_run:
+    with mock.patch("qmp.algorithms.haar.Haar.run") as mock_run:
         main(argv=["--config", str(tmp), "--action.params.sample_count", "123"])
         mock_run.assert_called_once()
 
@@ -171,11 +171,11 @@ def test_load_yaml_file_not_found() -> None:
 
 def test_load_yaml_action_without_params() -> None:
     """YAML with action.name but no params section → params defaults to {}."""
-    yaml_content = "action:\n  name: demo\n"
+    yaml_content = "action:\n  name: haar\n"
     tmp = Path(tempfile.gettempdir()) / "test_cli_no_params.yaml"
     tmp.write_text(yaml_content)
     cfg = _load_yaml(str(tmp))
-    assert cfg.action.name == "demo"
+    assert cfg.action.name == "haar"
     assert cfg.action.params == {}
 
 
@@ -183,13 +183,13 @@ def test_load_yaml_action_without_params() -> None:
 
 
 def test_main_full_dispatch_model_and_network() -> None:
-    """main() end-to-end: YAML builds hubbard model + mlp/u1 network and runs demo.
+    """main() end-to-end: YAML builds hubbard model + mlp/u1 network and runs haar.
 
     Exercises the whole chain (YAML → dacite → build_model → create_network →
     generate → apply_within_subspace) without mocking run().
     """
     yaml_content = """action:
-  name: demo
+  name: haar
   params:
     model:
       name: hubbard
@@ -197,7 +197,7 @@ def test_main_full_dispatch_model_and_network() -> None:
     network:
       name: mlp/u1
       params: {hidden_size: [16]}
-    sample_count: 32
+    krylov_max_steps: 4
 """
     tmp = Path(tempfile.gettempdir()) / "test_cli_full_dispatch.yaml"
     tmp.write_text(yaml_content)

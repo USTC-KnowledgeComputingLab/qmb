@@ -24,13 +24,13 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ActionCLI:
-    name: str = "demo"
+    name: str = "haar"
     params: dict[str, typing.Any] = field(default_factory=dict)
 
 
 @dataclass
 class ConfigCLI:
-    action: ActionCLI = field(default_factory=lambda: ActionCLI(name="demo"))
+    action: ActionCLI = field(default_factory=lambda: ActionCLI(name="haar"))
 
 
 def _load_yaml(path: str) -> ConfigCLI:

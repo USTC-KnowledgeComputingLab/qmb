@@ -25,7 +25,7 @@
 | `src/qmp/networks/_registry.py` (new) | `network_config_dict` + `network_class_dict` + 空占位 |
 | `src/qmp/networks/__init__.py` (new) | networks 包 init |
 | `src/qmp/algorithms/_registry.py` (rewrite) | `action_config_dict` + `action_class_dict` |
-| `src/qmp/algorithms/demo.py` (rewrite) | demo action 使用 SubConfigRef |
+| `src/qmp/algorithms/*.py` (rewrite) | actions (haar, trim) 使用 SubConfigRef |
 | `src/qmp/__main__.py` (rewrite) | 简化为 action dispatch |
 
 ---
@@ -230,75 +230,27 @@ git commit -m "refactor: split action_dict into action_config_dict + action_clas
 
 ---
 
-### Task 4: Rewrite demo action with SubConfigRef
+### Task 4: Verify action registry with real algorithms
 
 **Files:**
-- Rewrite: `src/qmp/algorithms/demo.py`
+- Verify existing: `src/qmp/algorithms/haar.py`, `src/qmp/algorithms/trim.py`
 
-- [ ] **Step 1: Write new demo.py**
+The demo action has been removed. Registry validation is covered by per-algorithm
+tests (``test_haar.py`` / ``test_trim.py``), each checking that ``action_config_dict``
+and ``action_class_dict`` contain the expected keys.
 
-```python
-"""Demo algorithm: print model info — a minimal algorithm for CLI testing."""
+- [x] **Step 1: Confirm algorithms registered**
 
-from __future__ import annotations
+Existing tests verify: ``action_config_dict["haar"] is HaarConfig``,
+``action_class_dict["haar"] is Haar`` (and likewise for trim).
 
-import logging
-from dataclasses import dataclass, field
+File: no new file created; demo.py deleted. Registry correctness proven by test suite.
 
-from qmp.algorithms._registry import action_class_dict, action_config_dict
-from qmp.models._model import model_config_dict, model_dict
-from qmp.networks._registry import network_class_dict, network_config_dict
-from qmp.utility._build import SubConfigRef, build_from_ref
-
-logger = logging.getLogger(__name__)
-
-
-@dataclass
-class DemoConfig:
-    """Configuration for the demo algorithm."""
-
-    model: SubConfigRef | None = None
-    network: SubConfigRef | None = None
-    message: str = "Hello from qmp-kit demo!"
-
-
-class Demo:
-    """Prints model metadata."""
-
-    def __init__(self, config: DemoConfig) -> None:
-        self._config = config
-        self._model = build_from_ref(
-            config.model, "models", config_dict=model_config_dict, impl_dict=model_dict
-        )
-        self._network = build_from_ref(
-            config.network, "networks", config_dict=network_config_dict, impl_dict=network_class_dict
-        )
-
-    def run(self) -> None:
-        logger.info("Demo algorithm starting.")
-        logger.info("Message: %s", self._config.message)
-        if self._model is not None:
-            logger.info("Model ref_energy: %s", self._model.ref_energy)
-        else:
-            logger.info("No model configured.")
-        if self._network is not None:
-            logger.info("Network available.")
-        else:
-            logger.info("No network configured.")
-        logger.info("Demo algorithm finished.")
-
-
-action_config_dict["demo"] = DemoConfig
-action_class_dict["demo"] = Demo
-```
-
-File: `src/qmp/algorithms/demo.py`
-
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
-git add src/qmp/algorithms/demo.py
-git commit -m "refactor: rewrite demo action with SubConfigRef + build_from_ref"
+git rm src/qmp/algorithms/demo.py tests/unit/algorithms/test_demo.py
+git commit -m "refactor: remove demo action; actions validated via per-algo registration tests"
 ```
 
 ---
@@ -337,13 +289,13 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ActionCLI:
-    name: str = "demo"
+    name: str = "haar"
     params: dict[str, typing.Any] = field(default_factory=dict)
 
 
 @dataclass
 class ConfigCLI:
-    action: ActionCLI = field(default_factory=lambda: ActionCLI(name="demo"))
+    action: ActionCLI = field(default_factory=lambda: ActionCLI(name="haar"))
 
 
 def _load_yaml(path: str) -> ConfigCLI:
@@ -397,7 +349,7 @@ git commit -m "refactor: simplify CLI to action-only dispatch"
 
 ```yaml
 action:
-  name: demo
+  name: haar
   params:
     message: "E2E test"
     model:
@@ -417,7 +369,7 @@ Save as `/tmp/test_config.yaml`
 uv run qmp --config /tmp/test_config.yaml
 ```
 
-Expected output: demo logs "Message: E2E test", "Model ref_energy: 0.0", "No network configured."
+Expected output: action=haar is dispatched (requires model/network to run; config-only smoke passes).
 
 - [ ] **Step 3: Run CLI with override**
 
@@ -488,6 +440,6 @@ git commit -m "docs: add algorithms AGENTS.md; update root AGENTS with CLI arch"
 
 ## Self-Review
 
-1. **Spec coverage**: All sections covered — YAML structure (Task 5), SubConfigRef (Task 1), registry (Tasks 2,3), build_from_ref (Task 1), action demo (Task 4), CLI dispatch (Task 5), AGENTS update (Task 7).
+1. **Spec coverage**: All sections covered — YAML structure (Task 5), SubConfigRef (Task 1), registry (Tasks 2,3), build_from_ref (Task 1), action registry (Task 4), CLI dispatch (Task 5), AGENTS update (Task 7).
 2. **Placeholder scan**: No TBD/TODO/placeholders. All code is explicit.
 3. **Type consistency**: `SubConfigRef`, `build_from_ref`, `action_config_dict`, `action_class_dict` are consistent across all tasks.

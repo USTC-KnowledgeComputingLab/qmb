@@ -123,8 +123,8 @@ action 调用: `network = model.create_network(ref.name, ref.params, rngs=nnx.Rn
 ## 6. Action 实现示例
 
 ```python
-class Demo:
-    def __init__(self, config: DemoConfig):
+class Haar:
+    def __init__(self, config: HaarConfig):
         self._model = build_model(config.model)
         self._network = None
         if config.network is not None and self._model is not None:
