@@ -491,8 +491,8 @@ def _local_optimize(
             psi_norm = psi_all / psi_all[batch_inner]            # [batch_full, 2]
             # Keep only valid entries, exclude max_idx itself
             valid_no_max = valid.at[batch_inner].set(False)
-            psi_valid = psi_norm[valid_no_max]                   # [take, 2]
-            target_valid = bt[valid_no_max]                      # [take]
+            psi_valid = jnp.where(valid_no_max[:, None], psi_norm, 0.0)
+            target_valid = jnp.where(valid_no_max, bt, 0.0)
             loss = loss_fn(psi_valid, target_valid)
             return loss * weight
 
