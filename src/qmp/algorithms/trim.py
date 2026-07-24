@@ -70,6 +70,7 @@ class TrimConfig:
     loss_name: str = "sum_filtered_angle_scaled_log"
     local_max_steps: int = 10000
     local_stop_loss: float = 1e-8
+    local_batch_size: int = 8192
 
     checkpoint_path: str | None = None
     checkpoint_interval: int = 1
@@ -285,6 +286,7 @@ class Trim:
                 loss_fn,
                 config.local_max_steps,
                 config.local_stop_loss,
+                local_batch_size=config.local_batch_size,
             )
             state["trim"]["local"] = step
 

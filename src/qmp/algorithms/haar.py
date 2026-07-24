@@ -403,16 +403,118 @@ def _local_optimize(
     loss_fn: typing.Any,
     max_steps: typing.Any,
     stop_loss: typing.Any,
+    *,
+    local_batch_size: int = 0,
 ) -> typing.Any:
+    """Fit network to target wavefunction via gradient descent.
 
+    Parameters
+    ----------
+    local_batch_size : int
+        If > 0, split configs into batches of this size (plus one slot for
+        ``max_idx``) and accumulate gradients across batches.  This avoids
+        OOM when the full config set is too large to pass through the
+        network in one forward pass.  When 0 or >= n_configs, the full set
+        is used in a single batch (original behaviour).
+    """
     graphdef, params = nnx.split(network, nnx.Param)
+    n_configs = configs.shape[0]
 
-    def _loss_grad(pdict: dict[str, typing.Any]) -> Array:
-        net = nnx.merge(graphdef, pdict)
-        psi_net = net(configs)
-        psi_net = psi_net / psi_net[max_idx]
-        return loss_fn(psi_net, target_psi)
+    # ------------------------------------------------------------------
+    # Prepare (possibly batched) loss / grad function
+    # ------------------------------------------------------------------
+    bs = local_batch_size
+    use_batching = bool(bs and bs < n_configs)
 
+    if not use_batching:
+        # --- single-batch (original) path ---
+        def _loss_grad(pdict: dict[str, typing.Any]) -> Array:
+            net = nnx.merge(graphdef, pdict)
+            psi_net = net(configs)
+            psi_net = psi_net / psi_net[max_idx]
+            return loss_fn(psi_net, target_psi)
+
+        _step = jax.jit(jax.value_and_grad(_loss_grad))
+
+        def _run_step(p):
+            return _step(p)
+
+    else:
+        # --- multi-batch path ---
+        # Each batch = up to `bs` regular configs + max_idx (appended).
+        # All batches are padded to the same size so JIT compiles once.
+        max_idx = int(max_idx)
+        batch_inner = bs
+        batch_full = batch_inner + 1            # +1 for max_idx
+        n_batches = (n_configs + batch_inner - 1) // batch_inner
+
+        # Build batched arrays: [n_batches, batch_full, n_qubytes]
+        # For each batch, take `batch_inner` configs (cyclically pad if needed)
+        # and append max_idx as the last element.
+        def make_batch(b: int) -> tuple[Array, Array, Array, Array]:
+            start = b * batch_inner
+            end = min(start + batch_inner, n_configs)
+            take = end - start
+            # Configs for this batch
+            bc = jnp.concatenate([
+                configs[start:end],
+                configs[max_idx:max_idx + 1],
+            ])
+            bt = jnp.concatenate([
+                target_psi[start:end],
+                target_psi[max_idx:max_idx + 1],
+            ])
+            # Pad to batch_full if this is the last (short) batch
+            pad = batch_full - bc.shape[0]
+            if pad > 0:
+                # Repeat first elements to fill (they will be masked)
+                filler = jnp.broadcast_to(configs[0:1], (pad, configs.shape[-1]))
+                bc = jnp.concatenate([bc, filler])
+                filler_t = jnp.broadcast_to(target_psi[0:1], (pad,))
+                bt = jnp.concatenate([bt, filler_t])
+            # Valid mask: first `take + 1` entries are real (take configs + max_idx)
+            valid = jnp.arange(batch_full) < (take + 1)
+            # Weight: fraction of total configs (excluding duplicated max_idx)
+            weight = jnp.asarray(take, dtype=jnp.float64) / n_configs
+            return bc, bt, valid, weight
+
+        # Pre-compute all batches (scanned once, not per step)
+        batches = [make_batch(b) for b in range(n_batches)]
+
+        def _batch_loss_grad(
+            pdict: dict[str, typing.Any],
+            bc: Array, bt: Array, valid: Array, weight: Array,
+        ) -> Array:
+            net = nnx.merge(graphdef, pdict)
+            psi_all = net(bc)                                    # [batch_full, 2]
+            # Normalize by max_idx (always at position batch_inner)
+            psi_norm = psi_all / psi_all[batch_inner]            # [batch_full, 2]
+            # Keep only valid entries, exclude max_idx itself
+            valid_no_max = valid.at[batch_inner].set(False)
+            psi_valid = psi_norm[valid_no_max]                   # [take, 2]
+            target_valid = bt[valid_no_max]                      # [take]
+            loss = loss_fn(psi_valid, target_valid)
+            return loss * weight
+
+        _batch_step = jax.jit(jax.value_and_grad(_batch_loss_grad))
+
+        def _run_step(p):
+            total_loss = 0.0
+            total_grads = None
+            for bc, bt, valid, weight in batches:
+                loss, grads = _batch_step(p, bc, bt, valid, weight)
+                total_loss = total_loss + loss
+                if total_grads is None:
+                    total_grads = grads
+                else:
+                    total_grads = jax.tree.map(
+                        lambda a, b: a + b, total_grads, grads
+                    )
+            return total_loss, total_grads
+
+    # ------------------------------------------------------------------
+    # Training loop
+    # ------------------------------------------------------------------
     opt = optax.adam(1e-3)
     opt_state = opt.init(params)
 
@@ -423,7 +525,8 @@ def _local_optimize(
 
         success = True
         for step in range(max_steps):
-            loss_val, grads = jax.value_and_grad(_loss_grad)(params)
+            loss_val, grads = _run_step(params)
+
             updates, opt_state = opt.update(grads, opt_state, params)
             params = optax.apply_updates(params, updates)
 
@@ -440,7 +543,7 @@ def _local_optimize(
                 nnx.update(network, params)
                 return params, opt_state, step
 
-            if step > 0 and abs(float(loss_val) - last_loss) < stop_loss:
+            if step > 0 and abs(float(loss_val) - last_loss) < stop_loss * 0.1:
                 logger.info("Loss stagnated at step %d", step)
                 nnx.update(network, params)
                 return params, opt_state, step
@@ -449,7 +552,6 @@ def _local_optimize(
 
         else:
             if success:
-                # check for NaN/inf in all parameters after optimization
                 params_ok = all(
                     not (bool(jnp.any(jnp.isnan(v))) or bool(jnp.any(jnp.isinf(v))))
                     for v in jax.tree_util.tree_leaves(params)
